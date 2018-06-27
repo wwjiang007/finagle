@@ -3,8 +3,8 @@
 scala_library(
     name = "stringprotocol",
     sources = [
-        "./com/twitter/finagle/client/StringClient.scala",
-        "./com/twitter/finagle/server/StringServer.scala",
+        "com/twitter/finagle/client/utils/StringClient.scala",
+        "com/twitter/finagle/server/utils/StringServer.scala",
     ],
     fatal_warnings = True,
     dependencies = [
@@ -19,9 +19,9 @@ scala_library(
 scala_library(
     name = "pushsession-utils",
     sources = [
-        "./com/twitter/finagle/exp/pushsession/DeferredExecutor.scala",
-        "./com/twitter/finagle/exp/pushsession/MockChannelHandle.scala",
-        "./com/twitter/finagle/exp/pushsession/MockPushSession.scala",
+        "com/twitter/finagle/exp/pushsession/utils/DeferredExecutor.scala",
+        "com/twitter/finagle/exp/pushsession/utils/MockChannelHandle.scala",
+        "com/twitter/finagle/exp/pushsession/utils/MockPushSession.scala",
     ],
     fatal_warnings = True,
     dependencies = [
@@ -33,9 +33,11 @@ junit_tests(
     sources = rglobs("*.scala"),
     fatal_warnings = True,
     dependencies = [
+        ":pushsession-utils",
+        ":stringprotocol",
         "3rdparty/jvm/com/github/ben-manes/caffeine",
         "3rdparty/jvm/io/netty",
-        "3rdparty/jvm/io/netty:netty4-http",
+        "3rdparty/jvm/io/netty:netty4-codec-http",
         "3rdparty/jvm/junit",
         "3rdparty/jvm/org/hdrhistogram",
         "3rdparty/jvm/org/mockito:mockito-all",

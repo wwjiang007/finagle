@@ -15,7 +15,7 @@ import org.mockito.Matchers
 import org.mockito.Matchers._
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import scala.util.Random
 
 @RunWith(classOf[JUnitRunner])
@@ -58,11 +58,12 @@ class FailureAccrualFactoryTest extends FunSuite with MockitoSugar {
     )
   }
 
-  test("default policy can be toggled to successRate with window") {
-    flag.overrides.let("com.twitter.finagle.core.UseSuccessRateFailureAccrual", 1.0) {
+  test("default policy can be toggled to hybrid with window") {
+    flag.overrides.let("com.twitter.finagle.core.UseHybridFailureAccrual", 1.0) {
+      val faf = FailureAccrualFactory.defaultPolicy.toString
       assert(
-        FailureAccrualFactory.defaultPolicy.toString
-          .contains("FailureAccrualPolicy.successRateWithinDuration")
+        faf.contains("FailureAccrualPolicy.successRateWithinDuration") &&
+          faf.contains("FailureAccrualPolicy.consecutiveFailures")
       )
     }
   }

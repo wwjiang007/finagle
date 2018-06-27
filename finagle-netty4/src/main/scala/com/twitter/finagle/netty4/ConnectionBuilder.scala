@@ -42,7 +42,7 @@ private final class ConnectionBuilder(
   params: Stack.Params
 ) {
 
-  private[this] val Stats(statsReceiver) = params[Stats]
+  private[this] val statsReceiver = params[Stats].statsReceiver
   private[this] val connectLatencyStat = statsReceiver.stat("connect_latency_ms")
   private[this] val failedConnectLatencyStat = statsReceiver.stat("failed_connect_latency_ms")
   private[this] val cancelledConnects = statsReceiver.counter("cancelled_connects")
@@ -98,13 +98,16 @@ private final class ConnectionBuilder(
     // handler that overwrites this one in the success branch of the ChannelFutureListener
     // installed below.
     transportP.setInterruptHandler {
-      case _ => nettyConnectF.cancel(true /* mayInterruptIfRunning */ )
+      case _ =>
+        // We just want best effort: we don't want to potentially interrupt a thread.
+        nettyConnectF.cancel(false /* mayInterruptIfRunning */ )
     }
 
     nettyConnectF.addListener(new ChannelFutureListener {
       def operationComplete(channelF: ChannelFuture): Unit = {
         val latency = elapsed().inMilliseconds
         if (channelF.isCancelled()) {
+          failedConnectLatencyStat.add(latency)
           cancelledConnects.incr()
           transportP.setException(
             Failure(
@@ -121,7 +124,7 @@ private final class ConnectionBuilder(
             // there is no need to retry if proxy connect failed
             case e: ProxyConnectException => e
             // the rest of failures could benefit from retries
-            case NonFatal(e) => Failure.rejected(new ConnectionFailedException(e, addr))
+            case e => Failure.rejected(new ConnectionFailedException(e, addr))
           })
         } else if (!channelF.channel.isOpen) {
           // Somehow the channel ended up closed before we got here, likely as

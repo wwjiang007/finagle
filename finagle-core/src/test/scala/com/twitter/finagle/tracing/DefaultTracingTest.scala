@@ -2,19 +2,20 @@ package com.twitter.finagle.tracing
 
 import com.twitter.conversions.time._
 import com.twitter.finagle.builder.{ClientBuilder, ServerBuilder}
-import com.twitter.finagle.client.StringClient
-import com.twitter.finagle.server.StringServer
+import com.twitter.finagle.client.utils.StringClient
+import com.twitter.finagle.server.utils.StringServer
 import com.twitter.finagle.{param => fparam, _}
 import com.twitter.util._
 import java.net.{InetAddress, InetSocketAddress}
 import org.scalatest.FunSuite
+import org.scalatest.concurrent.{Eventually, IntegrationPatience}
 
-class DefaultTracingTest extends FunSuite {
+class DefaultTracingTest extends FunSuite with Eventually with IntegrationPatience {
   object Svc extends Service[String, String] {
     def apply(str: String): Future[String] = Future.value(str)
   }
 
-  def assertAnnotationsInOrder(tracer: Seq[Record], annos: Seq[Annotation]) {
+  def assertAnnotationsInOrder(tracer: Seq[Record], annos: Seq[Annotation]): Unit = {
     assert(tracer.collect { case Record(_, _, ann, _) if annos.contains(ann) => ann } == annos)
   }
 
@@ -27,16 +28,9 @@ class DefaultTracingTest extends FunSuite {
    *          otherwise the tests here will prevent [[com.twitter.finagle.util.ExitGuard]] from exiting,
    *          and interfere with [[com.twitter.finagle.util.ExitGuardTest]]
    */
-  def testCoreTraces(f: (Tracer, Tracer) => (Service[String, String], Closable)) {
-    val combinedTracer = new BufferingTracer
-    class MultiTracer extends BufferingTracer {
-      override def record(rec: Record) {
-        super.record(rec)
-        combinedTracer.record(rec)
-      }
-    }
-    val serverTracer = new MultiTracer
-    val clientTracer = new MultiTracer
+  def testCoreTraces(f: (Tracer, Tracer) => (Service[String, String], Closable)): Unit = {
+    val serverTracer = new BufferingTracer
+    val clientTracer = new BufferingTracer
 
     val (svc, finalizer) = f(serverTracer, clientTracer)
     Await.result(svc("foo"), 1.second)
@@ -45,16 +39,27 @@ class DefaultTracingTest extends FunSuite {
     assert(clientTracer.map(_.traceId).toSet.size == 1)
 
     assertAnnotationsInOrder(
-      combinedTracer.toSeq,
+      clientTracer.toSeq,
       Seq(
         Annotation.ServiceName("theClient"),
         Annotation.ClientSend(),
-        Annotation.ServiceName("theServer"),
-        Annotation.ServerRecv(),
-        Annotation.ServerSend(),
         Annotation.ClientRecv()
       )
     )
+
+    // We need the `eventually` since the server may actually add the tracing annotation for
+    // the response after sending the response based on it being done via a `respond` block
+    // on the response `Future`, and we only await the clients response.
+    eventually {
+      assertAnnotationsInOrder(
+        serverTracer.toSeq,
+        Seq(
+          Annotation.ServiceName("theServer"),
+          Annotation.ServerRecv(),
+          Annotation.ServerSend()
+        )
+      )
+    }
 
     // need to call finalizer to properly close the client and the server
     Await.ready(finalizer.close(), 1.second)

@@ -1,6 +1,6 @@
 package com.twitter.finagle.http2.transport
 
-import com.twitter.finagle.http2.transport.Http2ClientDowngrader.{GoAway, Message, Ping, Rst}
+import com.twitter.finagle.http2.transport.Http2ClientDowngrader.{GoAway, Message, Ping, Rst, StreamException}
 import com.twitter.logging.Logger
 import io.netty.buffer.Unpooled
 import io.netty.channel.{ChannelHandlerContext, ChannelPromise}
@@ -128,9 +128,22 @@ private[http2] class RichHttpToHttp2ConnectionHandler(
     }
   }
 
-  override def handlerAdded(ctx: ChannelHandlerContext) {
+  override def handlerAdded(ctx: ChannelHandlerContext): Unit = {
     super.handlerAdded(ctx)
     onActive()
   }
 
+  override def onStreamError(
+    ctx: ChannelHandlerContext,
+    cause: Throwable,
+    http2Ex: Http2Exception.StreamException
+  ): Unit = {
+    http2Ex match {
+      case ex: HeaderListSizeException if ex.duringDecode =>
+        ctx.fireChannelRead(StreamException(ex, ex.streamId))
+      case _ => // nop
+    }
+
+    super.onStreamError(ctx, cause, http2Ex)
+  }
 }

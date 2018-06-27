@@ -6,7 +6,7 @@ import com.twitter.finagle.context.RemoteInfo.Upstream
 import com.twitter.finagle.mux.{OpportunisticTlsParams, Request, Response}
 import com.twitter.finagle.mux.exp.pushsession.MuxPush
 import com.twitter.finagle.mux.lease.exp.Lessor
-import com.twitter.finagle.mux.transport.{MuxContext, OpportunisticTls}
+import com.twitter.finagle.mux.transport.{MuxContext, OpportunisticTls, MuxFailure}
 import com.twitter.finagle.param.{ExceptionStatsHandler => _, Monitor => _, ResponseClassifier => _, Tracer => _, _}
 import com.twitter.finagle.server.{Listener, ServerInfo, StackBasedServer, StackServer, StdStackServer}
 import com.twitter.finagle.service._
@@ -34,7 +34,7 @@ import org.apache.thrift.TException
  * [[com.twitter.finagle.mux]]. Rich interfaces are provided to adhere to those
  * generated from a [[https://thrift.apache.org/docs/idl Thrift IDL]] by
  * [[https://twitter.github.io/scrooge/ Scrooge]] or
- * [[https://github.com/mariusaeriksen/thrift-0.5.0-finagle thrift-finagle]].
+ * [[https://github.com/mariusaeriksen/thrift-finagle thrift-finagle]].
  *
  * == Clients ==
  *
@@ -120,12 +120,7 @@ object ThriftMux
    */
   val BaseServerParams: Stack.Params = Mux.Server.params + ProtocolLibrary("thriftmux")
 
-  object Client {
-
-    private[finagle] val UsePushMuxClientToggleName =
-      "com.twitter.finagle.thriftmux.UsePushMuxClient"
-    private[this] val usePushMuxToggle = Toggles(UsePushMuxClientToggleName)
-    private[this] def UsePushMuxClient: Boolean = usePushMuxToggle(ServerInfo().id.hashCode)
+  object Client extends ThriftClient {
 
     def apply(): Client =
       new Client()
@@ -141,9 +136,6 @@ object ThriftMux
       Mux.client
         .copy(stack = BaseClientStack)
         .configured(ProtocolLibrary("thriftmux"))
-
-    private def defaultMuxer: StackClient[mux.Request, mux.Response] =
-      if (UsePushMuxClient) pushMuxer else standardMuxer
   }
 
   /**
@@ -153,7 +145,7 @@ object ThriftMux
    * @see [[https://twitter.github.io/finagle/guide/Protocols.html#thrift Thrift]] documentation
    * @see [[https://twitter.github.io/finagle/guide/Protocols.html#mux Mux]] documentation
    */
-  case class Client(muxer: StackClient[mux.Request, mux.Response] = Client.defaultMuxer)
+  case class Client(muxer: StackClient[mux.Request, mux.Response] = Client.pushMuxer)
     extends StackBasedClient[ThriftClientRequest, Array[Byte]]
       with Stack.Parameterized[Client]
       with Stack.Transformable[Client]
@@ -178,7 +170,8 @@ object ThriftMux
       protocolFactory = params[Thrift.param.ProtocolFactory].protocolFactory,
       maxThriftBufferSize = params[Thrift.param.MaxReusableBufferSize].maxReusableBufferSize,
       clientStats = params[Stats].statsReceiver,
-      responseClassifier = params[com.twitter.finagle.param.ResponseClassifier].responseClassifier
+      responseClassifier = params[com.twitter.finagle.param.ResponseClassifier].responseClassifier,
+      perEndpointStats = params[Thrift.param.PerEndpointStats].enabled
     )
 
     @deprecated("Use clientParam.protocolFactory", "2017-08-16")
@@ -235,6 +228,12 @@ object ThriftMux
      */
     def withMaxReusableBufferSize(size: Int): Client =
       configured(Thrift.param.MaxReusableBufferSize(size))
+
+    /**
+     * Produce a [[com.twitter.finagle.ThriftMux.Client]] with per-endpoint stats filters
+     */
+    def withPerEndpointStats: Client =
+      configured(Thrift.param.PerEndpointStats(true))
 
     private[this] def clientId: Option[ClientId] = params[Thrift.param.ClientId].clientId
 
@@ -494,7 +493,8 @@ object ThriftMux
       }
 
     // Convert unhandled exceptions to TApplicationExceptions, but pass
-    // com.twitter.finagle.FailureFlags to mux for transmission.
+    // com.twitter.finagle.FailureFlags that are flagged in mux-compatible ways
+    // to mux for transmission.
     private[this] class ExnFilter(protocolFactory: TProtocolFactory)
       extends SimpleFilter[mux.Request, mux.Response] {
       def apply(
@@ -502,7 +502,7 @@ object ThriftMux
         service: Service[mux.Request, mux.Response]
       ): Future[mux.Response] =
         service(request).rescue {
-          case f: FailureFlags[_] => Future.exception(f)
+          case f: FailureFlags[_] if MuxFailure.FromThrow.isDefinedAt(f) => Future.exception(f)
           case e if !e.isInstanceOf[TException] =>
             val msg =
               UncaughtAppExceptionFilter.writeExceptionMessage(request.body, e, protocolFactory)
@@ -551,7 +551,8 @@ object ThriftMux
       protocolFactory = params[Thrift.param.ProtocolFactory].protocolFactory,
       serviceName = params[Label].label,
       maxThriftBufferSize = params[Thrift.param.MaxReusableBufferSize].maxReusableBufferSize,
-      serverStats = params[Stats].statsReceiver
+      serverStats = params[Stats].statsReceiver,
+      perEndpointStats = params[Thrift.param.PerEndpointStats].enabled
     )
 
     @deprecated("Use serverParam.serviceName", "2017-08-16")
@@ -569,7 +570,7 @@ object ThriftMux
     override protected def maxThriftBufferSize: Int = serverParam.maxThriftBufferSize
 
     /**
-     * Produce a `com.twitter.finagle.Thrift.Server` using the provided
+     * Produce a [[com.twitter.finagle.ThriftMux.Server]] using the provided
      * `TProtocolFactory`.
      */
     def withProtocolFactory(pf: TProtocolFactory): Server =
@@ -603,6 +604,12 @@ object ThriftMux
      */
     def withMaxReusableBufferSize(size: Int): Server =
       configured(Thrift.param.MaxReusableBufferSize(size))
+
+    /**
+     * Produce a [[com.twitter.finagle.ThriftMux.Server]] with per-endpoint stats filters
+     */
+    def withPerEndpointStats: Server =
+      configured(Thrift.param.PerEndpointStats(true))
 
     def withParams(ps: Stack.Params): Server =
       copy(muxer = muxer.withParams(ps))

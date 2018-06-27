@@ -299,6 +299,17 @@ using `.withHttpStats` on `Http.Client` and `Http.Server`.
 **stream/failures**
   A counter of the number of times any failure has been observed in the middle of a stream.
 
+**http/cookie/samesite_failures** `verbosity:debug`
+  A counter of the number of failed attempts to decode the SameSite Cookie attribute.
+
+**http/cookie/flagless_samesites** `verbosity:debug`
+  A counter of the number of times the SameSite attribute was set in a Response despite the
+  SameSiteCodec being disabled.
+
+**http/cookie/dropped_samesites** `verbosity:debug`
+  A counter of the number of times the SameSite attribute was present in a Response Cookie
+  but dropped after encoding.
+
 HTTP2
 -----
 These stats pertain to HTTP2 only.
@@ -333,3 +344,8 @@ These stats pertain to the :ref:`ThriftMux <whats_thriftmux>` protocol.
 .. include:: metrics/ThriftMux.rst
 
 .. _verbosity levels: https://twitter.github.io/util/guide/util-stats/basics.html#verbosity-levels
+
+
+PerEndpoint StatsFilter
+-----------------------
+.. include:: metrics/PerEndpoint.rst

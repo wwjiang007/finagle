@@ -40,19 +40,109 @@ object Client {
       case _ => false
     }
   }
+
+  private val ResultToResultSet: Result => Future[ResultSet] = {
+    case rs: ResultSet => Future.value(rs)
+    case r => Future.exception(
+      new IllegalStateException(s"Unsupported response to a read='$r'"))
+  }
+
+  private val ResultToOK: Result => Future[OK] = {
+    case ok: OK => Future.value(ok)
+    case r => Future.exception(
+      new IllegalStateException(s"Unsupported response to a modify='$r'"))
+  }
 }
 
+/**
+ * A MySQL client that is not `Service`-based like [[com.twitter.finagle.Mysql.Client]] is,
+ * making it easier to use for most cases.
+ *
+ * @example Creation:
+ * {{{
+ * import com.twitter.finagle.Mysql
+ * import com.twitter.finagle.mysql.Client
+ *
+ * val client: Client = Mysql.client
+ *   .withCredentials("username", "password")
+ *   .withDatabase("database")
+ *   .newRichClient("host:port")
+ * }}}
+ */
 trait Client extends Closable {
 
   /**
    * Returns the result of executing the `sql` query on the server.
+   *
+   * '''Note:''' this is a lower-level API. For SELECT queries, prefer using
+   * [[select]] or [[read]], and use [[modify]] for DML (INSERT/UPDATE/DELETE)
+   * and DDL.
+   *
+   * @return a [[Result]] `Future`. A successful SELECT query will satisfy the
+   *         `Future` with a [[ResultSet]] while DML and DDL will be an [[OK]].
+   *         If there is a server error the `Future` will be failed with a [[ServerError]]
+   *         exception, '''not''' an [[Error]] from the [[Result]] ADT.
    */
   def query(sql: String): Future[Result]
+
+  /**
+   * Executes the given SELECT query given by `sql`.
+   *
+   * @example
+   * {{{
+   * import com.twitter.finagle.mysql.{Client, ResultSet}
+   * import com.twitter.util.Future
+   *
+   * val client: Client = ???
+   * val resultSet: Future[ResultSet] =
+   *   client.read("SELECT name FROM employee")
+   * }}}
+   *
+   * @see [[select]]
+   * @see [[PreparedStatement.read]]
+   */
+  def read(sql: String): Future[ResultSet] =
+    query(sql).flatMap(Client.ResultToResultSet)
+
+  /**
+   * Executes the given DML (e.g. INSERT/UPDATE/DELETE) or DDL
+   * (e.g. CREATE TABLE, DROP TABLE, COMMIT, START TRANSACTION, etc)
+   * given by `sql`.
+   *
+   * @example
+   * {{{
+   * import com.twitter.finagle.mysql.{Client, OK}
+   * import com.twitter.util.Future
+   *
+   * val client: Client = ???
+   * val result: Future[OK] =
+   *   client.modify("INSERT INTO employee (name) VALUES ('Alice')")
+   * }}}
+   *
+   * @see [[PreparedStatement.modify]]
+   */
+  def modify(sql: String): Future[OK] =
+    query(sql).flatMap(Client.ResultToOK)
 
   /**
    * Sends the given `sql` to the server and maps each resulting row to
    * `f`, a function from Row => T. If no ResultSet is returned, the function
    * returns an empty Seq.
+   *
+   * @example
+   * {{{
+   * import com.twitter.finagle.mysql.Client
+   * import com.twitter.util.Future
+   *
+   * val client: Client = ???
+   * val names: Future[Seq[String]] =
+   *   client.select("SELECT name FROM employee") { row =>
+   *     row.stringOrNull("name")
+   *   }
+   * }}}
+   *
+   * @see [[read]]
+   * @see [[PreparedStatement.select]]
    */
   def select[T](sql: String)(f: Row => T): Future[Seq[T]]
 
@@ -75,14 +165,14 @@ trait Client extends Closable {
    *
    * @note The cursored statements are built on a prepare -> execute -> fetch flow
    * that requires state tracking. It is important to either fully consume the resulting
-   * stream, or explicitly call `close()`
+   * stream, or explicitly call [[CursorResult.close()]].
    */
   def cursor(sql: String): CursoredStatement
 
   /**
    * Returns the result of pinging the server.
    */
-  def ping(): Future[Result]
+  def ping(): Future[Unit]
 }
 
 trait Transactions {
@@ -163,7 +253,9 @@ private class StdClient(
   private[this] val cursorStats = new CursorStats(statsReceiver)
 
   def query(sql: String): Future[Result] = service(QueryRequest(sql))
-  def ping(): Future[Result] = service(PingRequest)
+
+  def ping(): Future[Unit] =
+    service(PingRequest).unit
 
   def select[T](sql: String)(f: Row => T): Future[Seq[T]] =
     query(sql).map {
@@ -175,7 +267,7 @@ private class StdClient(
     def apply(ps: Parameter*): Future[Result] = factory().flatMap { svc =>
       svc(PrepareRequest(sql)).flatMap {
         case ok: PrepareOK => svc(ExecuteRequest(ok.id, ps.toIndexedSeq))
-        case r => Future.exception(new Exception(s"Unexpected result $r when preparing $sql"))
+        case r => Future.exception(new IllegalStateException(s"Unexpected result $r when preparing $sql"))
       }.ensure {
         svc.close()
       }
@@ -253,7 +345,9 @@ private class StdClient(
         // would simply fail with the same exception.
         closeWith(e)
       case Throw(e) =>
-        client.query(rollbackQuery).transform {
+        // the rollback is `masked` in order to protect it from prior interrupts/raises.
+        // this statement should run regardless.
+        client.query(rollbackQuery).masked.transform {
           case Return(_) =>
             closeWith(e)
           case Throw(e @ WrappedChannelClosedException()) =>

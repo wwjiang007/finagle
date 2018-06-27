@@ -1,11 +1,12 @@
 package com.twitter.finagle.memcached.unit.partitioning
 
 import com.twitter.conversions.time._
-import com.twitter.finagle.client.{StackClient, StringClient}
+import com.twitter.finagle.client.StackClient
+import com.twitter.finagle.client.utils.StringClient
 import com.twitter.finagle.liveness.FailureAccrualFactory
 import com.twitter.finagle.naming.BindingFactory
 import com.twitter.finagle.param.Stats
-import com.twitter.finagle.server.StringServer
+import com.twitter.finagle.server.utils.StringServer
 import com.twitter.finagle.stats.StatsReceiver
 import com.twitter.finagle.util.DefaultTimer
 import com.twitter.finagle.{Address, _}
@@ -24,11 +25,13 @@ trait PartitioningServiceTestBase extends FunSuite with BeforeAndAfterEach with 
   protected[this] var servers: Seq[(ListeningServer, InetSocketAddress, Int, Int)] = _
   protected[this] var client: Service[String, String] = _
   protected[this] var timer: MockTimer = _
+  protected[this] var serverLatchOpt: Option[CountDownLatch] = _
 
   override def beforeEach(): Unit = {
     failingHosts.clear()
     slowHosts.clear()
     timer = new MockTimer
+    serverLatchOpt = None
   }
 
   override def afterEach(): Unit = {
@@ -50,7 +53,7 @@ trait PartitioningServiceTestBase extends FunSuite with BeforeAndAfterEach with 
           Future.exception(new RuntimeException(s"$servername failed!"))
         } else if (slowHosts.contains(servername)) {
           Future
-            .sleep(5.seconds)(DefaultTimer)
+            .sleep(12.seconds)(DefaultTimer)
             .before(
               Future.value(s"Response from $servername: after sleep")
             )
@@ -59,8 +62,13 @@ trait PartitioningServiceTestBase extends FunSuite with BeforeAndAfterEach with 
           // assert that the request landed on the correct host. Also take care of multiple
           // request strings (batched request) that are delimited by RequestDelimiter
           val requests = req.split(RequestDelimiter)
-          val responses = requests.map(_ + EchoDelimiter + servername) // $port:$hostname
-          Future.value(responses.mkString(ResponseDelimiter))
+          val response = requests.map(_ + EchoDelimiter + servername) // $port:$hostname
+          Future.value(response.mkString(ResponseDelimiter))
+        } ensure {
+          serverLatchOpt match {
+            case Some(latch) => latch.countDown()
+            case None =>
+          }
         }
       }
     )

@@ -30,7 +30,7 @@ import org.apache.thrift.protocol.TProtocolFactory
  * `Client[ThriftClientRequest, Array[Byte]]` provides direct access
  * to the thrift transport, but we recommend using code generation
  * through either [[https://github.com/twitter/scrooge Scrooge]] or
- * [[https://github.com/mariusaeriksen/thrift-0.5.0-finagle a fork]]
+ * [[https://github.com/mariusaeriksen/thrift-finagle a fork]]
  * of the Apache generator. A rich API is provided to support
  * interfaces generated with either of these code generators.
  *
@@ -180,9 +180,20 @@ object Thrift
     implicit object MaxReusableBufferSize extends Stack.Param[MaxReusableBufferSize] {
       val default = MaxReusableBufferSize(maxThriftBufferSize)
     }
+
+    /**
+     * A `Param` to control whether to record per-endpoint stats.
+     * If this is set to true, per-endpoint stats will be counted.
+     *
+     * @param enabled Whether to count per-endpoint stats
+     */
+    case class PerEndpointStats(enabled: Boolean)
+    implicit object PerEndpointStats extends Stack.Param[PerEndpointStats] {
+      val default = PerEndpointStats(false)
+    }
   }
 
-  object Client {
+  object Client extends ThriftClient {
     private val preparer: Stackable[ServiceFactory[ThriftClientRequest, Array[Byte]]] =
       new Stack.ModuleParams[ServiceFactory[ThriftClientRequest, Array[Byte]]] {
         override def parameters: Seq[Stack.Param[_]] = Nil
@@ -233,7 +244,8 @@ object Thrift
       protocolFactory = params[param.ProtocolFactory].protocolFactory,
       maxThriftBufferSize = params[param.MaxReusableBufferSize].maxReusableBufferSize,
       clientStats = params[Stats].statsReceiver,
-      responseClassifier = params[com.twitter.finagle.param.ResponseClassifier].responseClassifier
+      responseClassifier = params[com.twitter.finagle.param.ResponseClassifier].responseClassifier,
+      perEndpointStats = params[Thrift.param.PerEndpointStats].enabled
     )
 
     protected lazy val Label(defaultClientName) = params[Label]
@@ -289,6 +301,12 @@ object Thrift
      */
     def withMaxReusableBufferSize(size: Int): Client =
       configured(param.MaxReusableBufferSize(size))
+
+    /**
+     * Produce a [[com.twitter.finagle.Thrift.Client]] with per-endpoint stats filters
+     */
+    def withPerEndpointStats: Client =
+      configured(param.PerEndpointStats(true))
 
     def clientId: Option[thrift.ClientId] = params[Thrift.param.ClientId].clientId
 
@@ -429,7 +447,8 @@ object Thrift
       protocolFactory = params[Thrift.param.ProtocolFactory].protocolFactory,
       maxThriftBufferSize = params[Thrift.param.MaxReusableBufferSize].maxReusableBufferSize,
       serverStats = params[Stats].statsReceiver,
-      responseClassifier = params[com.twitter.finagle.param.ResponseClassifier].responseClassifier
+      responseClassifier = params[com.twitter.finagle.param.ResponseClassifier].responseClassifier,
+      perEndpointStats = params[Thrift.param.PerEndpointStats].enabled
     )
 
     @deprecated("Use serverParam.serviceName", "2017-08-16")
@@ -468,6 +487,12 @@ object Thrift
      */
     def withMaxReusableBufferSize(size: Int): Server =
       configured(param.MaxReusableBufferSize(size))
+
+    /**
+     * Produce a [[com.twitter.finagle.Thrift.Server]] with per-endpoint stats filters
+     */
+    def withPerEndpointStats: Server =
+      configured(param.PerEndpointStats(true))
 
     // Java-friendly forwarders
     // See https://issues.scala-lang.org/browse/SI-8905

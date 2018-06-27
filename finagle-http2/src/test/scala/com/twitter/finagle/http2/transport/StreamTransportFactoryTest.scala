@@ -2,7 +2,8 @@ package com.twitter.finagle.http2.transport
 
 import com.twitter.concurrent.AsyncQueue
 import com.twitter.conversions.time._
-import com.twitter.finagle.http2.SerialExecutor
+import com.twitter.finagle.http.TooLongMessageException
+import com.twitter.finagle.http2.{GoAwayException, SerialExecutor}
 import com.twitter.finagle.http2.transport.Http2ClientDowngrader._
 import com.twitter.finagle.http2.transport.StreamTransportFactory._
 import com.twitter.finagle.liveness.FailureDetector
@@ -12,6 +13,7 @@ import com.twitter.finagle.{FailureFlags, Stack, Status, StreamClosedException}
 import com.twitter.util.{Await, Awaitable, Future, TimeoutException}
 import io.netty.buffer._
 import io.netty.handler.codec.http._
+import io.netty.handler.codec.http2.Http2Exception.{HeaderListSizeException, headerListSizeError}
 import io.netty.handler.codec.http2.Http2Error
 import java.net.SocketAddress
 import java.nio.charset.StandardCharsets
@@ -123,6 +125,34 @@ class StreamTransportFactoryTest extends FunSuite {
     assert(streamFac.numActiveStreams == 0)
   }
 
+  test("StreamTransportFactory dies if it runs out of stream IDs") {
+    val (writeq, readq) = (new AsyncQueue[StreamMessage](), new AsyncQueue[StreamMessage]())
+    val transport = new SlowClosingQueue(writeq, readq).asInstanceOf[Transport[StreamMessage, StreamMessage] {
+      type Context = TransportContext with HasExecutor
+    }]
+    val addr = new SocketAddress {}
+    val streamFac = new StreamTransportFactory(transport, addr, Stack.Params.empty)
+    streamFac.setStreamId(2147483647)
+
+    val s1, s2 = await(streamFac())
+
+    s1.write(H1Req)
+    s2.write(H1Req)
+
+    assert(s2.onClose.isDefined)
+    val exn = intercept[StreamIdOverflowException] {
+      throw await(s2.onClose)
+    }
+
+    intercept[DeadConnectionException] {
+      await(streamFac())
+    }
+    assert(exn.flags == FailureFlags.Retryable)
+    assert(streamFac.numActiveStreams == 1)
+    assert(streamFac.status == Status.Closed)
+  }
+
+
   test("StreamTransportFactory forbids new streams on GOAWAY") {
     val (writeq, readq) = (new AsyncQueue[StreamMessage](), new AsyncQueue[StreamMessage]())
     val transport = new SlowClosingQueue(writeq, readq).asInstanceOf[Transport[StreamMessage, StreamMessage] {
@@ -140,7 +170,7 @@ class StreamTransportFactoryTest extends FunSuite {
     assert(streamFac.numActiveStreams == 0)
   }
 
-  test("StreamTransportFactoryer respects last stream ID on GOAWAY & closes streams") {
+  test("StreamTransportFactory respects last stream ID on GOAWAY & closes streams") {
     val (writeq, readq) = (new AsyncQueue[StreamMessage](), new AsyncQueue[StreamMessage]())
     val transport = new SlowClosingQueue(writeq, readq).asInstanceOf[Transport[StreamMessage, StreamMessage] {
       type Context = TransportContext with HasExecutor
@@ -180,7 +210,7 @@ class StreamTransportFactoryTest extends FunSuite {
     assert(streamFac.numActiveStreams == 0)
   }
 
-  test("StreamTransportFactoryer reflects detector status") {
+  test("StreamTransportFactory reflects detector status") {
     val (writeq, readq) = (new AsyncQueue[StreamMessage](), new AsyncQueue[StreamMessage]())
     val transport = new SlowClosingQueue(writeq, readq).asInstanceOf[Transport[StreamMessage, StreamMessage] {
       type Context = TransportContext with HasExecutor
@@ -198,7 +228,7 @@ class StreamTransportFactoryTest extends FunSuite {
     assert(streamFac.numActiveStreams == 0)
   }
 
-  test("StreamTransportFactoryer call to first() provides stream with streamId == 1") {
+  test("StreamTransportFactory call to first() provides stream with streamId == 1") {
     val (writeq, readq) = (new AsyncQueue[StreamMessage](), new AsyncQueue[StreamMessage]())
     val transport = new SlowClosingQueue(writeq, readq).asInstanceOf[Transport[StreamMessage, StreamMessage] {
       type Context = TransportContext with HasExecutor
@@ -208,7 +238,7 @@ class StreamTransportFactoryTest extends FunSuite {
     assert(streamFac.first().asInstanceOf[streamFac.StreamTransport].curId == 1)
   }
 
-  test("StreamTransportFactoryer streams increment stream ID only on write") {
+  test("StreamTransportFactory streams increment stream ID only on write") {
     val (writeq, readq) = (new AsyncQueue[StreamMessage](), new AsyncQueue[StreamMessage]())
     val transport = new SlowClosingQueue(writeq, readq).asInstanceOf[Transport[StreamMessage, StreamMessage] {
       type Context = TransportContext with HasExecutor
@@ -379,6 +409,33 @@ class StreamTransportFactoryTest extends FunSuite {
     }
   }
 
+  test("reading a StreamException fails that stream") {
+    val (writeq, readq) = (new AsyncQueue[StreamMessage](), new AsyncQueue[StreamMessage]())
+    val transport = new SlowClosingQueue(writeq, readq).asInstanceOf[Transport[StreamMessage, StreamMessage] {
+      type Context = TransportContext with HasExecutor
+    }]
+
+    val error = Http2Error.PROTOCOL_ERROR
+    val hlsExn = headerListSizeError(3, error, true /* onDecode */, "too big") match {
+      case e: HeaderListSizeException => e
+      case _ => fail
+    }
+
+    val exn = StreamException(hlsExn, 3)
+
+    val addr = new SocketAddress {}
+    val streamFac = new StreamTransportFactory(transport, addr, Stack.Params.empty)
+    streamFac.setStreamId(3)
+
+    val stream = await(streamFac())
+    stream.write(H1Req)
+    readq.offer(exn)
+    val f = stream.read()
+    intercept[TooLongMessageException] {
+      await(f)
+    }
+  }
+
   test("stream transports enter Dead state if the StreamTransportFactory loses track of them") {
     val (writeq, readq) = (new AsyncQueue[StreamMessage](), new AsyncQueue[StreamMessage]())
     val transport = new SlowClosingQueue(writeq, readq).asInstanceOf[Transport[StreamMessage, StreamMessage] {
@@ -395,5 +452,60 @@ class StreamTransportFactoryTest extends FunSuite {
     streamFac.removeStream(1)
     ready(stream.read())
     assert(stream.state == Dead)
+  }
+
+  def isFlagged(rstCode: Long, finagleFlag: Long): Boolean = {
+    val (writeq, readq) = (new AsyncQueue[StreamMessage](), new AsyncQueue[StreamMessage]())
+    val transport = new SlowClosingQueue(writeq, readq).asInstanceOf[Transport[StreamMessage, StreamMessage] {
+    type Context = TransportContext with HasExecutor
+  }]
+
+    val noFD = FailureDetector.Param(FailureDetector.NullConfig)
+    val streamFac = new StreamTransportFactory(transport, new SocketAddress {}, Stack.Params.empty + noFD)
+    val stream= await(streamFac())
+
+    stream.write(H1Req)
+    val streamFut = stream.read()
+
+    readq.offer(Rst(1, rstCode))
+
+    val result = intercept[Exception](await(streamFut))
+    FailureFlags.isFlagged(finagleFlag)(result)
+  }
+
+  val retryableResetCodes =
+    Http2Error.values.map(_ -> false).toMap[Http2Error, Boolean].updated(Http2Error.REFUSED_STREAM, true)
+
+  retryableResetCodes.foreach { case (error, retryable) =>
+    if (retryable) test(s"streams are retryable on RST(${error.toString})") { assert(isFlagged(error.code, FailureFlags.Retryable)) }
+    else test(s"streams are NOT retryable on RST(${error.toString})")  { assert(!isFlagged(error.code, FailureFlags.Retryable)) }
+  }
+
+  test("unprocessed streams are retryable on all goaways") {
+    val (writeq, readq) = (new AsyncQueue[StreamMessage](), new AsyncQueue[StreamMessage]())
+    val transport = new SlowClosingQueue(writeq, readq).asInstanceOf[Transport[StreamMessage, StreamMessage] {
+      type Context = TransportContext with HasExecutor
+    }]
+
+    val noFD = FailureDetector.Param(FailureDetector.NullConfig)
+    val streamFac = new StreamTransportFactory(transport, new SocketAddress {}, Stack.Params.empty + noFD)
+    val a, b, c, d = await(streamFac())
+
+    a.write(H1Req); b.write(H1Req); c.write(H1Req); d.write(H1Req)
+    val (aFut, bFut, cFut, dFut) = (a.read(), b.read(), c.read(), d.read())
+
+    // we know that the active streams are numbered 1, 3, 5, 7 so we pick a goaway value to fail half
+    // of the streams.
+    readq.offer(GoAway(null, 4, 0))
+
+    // these streams are actively being processed so the StreamTransportFactory doesn't fail them
+    assert(!aFut.isDefined)
+    assert(!bFut.isDefined)
+
+
+    // c + d haven't been processed so they should be retryable on another connection
+    val restartable = List(cFut, dFut).map(f => intercept[GoAwayException](await(f)))
+
+    assert(restartable.forall(FailureFlags.isFlagged(FailureFlags.Retryable)(_)))
   }
 }

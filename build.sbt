@@ -2,9 +2,9 @@ import Tests._
 import scoverage.ScoverageKeys
 
 // All Twitter library releases are date versioned as YY.MM.patch
-val releaseVersion = "18.4.0-SNAPSHOT"
+val releaseVersion = "18.7.0-SNAPSHOT"
 
-val libthriftVersion = "0.5.0-7"
+val libthriftVersion = "0.10.0"
 
 val netty4Version = "4.1.16.Final"
 
@@ -41,7 +41,7 @@ val jacksonLibs = Seq(
   "com.fasterxml.jackson.module" %% "jackson-module-scala" % jacksonVersion exclude("com.google.guava", "guava")
 )
 val thriftLibs = Seq(
-  "com.twitter" % "libthrift" % libthriftVersion intransitive()
+  "org.apache.thrift" % "libthrift" % libthriftVersion intransitive()
 )
 val scroogeLibs = thriftLibs ++ Seq(
   "com.twitter" %% "scrooge-core" % releaseVersion)
@@ -137,7 +137,7 @@ val sharedSettings = Seq(
   // Prevent eviction warnings
   dependencyOverrides ++= (scalaVersion { vsn =>
     Seq(
-      "com.twitter" % "libthrift" % libthriftVersion
+      "org.apache.thrift" % "libthrift" % libthriftVersion
     )
   }).value,
 
@@ -196,7 +196,8 @@ lazy val projectList = Seq[sbt.ProjectReference](
   finagleThriftMux,
   finagleMySQL,
   finagleRedis,
-  finagleNetty4Http
+  finagleNetty4Http,
+  finagleHttpCookie
 )
 
 lazy val finagle = Project(
@@ -236,7 +237,7 @@ lazy val finagleIntegration = Project(
   finagleCore % "compile->compile;test->test",
   finagleHttp,
   finagleHttp2,
-  finagleMySQL,
+  finagleMySQL % "test->compile;test->test",
   finagleMemcached,
   finagleMux,
   finagleNetty4Http,
@@ -469,7 +470,7 @@ lazy val finagleBaseHttp = Project(
     util("logging"),
     netty4Http
   ) ++ netty4Libs
-).dependsOn(finagleCore, finagleNetty3, finagleToggle)
+).dependsOn(finagleCore, finagleNetty3, finagleToggle, finagleHttpCookie)
 
 lazy val finagleNetty4Http = Project(
   id = "finagle-netty4-http",
@@ -525,7 +526,7 @@ lazy val finagleMemcached = Project(
     util("hashing"),
     util("zk-test") % "test",
     "com.twitter" %% "bijection-core" % "0.9.4",
-    "com.twitter" % "libthrift" % libthriftVersion
+    "org.apache.thrift" % "libthrift" % libthriftVersion
   ),
   libraryDependencies ++= jacksonLibs
 ).dependsOn(
@@ -570,7 +571,6 @@ lazy val finagleMux = Project(
     util("stats"))
 ).dependsOn(
   finagleCore % "compile->compile;test->test",
-  finagleExp,
   finagleNetty4,
   finagleToggle)
 
@@ -663,11 +663,24 @@ lazy val finagleBenchmark = Project(
   finagleHttp,
   finagleMemcached,
   finagleMux,
+  finagleMySQL,
   finagleNetty4,
   finagleStats,
   finagleThriftMux,
   finagleZipkinScribe
 ).aggregate(finagleBenchmarkThrift)
+
+lazy val finagleHttpCookie = Project(
+  id = "finagle-http-cookie",
+  base = file("finagle-http-cookie")
+).settings(
+  sharedSettings
+).settings(
+  name := "finagle-http-cookie",
+  libraryDependencies ++= Seq(
+    netty3Lib
+  )
+)
 
 lazy val finagleDoc = Project(
   id = "finagle-doc",

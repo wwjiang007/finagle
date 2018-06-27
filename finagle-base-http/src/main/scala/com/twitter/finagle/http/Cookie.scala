@@ -1,6 +1,7 @@
 package com.twitter.finagle.http
 
 import com.twitter.conversions.time._
+import com.twitter.finagle.http.cookie.SameSite
 import com.twitter.util.Duration
 import java.util.{BitSet => JBitSet}
 import org.jboss.netty.handler.codec.http.{Cookie => NettyCookie}
@@ -69,23 +70,19 @@ object Cookie {
   }
 }
 
-// A small amount of naming hopscotch is needed while we deprecate the `set` methods in preparation
-// for removal; the param names can't conflict with the `get` method names, hence the underscored
-// param names.
-//
-// `_forDeprecation` is an unused param; it's needed so we can offer a unique constructor (below)
-// that takes all fields with the proper names while we deprecate the `set` methods. Once we remove
-// the `set` methods, we can clean this up.
-class Cookie private (
-  private[this] var _name: String,
-  private[this] var _value: String,
-  private[this] var _domain: String,
-  private[this] var _path: String,
-  private[this] var _maxAge: Option[Duration],
-  private[this] var _secure: Boolean,
-  private[this] var _httpOnly: Boolean,
-  private[this] var _forDeprecation: Boolean
-) {
+/**
+ * @note `domain` and `path` may be null.
+ */
+final class Cookie private (
+  val name: String,
+  val value: String,
+  val domain: String,
+  val path: String,
+  private[this] val _maxAge: Option[Duration],
+  val secure: Boolean,
+  val httpOnly: Boolean,
+  val sameSite: SameSite
+) { self =>
 
   /**
    * Create a cookie.
@@ -97,16 +94,17 @@ class Cookie private (
     path: Option[String] = None,
     maxAge: Option[Duration] = Some(Cookie.DefaultMaxAge),
     secure: Boolean = false,
-    httpOnly: Boolean = false
+    httpOnly: Boolean = false,
+    sameSite: SameSite = SameSite.Unset
   ) = this(
-    _name = Cookie.validateName(name),
-    _value = value,
-    _domain = Cookie.validateField(domain.orNull),
-    _path = Cookie.validateField(path.orNull),
+    name = Cookie.validateName(name),
+    value = value,
+    domain = Cookie.validateField(domain.orNull),
+    path = Cookie.validateField(path.orNull),
     _maxAge = maxAge,
-    _secure = secure,
-    _httpOnly = httpOnly,
-    _forDeprecation = true
+    secure = secure,
+    httpOnly = httpOnly,
+    sameSite = sameSite
   )
 
   def this(
@@ -119,7 +117,27 @@ class Cookie private (
     None,
     Some(Cookie.DefaultMaxAge),
     false,
-    false
+    false,
+    SameSite.Unset
+  )
+
+  def this(
+    name: String,
+    value: String,
+    domain: Option[String],
+    path: Option[String],
+    maxAge: Option[Duration],
+    secure: Boolean,
+    httpOnly: Boolean
+  ) = this(
+    name,
+    value,
+    domain,
+    path,
+    maxAge,
+    secure,
+    httpOnly,
+    SameSite.Unset
   )
 
   @deprecated("Use Bijections.from to create a Cookie from a Netty Cookie")
@@ -132,61 +150,14 @@ class Cookie private (
       Option(underlying.getMaxAge.seconds),
       underlying.isSecure,
       underlying.isHttpOnly,
-      true
+      SameSite.Unset /* Netty cookies do not support the SameSite attribute */
     )
   }
 
-  /**
-   * Get the domain.
-   * @note May be null.
-   */
-  def domain: String = _domain
-
-  /**
-   * Get the path.
-   * @note May be null.
-   */
-  def path: String = _path
-  def name: String = _name
-  def value: String = _value
   def maxAge: Duration = _maxAge match {
     case Some(maxAge) => maxAge
     case None => Cookie.DefaultMaxAge
   }
-  def httpOnly: Boolean = _httpOnly
-  def secure: Boolean = _secure
-
-  /**
-   * Set the domain.
-   * @note `domain` may be null.
-   */
-  @deprecated("Set domain in the Cookie constructor or use `Cookie.domain`", "2017-08-16")
-  def domain_=(domain: String): Unit =
-    _domain = Cookie.validateField(domain)
-
-  @deprecated("Set maxAge in the Cookie constructor or use `Cookie.maxAge`", "2017-08-16")
-  def maxAge_=(maxAge: Duration): Unit =
-    _maxAge = Option(maxAge)
-
-  /**
-   * Set the path.
-   * @note `path` may be null.
-   */
-  @deprecated("Set path in the Cookie constructor or use `Cookie.path`", "2017-08-16")
-  def path_=(path: String): Unit =
-    _path = Cookie.validateField(path)
-
-  /**
-   * Set the value.
-   * @note `value` must not be null.
-   */
-  @deprecated("Set value in the Cookie constructor", "2017-08-16")
-  def value_=(value: String): Unit =
-    _value = value
-
-  @deprecated("Set httpOnly in the Cookie constructor or use `Cookie.httpOnly`", "2017-08-16")
-  def httpOnly_=(httpOnly: Boolean): Unit =
-    _httpOnly = httpOnly
 
   // Helper method for `equals` that returns true if two strings are both null, or have the
   // same value (ignoring case)
@@ -201,13 +172,14 @@ class Cookie private (
   }
 
   private[this] def copy(
-    name: String = _name,
-    value: String = _value,
-    domain: Option[String] = Option(_domain),
-    path: Option[String] = Option(_path),
-    maxAge: Option[Duration] = _maxAge,
-    secure: Boolean = _secure,
-    httpOnly: Boolean = _httpOnly
+    name: String = self.name,
+    value: String = self.value,
+    domain: Option[String] = Option(self.domain),
+    path: Option[String] = Option(self.path),
+    maxAge: Option[Duration] = self._maxAge,
+    secure: Boolean = self.secure,
+    httpOnly: Boolean = self.httpOnly,
+    sameSite: SameSite = self.sameSite
   ): Cookie =
     new Cookie(
       name,
@@ -216,7 +188,8 @@ class Cookie private (
       path,
       maxAge,
       secure,
-      httpOnly
+      httpOnly,
+      sameSite
     )
 
   /**
@@ -224,6 +197,12 @@ class Cookie private (
    */
   def domain(domain: Option[String]): Cookie =
     copy(domain = domain)
+
+  /**
+   * Create a new [[Cookie]] with the same set fields, and value `value`.
+   */
+  def value(value: String): Cookie =
+    copy(value = value)
 
   /**
    * Create a new [[Cookie]] with the same set fields, and maxAge `maxAge`
@@ -248,6 +227,12 @@ class Cookie private (
    */
   def secure(secure: Boolean): Cookie =
     copy(secure = secure)
+
+  /**
+   * Create a new [[Cookie]] with the same set fields, and sameSite `sameSite`
+   */
+  def sameSite(sameSite: SameSite): Cookie =
+    copy(sameSite = sameSite)
 
   /**
    * Returns true if `obj` equals `this`. Two cookies are considered equal if their names,

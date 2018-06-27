@@ -4,8 +4,7 @@ import com.twitter.finagle.ListeningServer
 import com.twitter.finagle.Memcached
 import com.twitter.finagle.memcached.protocol.{Command, Response}
 import com.twitter.finagle.Service
-import com.twitter.finagle.builder.{Server, ClientBuilder, ServerBuilder}
-import java.net.{ConnectException, Socket, InetSocketAddress}
+import java.net.{ConnectException, Socket}
 
 /**
  * Run a server on port 8080 that delegates all Memcached requests to a server
@@ -15,7 +14,7 @@ import java.net.{ConnectException, Socket, InetSocketAddress}
  * replication) or load-balance across replicas.
  */
 object MemcachedProxy {
-  def main(args: Array[String]) {
+  def main(args: Array[String]): Unit = {
     assertMemcachedRunning()
 
     val client: Service[Command, Response] = Memcached.client.newService("localhost:11211")
@@ -29,7 +28,7 @@ object MemcachedProxy {
       .serve("localhost:8080", proxyService)
   }
 
-  private[this] def assertMemcachedRunning() {
+  private[this] def assertMemcachedRunning(): Unit = {
     try {
       new Socket("localhost", 11211)
     } catch {

@@ -5,9 +5,22 @@ import com.twitter.finagle.mysql._
 import com.twitter.util.{Await, TwitterDateFormat}
 import java.sql.Timestamp
 import java.util.TimeZone
+import org.scalactic.{Equality, TolerantNumerics}
 import org.scalatest.FunSuite
 
 class NumericTypeTest extends FunSuite with IntegrationClient {
+
+  private val epsilon = 0.000001
+
+  private implicit val doubleEq: Equality[Double] =
+    TolerantNumerics.tolerantDoubleEquality(epsilon)
+
+  private implicit val bigDecimalEq: Equality[BigDecimal] = new Equality[BigDecimal] {
+    def areEqual(a: BigDecimal, b: Any): Boolean = b match {
+      case bd: BigDecimal => (a <= bd + epsilon) && (a >= bd - epsilon)
+      case _ => false
+    }
+  }
 
   // This test requires support for unsigned integers
   override protected def configureClient(
@@ -22,6 +35,7 @@ class NumericTypeTest extends FunSuite with IntegrationClient {
 
   for (c <- client) {
     Await.ready(c.query("""CREATE TEMPORARY TABLE IF NOT EXISTS `numeric` (
+        `boolean` boolean NOT NULL,
         `tinyint` tinyint(4) NOT NULL,
         `tinyint_unsigned` tinyint(4) UNSIGNED NOT NULL,
         `smallint` smallint(6) NOT NULL,
@@ -40,25 +54,27 @@ class NumericTypeTest extends FunSuite with IntegrationClient {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8;"""))
 
     Await.ready(c.query("""INSERT INTO `numeric` (
+        `boolean`,
         `tinyint`, `tinyint_unsigned`,
         `smallint`, `smallint_unsigned`,
         `mediumint`, `mediumint_unsigned`,
         `int`, `int_unsigned`,
         `bigint`, `bigint_unsigned`,
         `float`, `double`, `decimal`, `bit`) VALUES (
-        127, 255,
-        32767, 63535,
-        8388607, 16777215,
-        2147483647, 4294967295,
-        9223372036854775807, 18446744073709551615,
+        true,
+        -128, 255,
+        -32768, 63535,
+        -8388608, 16777215,
+        -2147483648, 4294967295,
+        -9223372036854775808, 18446744073709551615,
         1.61, 1.618, 1.61803398875, 1);"""))
 
     val signedTextEncodedQuery =
-      """SELECT `tinyint`, `smallint`, `mediumint`, `int`, `bigint`, `float`, `double`,`decimal`, `bit` FROM `numeric` """
+      """SELECT `boolean`, `tinyint`, `smallint`, `mediumint`, `int`, `bigint`, `float`, `double`,`decimal`, `bit` FROM `numeric` """
     runTest(c, signedTextEncodedQuery)(testRow)
 
     val unsignedTextEncodedQuery =
-      """SELECT `tinyint_unsigned`, `smallint_unsigned`, `mediumint_unsigned`, `int_unsigned`, `bigint_unsigned` FROM `numeric` """
+      """SELECT `boolean`, `tinyint_unsigned`, `smallint_unsigned`, `mediumint_unsigned`, `int_unsigned`, `bigint_unsigned` FROM `numeric` """
     runTest(c, unsignedTextEncodedQuery)(testUnsignedRow)
   }
 
@@ -77,64 +93,109 @@ class NumericTypeTest extends FunSuite with IntegrationClient {
     testFunc(binaryEncoded)
   }
 
-  def testRow(row: Row) {
+  def testRow(row: Row): Unit = {
     val rowType = row.getClass.getName
+
+    test("extract %s from %s".format("boolean", rowType)) {
+      assert(row.booleanOrFalse("boolean"))
+      assert(row.getBoolean("boolean").contains(true))
+    }
+
     test("extract %s from %s".format("tinyint", rowType)) {
       row("tinyint") match {
-        case Some(ByteValue(b)) => assert(b == 127)
+        case Some(ByteValue(b)) => assert(b == -128)
         case v => fail("expected ByteValue but got %s".format(v))
       }
+      assert(-128 == row.byteOrZero("tinyint"))
+      assert(row.getByte("tinyint").contains(-128))
+      assert(BigInt(-128) == row.bigIntOrNull("tinyint"))
+      assert(row.getBigInt("tinyint").contains(BigInt(-128)))
     }
 
     test("extract %s from %s".format("smallint", rowType)) {
       row("smallint") match {
-        case Some(ShortValue(s)) => assert(s == 32767)
+        case Some(ShortValue(s)) => assert(s == -32768)
         case v => fail("expected ShortValue but got %s".format(v))
       }
+      assert(-32768 == row.shortOrZero("smallint"))
+      assert(row.getShort("smallint").contains(-32768))
+      assert(-32768 == row.intOrZero("smallint"))
+      assert(row.getInteger("smallint").contains(-32768))
+      assert(-32768L == row.longOrZero("smallint"))
+      assert(row.getLong("smallint").contains(-32768L))
+      assert(BigInt(-32768) == row.bigIntOrNull("smallint"))
+      assert(row.getBigInt("smallint").contains(BigInt(-32768)))
     }
 
     test("extract %s from %s".format("mediumint", rowType)) {
       row("mediumint") match {
-        case Some(IntValue(i)) => assert(i == 8388607)
+        case Some(IntValue(i)) => assert(i == -8388608)
         case v => fail("expected IntValue but got %s".format(v))
       }
+      assert(-8388608 == row.intOrZero("mediumint"))
+      assert(row.getInteger("mediumint").contains(-8388608))
+      assert(-8388608L == row.longOrZero("mediumint"))
+      assert(row.getLong("mediumint").contains(-8388608L))
+      assert(BigInt(-8388608) == row.bigIntOrNull("mediumint"))
+      assert(row.getBigInt("mediumint").contains(BigInt(-8388608)))
     }
 
     test("extract %s from %s".format("int", rowType)) {
       row("int") match {
-        case Some(IntValue(i)) => assert(i == 2147483647)
+        case Some(IntValue(i)) => assert(i == -2147483648)
         case v => fail("expected IntValue but got %s".format(v))
       }
+      assert(-2147483648 == row.intOrZero("int"))
+      assert(row.getInteger("int").contains(-2147483648))
+      assert(-2147483648L == row.longOrZero("int"))
+      assert(row.getLong("int").contains(-2147483648L))
+      assert(BigInt(-2147483648) == row.bigIntOrNull("int"))
+      assert(row.getBigInt("int").contains(BigInt(-2147483648)))
     }
 
     test("extract %s from %s".format("bigint", rowType)) {
       row("bigint") match {
-        case Some(LongValue(l)) => assert(l == 9223372036854775807l)
+        case Some(LongValue(l)) => assert(l == -9223372036854775808L)
         case v => fail("expected LongValue but got %s".format(v))
       }
+      assert(-9223372036854775808L == row.longOrZero("bigint"))
+      assert(row.getLong("bigint").contains(-9223372036854775808L))
+      assert(BigInt(-9223372036854775808L) == row.bigIntOrNull("bigint"))
+      assert(row.getBigInt("bigint").contains(BigInt(-9223372036854775808L)))
     }
 
     test("extract %s from %s".format("float", rowType)) {
       row("float") match {
-        case Some(FloatValue(f)) =>
-          assert(math.abs(f - 1.61F) <= .000001)
+        case Some(FloatValue(f)) => assert(f === 1.61F)
         case v => fail("expected FloatValue but got %s".format(v))
       }
+      assert(1.61F === row.floatOrZero("float"))
+      assert(1.61F === row.getFloat("float").get)
+      assert(1.61 === row.doubleOrZero("float"))
+      assert(1.61 === row.getDouble("float").get)
+      assert(BigDecimal(1.61) == row.bigDecimalOrNull("float"))
+      assert(row.getBigDecimal("float").contains(BigDecimal(1.61)))
     }
 
     test("extract %s from %s".format("double", rowType)) {
       row("double") match {
-        case Some(DoubleValue(d)) =>
-          assert(math.abs(d - 1.618) <= .000001)
+        case Some(DoubleValue(d)) => assert(d === 1.618)
         case v => fail("expected DoubleValue but got %s".format(v))
       }
+      assert(1.618 === row.doubleOrZero("double"))
+      assert(1.618 === row.getDouble("double").get)
+      assert(BigDecimal(1.618) === row.bigDecimalOrNull("double"))
+      assert(BigDecimal(1.618) === row.getBigDecimal("double").get)
     }
 
     test("extract %s from %s".format("decimal", rowType)) {
+      val expected = BigDecimal(1.61803398875)
       row("decimal") match {
-        case Some(BigDecimalValue(bd)) => assert(bd == BigDecimal(1.61803398875))
+        case Some(BigDecimalValue(bd)) => assert(bd == expected)
         case v => fail("expected BigDecimalValue but got %s".format(v))
       }
+      assert(expected == row.bigDecimalOrNull("decimal"))
+      assert(row.getBigDecimal("decimal").contains(expected))
     }
 
     test("extract %s from %s".format("bit", rowType)) {
@@ -143,9 +204,23 @@ class NumericTypeTest extends FunSuite with IntegrationClient {
         case v => fail("expected a RawValue but got %s".format(v))
       }
     }
+
+    test(s"unsupported types for $rowType") {
+      intercept[UnsupportedTypeException] { row.stringOrNull("double") }
+      intercept[UnsupportedTypeException] { row.byteOrZero("double") }
+      intercept[UnsupportedTypeException] { row.getString("double") }
+      intercept[UnsupportedTypeException] { row.getByte("double") }
+    }
+
+    test(s"column not found for $rowType") {
+      intercept[ColumnNotFoundException] { row.stringOrNull("unknown") }
+      intercept[ColumnNotFoundException] { row.byteOrZero("unknown") }
+      intercept[ColumnNotFoundException] { row.getString("unknown") }
+      intercept[ColumnNotFoundException] { row.getByte("unknown") }
+    }
   }
 
-  def testUnsignedRow(row: Row) {
+  def testUnsignedRow(row: Row): Unit = {
     val rowType = row.getClass.getName
 
     test("extract %s from %s".format("tinyint_unsigned", rowType)) {
@@ -153,6 +228,8 @@ class NumericTypeTest extends FunSuite with IntegrationClient {
         case Some(ShortValue(b)) => assert(b == 255)
         case v => fail("expected ShortValue but got %s".format(v))
       }
+      assert(255 == row.shortOrZero("tinyint_unsigned"))
+      assert(row.getShort("tinyint_unsigned").contains(255))
     }
 
     test("extract %s from %s".format("smallint_unsigned", rowType)) {
@@ -160,6 +237,8 @@ class NumericTypeTest extends FunSuite with IntegrationClient {
         case Some(IntValue(s)) => assert(s == 63535)
         case v => fail("expected ShortValue but got %s".format(v))
       }
+      assert(63535 == row.intOrZero("smallint_unsigned"))
+      assert(row.getInteger("smallint_unsigned").contains(63535))
     }
 
     test("extract %s from %s".format("mediumint_unsigned", rowType)) {
@@ -167,20 +246,27 @@ class NumericTypeTest extends FunSuite with IntegrationClient {
         case Some(IntValue(i)) => assert(i == 16777215)
         case v => fail("expected IntValue but got %s".format(v))
       }
+      assert(16777215 == row.intOrZero("mediumint_unsigned"))
+      assert(row.getInteger("mediumint_unsigned").contains(16777215))
     }
 
     test("extract %s from %s".format("int_unsigned", rowType)) {
       row("int_unsigned") match {
-        case Some(LongValue(i)) => assert(i == 4294967295l)
+        case Some(LongValue(i)) => assert(i == 4294967295L)
         case v => fail("expected IntValue but got %s".format(v))
       }
+      assert(4294967295L == row.longOrZero("int_unsigned"))
+      assert(row.getLong("int_unsigned").contains(4294967295L))
     }
 
     test("extract %s from %s".format("bigint_unsigned", rowType)) {
+      val expected = BigInt("18446744073709551615")
       row("bigint_unsigned") match {
-        case Some(BigIntValue(bi)) => assert(bi == BigInt("18446744073709551615"))
+        case Some(BigIntValue(bi)) => assert(bi == expected)
         case v => fail("expected LongValue but got %s".format(v))
       }
+      assert(expected == row.bigIntOrNull("bigint_unsigned"))
+      assert(row.getBigInt("bigint_unsigned").contains(expected))
     }
   }
 }
@@ -226,13 +312,15 @@ class BlobTypeTest extends FunSuite with IntegrationClient {
     testRow(binaryEncoded)
   }
 
-  def testRow(row: Row) {
+  def testRow(row: Row): Unit = {
     val rowType = row.getClass.getName
     test("extract %s from %s".format("char", rowType)) {
       row("char") match {
         case Some(StringValue(s)) => assert(s == "a")
         case a => fail("Expected StringValue but got %s".format(a))
       }
+      assert("a" == row.stringOrNull("char"))
+      assert(row.getString("char").contains("a"))
     }
 
     test("extract %s from %s".format("varchar", rowType)) {
@@ -240,6 +328,8 @@ class BlobTypeTest extends FunSuite with IntegrationClient {
         case Some(StringValue(s)) => assert(s == "b")
         case a => fail("Expected StringValue but got %s".format(a))
       }
+      assert("b" == row.stringOrNull("varchar"))
+      assert(row.getString("varchar").contains("b"))
     }
 
     test("extract %s from %s".format("tinytext", rowType)) {
@@ -247,6 +337,8 @@ class BlobTypeTest extends FunSuite with IntegrationClient {
         case Some(StringValue(s)) => assert(s == "c")
         case a => fail("Expected StringValue but got %s".format(a))
       }
+      assert("c" == row.stringOrNull("tinytext"))
+      assert(row.getString("tinytext").contains("c"))
     }
 
     test("extract %s from %s".format("text", rowType)) {
@@ -254,6 +346,8 @@ class BlobTypeTest extends FunSuite with IntegrationClient {
         case Some(StringValue(s)) => assert(s == "d")
         case a => fail("Expected StringValue but got %s".format(a))
       }
+      assert("d" == row.stringOrNull("text"))
+      assert(row.getString("text").contains("d"))
     }
 
     test("extract %s from %s".format("mediumtext", rowType)) {
@@ -261,41 +355,58 @@ class BlobTypeTest extends FunSuite with IntegrationClient {
         case Some(StringValue(s)) => assert(s == "e")
         case a => fail("Expected StringValue but got %s".format(a))
       }
+      assert("e" == row.stringOrNull("mediumtext"))
+      assert(row.getString("mediumtext").contains("e"))
     }
 
     test("extract %s from %s".format("tinyblob", rowType)) {
+      val expected = List(0x66)
       row("tinyblob") match {
-        case Some(RawValue(_, _, _, bytes)) => assert(bytes.toList == List(0x66))
+        case Some(RawValue(_, _, _, bytes)) => assert(expected == bytes.toList)
         case a => fail("Expected RawValue but got %s".format(a))
       }
+      assert(expected == row.bytesOrNull("tinyblob").toList)
+      assert(row.getBytes("tinyblob").map(_.toList).contains(expected))
     }
 
     test("extract %s from %s".format("mediumblob", rowType)) {
+      val expected = List(0x67)
       row("mediumblob") match {
-        case Some(RawValue(_, _, _, bytes)) => assert(bytes.toList == List(0x67))
+        case Some(RawValue(_, _, _, bytes)) => assert(bytes.toList == expected)
         case a => fail("Expected RawValue but got %s".format(a))
       }
+      assert(expected == row.bytesOrNull("mediumblob").toList)
+      assert(row.getBytes("mediumblob").map(_.toList).contains(expected))
     }
 
     test("extract %s from %s".format("blob", rowType)) {
+      val expected = List(0x68)
       row("blob") match {
-        case Some(RawValue(_, _, _, bytes)) => assert(bytes.toList == List(0x68))
+        case Some(RawValue(_, _, _, bytes)) => assert(bytes.toList == expected)
         case a => fail("Expected RawValue but got %s".format(a))
       }
+      assert(expected == row.bytesOrNull("blob").toList)
+      assert(row.getBytes("blob").map(_.toList).contains(expected))
     }
 
     test("extract %s from %s".format("binary", rowType)) {
+      val expected = List(0x69, 0x70)
       row("binary") match {
-        case Some(RawValue(_, _, _, bytes)) => assert(bytes.toList == List(0x69, 0x70))
+        case Some(RawValue(_, _, _, bytes)) => assert(bytes.toList == expected)
         case a => fail("Expected RawValue but got %s".format(a))
       }
+      assert(expected == row.bytesOrNull("binary").toList)
+      assert(row.getBytes("binary").map(_.toList).contains(expected))
     }
 
     test("extract %s from %s".format("varbinary", rowType)) {
+      val expected = List(0x6A)
       row("varbinary") match {
-        case Some(RawValue(_, _, _, bytes)) => assert(bytes.toList == List(0x6A))
+        case Some(RawValue(_, _, _, bytes)) => assert(bytes.toList == expected)
         case a => fail("Expected RawValue but got %s".format(a))
       }
+      assert(expected == row.bytesOrNull("varbinary").toList)
+      assert(row.getBytes("varbinary").map(_.toList).contains(expected))
     }
 
     test("extract %s from %s".format("enum", rowType)) {
@@ -347,7 +458,7 @@ class DateTimeTypeTest extends FunSuite with IntegrationClient {
     testRow(binaryEncoded)
   }
 
-  def testRow(row: Row) {
+  def testRow(row: Row): Unit = {
     val rowType = row.getClass.getName
     test("extract %s from %s".format("date", rowType)) {
       row("date") match {
@@ -360,36 +471,42 @@ class DateTimeTypeTest extends FunSuite with IntegrationClient {
     val timestampValueUTC = new TimestampValue(TimeZone.getDefault(), TimeZone.getTimeZone("UTC"))
     val timestampValueEST = new TimestampValue(TimeZone.getDefault(), TimeZone.getTimeZone("EST"))
 
-    for ((repr, secs) <- Seq(("datetime", 24), ("timestamp", 36))) {
-      test("extract %s from %s in local time".format(repr, rowType)) {
-        row(repr) match {
-          case Some(timestampValueLocal(t)) =>
-            val timestamp = java.sql.Timestamp.valueOf("2013-11-02 19:56:" + secs)
-            assert(t == timestamp)
+    for ((columnName, secs) <- Seq(("datetime", 24), ("timestamp", 36))) {
+      test("extract %s from %s in local time".format(columnName, rowType)) {
+        val timeZone = TimeZone.getDefault
+        val expected = java.sql.Timestamp.valueOf("2013-11-02 19:56:" + secs)
+        row(columnName) match {
+          case Some(timestampValueLocal(t)) => assert(t == expected)
           case a => fail("Expected TimestampValue but got %s".format(a))
         }
+        assert(expected == row.timestampOrNull(columnName, timeZone))
+        assert(row.getTimestamp(columnName, timeZone).contains(expected))
       }
 
-      test("extract %s from %s in UTC".format(repr, rowType)) {
-        row(repr) match {
-          case Some(timestampValueUTC(t)) =>
-            val format = TwitterDateFormat("yyyy-MM-dd HH:mm:ss")
-            format.setTimeZone(TimeZone.getTimeZone("UTC"))
-            val timestamp = new Timestamp(format.parse("2013-11-02 19:56:" + secs).getTime)
-            assert(t == timestamp)
+      test("extract %s from %s in UTC".format(columnName, rowType)) {
+        val timeZone = TimeZone.getTimeZone("UTC")
+        val format = TwitterDateFormat("yyyy-MM-dd HH:mm:ss")
+        format.setTimeZone(timeZone)
+        val expected = new Timestamp(format.parse("2013-11-02 19:56:" + secs).getTime)
+        row(columnName) match {
+          case Some(timestampValueUTC(t)) => assert(t == expected)
           case a => fail("Expected TimestampValue but got %s".format(a))
         }
+        assert(expected == row.timestampOrNull(columnName, timeZone))
+        assert(row.getTimestamp(columnName, timeZone).contains(expected))
       }
 
-      test("extract %s from %s in EST".format(repr, rowType)) {
-        row(repr) match {
-          case Some(timestampValueEST(t)) =>
-            val format = TwitterDateFormat("yyyy-MM-dd HH:mm:ss")
-            format.setTimeZone(TimeZone.getTimeZone("EST"))
-            val timestamp = new Timestamp(format.parse("2013-11-02 19:56:" + secs).getTime)
-            assert(t == timestamp)
+      test("extract %s from %s in EST".format(columnName, rowType)) {
+        val timeZone = TimeZone.getTimeZone("EST")
+        val format = TwitterDateFormat("yyyy-MM-dd HH:mm:ss")
+        format.setTimeZone(timeZone)
+        val expected = new Timestamp(format.parse("2013-11-02 19:56:" + secs).getTime)
+        row(columnName) match {
+          case Some(timestampValueEST(t)) => assert(t == expected)
           case a => fail("Expected TimestampValue but got %s".format(a))
         }
+        assert(expected == row.timestampOrNull(columnName, timeZone))
+        assert(row.getTimestamp(columnName, timeZone).contains(expected))
       }
     }
 

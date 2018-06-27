@@ -1,8 +1,11 @@
 package com.twitter.finagle.http
 
+import com.twitter.finagle.http.cookie.SameSite
+import com.twitter.finagle.http.cookie.exp.supportSameSiteCodec
 import com.twitter.finagle.http.netty3.Netty3CookieCodec
 import com.twitter.finagle.http.netty4.Netty4CookieCodec
 import com.twitter.finagle.server.ServerInfo
+import com.twitter.finagle.stats.{LoadedStatsReceiver, Verbosity}
 import org.jboss.netty.handler.codec.http.HttpHeaders
 import scala.collection.mutable
 
@@ -14,6 +17,14 @@ private[finagle] object CookieMap {
   private val cookieCodec =
     if (UseNetty4CookieCodec(ServerInfo().id.hashCode())) Netty4CookieCodec
     else Netty3CookieCodec
+
+  // Note that this is a def to allow it to be toggled for unit tests.
+  private[finagle] def includeSameSite: Boolean = supportSameSiteCodec()
+
+  private[finagle] val flaglessSameSitesCounter =
+    LoadedStatsReceiver.scope("http").scope("cookie").counter(Verbosity.Debug, "flagless_samesites")
+  private[finagle] val silentlyDroppedSameSitesCounter =
+    LoadedStatsReceiver.scope("http").scope("cookie").counter(Verbosity.Debug, "dropped_samesites")
 }
 
 /**
@@ -25,7 +36,7 @@ private[finagle] object CookieMap {
  * cookie is removed from the CookieMap, a header is automatically removed from
  * the ''message''
  */
-class CookieMap private[finagle](message: Message, cookieCodec: CookieCodec)
+class CookieMap private[twitter](message: Message, cookieCodec: CookieCodec)
     extends mutable.Map[String, Cookie]
     with mutable.MapLike[String, Cookie, CookieMap] {
 
@@ -50,7 +61,7 @@ class CookieMap private[finagle](message: Message, cookieCodec: CookieCodec)
       HttpHeaders.Names.SET_COOKIE
 
   private[this] def decodeCookies(header: String): Iterable[Cookie] = {
-    val decoding  =
+    val decoding =
       if (message.isRequest) cookieCodec.decodeServer(header)
       else cookieCodec.decodeClient(header)
     decoding match {
@@ -62,7 +73,7 @@ class CookieMap private[finagle](message: Message, cookieCodec: CookieCodec)
     }
   }
 
-  protected def rewriteCookieHeaders() {
+  protected def rewriteCookieHeaders(): Unit = {
     // Clear all cookies - there may be more than one with this name.
     message.headerMap.remove(cookieHeaderName)
 
@@ -71,8 +82,14 @@ class CookieMap private[finagle](message: Message, cookieCodec: CookieCodec)
       message.headerMap.set(cookieHeaderName, cookieCodec.encodeClient(values))
     } else {
       foreach {
-        case (_, cookie) =>
-          message.headerMap.add(cookieHeaderName, cookieCodec.encodeServer(cookie))
+        case (_, cookie) => {
+          message.headerMap.add(cookieHeaderName,
+            cookieCodec.encodeServer(cookie))
+          if (!message.headerMap.toString.contains("SameSite")
+              && cookie.sameSite != SameSite.Unset) {
+            CookieMap.silentlyDroppedSameSitesCounter.incr()
+          }
+        }
       }
     }
   }
@@ -161,7 +178,7 @@ class CookieMap private[finagle](message: Message, cookieCodec: CookieCodec)
    * @param name the cookie name to add
    * @param cookie the ''Cookie'' to add
    */
-  def add(name: String, cookie: Cookie) {
+  def add(name: String, cookie: Cookie): Unit = {
     underlying(name) = (underlying(name) - cookie) + cookie
     rewriteCookieHeaders()
   }
@@ -174,7 +191,7 @@ class CookieMap private[finagle](message: Message, cookieCodec: CookieCodec)
    *
    * @param cookie the ''Cookie'' to add
    */
-  def add(cookie: Cookie) {
+  def add(cookie: Cookie): Unit = {
     add(cookie.name, cookie)
   }
 
@@ -182,6 +199,13 @@ class CookieMap private[finagle](message: Message, cookieCodec: CookieCodec)
     cookieHeader <- message.headerMap.getAll(cookieHeaderName)
     cookie <- decodeCookies(cookieHeader)
   } {
+    // Checks whether the SameSite attribute is set in the response but the
+    // codec is disabled. This is undesirable behavior so we wish to report it.
+    if (!CookieMap.includeSameSite
+        && message.isResponse
+        && cookieHeader.contains("SameSite")) {
+      CookieMap.flaglessSameSitesCounter.incr()
+    }
     add(cookie)
   }
 }

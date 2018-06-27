@@ -11,7 +11,7 @@ import org.mockito.ArgumentCaptor
 import org.mockito.Matchers._
 import org.mockito.Mockito.{times, verify, when}
 import org.scalatest.FunSuite
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
 class SslClientConnectHandlerTest extends FunSuite with MockitoSugar {
 
@@ -49,7 +49,7 @@ class SslClientConnectHandlerTest extends FunSuite with MockitoSugar {
     val ch = new SslClientConnectHandler(sslHandler, address, config, sessionVerifier)
     ch.handleDownstream(ctx, connectRequested)
 
-    def checkDidClose() {
+    def checkDidClose(): Unit = {
       val ec = ArgumentCaptor.forClass(classOf[DownstreamChannelStateEvent])
       verify(pipeline).sendDownstream(ec.capture)
       val e = ec.getValue

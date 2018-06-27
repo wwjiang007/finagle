@@ -9,10 +9,9 @@ scala_library(
     dependencies = [
         "3rdparty/jvm/io/netty",
         "3rdparty/jvm/io/netty:netty4",
+        "3rdparty/jvm/io/netty:netty4-codec-http",
         "3rdparty/jvm/io/netty:netty4-handler-proxy",
-        "3rdparty/jvm/io/netty:netty4-http",
         "finagle/finagle-core",
-        "finagle/finagle-exp",
         "finagle/finagle-mux/src/main/resources",
         "finagle/finagle-netty4",
         "finagle/finagle-toggle",

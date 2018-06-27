@@ -8,7 +8,7 @@ import org.mockito.Matchers.any
 import org.mockito.Mockito.{never, times, verify, when}
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
 @RunWith(classOf[JUnitRunner])
 class SingletonPoolTest extends FunSuite with MockitoSugar {
@@ -27,7 +27,7 @@ class SingletonPoolTest extends FunSuite with MockitoSugar {
     when(underlying(any[ClientConnection])).thenReturn(underlyingP)
     val pool = new SingletonPool(underlying, NullStatsReceiver)
 
-    def assertClosed() {
+    def assertClosed(): Unit = {
       val Some(Throw(Failure(Some(cause)))) = pool().poll
       assert(cause.isInstanceOf[ServiceClosedException])
     }

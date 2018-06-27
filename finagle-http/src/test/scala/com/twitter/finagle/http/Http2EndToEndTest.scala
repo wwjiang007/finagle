@@ -3,25 +3,28 @@ package com.twitter.finagle.http
 import com.twitter.conversions.storage._
 import com.twitter.conversions.time._
 import com.twitter.finagle
-import com.twitter.finagle.Service
+import com.twitter.finagle.{Service, ServiceFactory}
+import com.twitter.finagle.context.Contexts
+import com.twitter.finagle.http2.RstException
 import com.twitter.finagle.stats.InMemoryStatsReceiver
+import com.twitter.finagle.service.ServiceFactoryRef
 import com.twitter.finagle.toggle.flag.overrides
 import com.twitter.finagle.util.DefaultTimer
 import com.twitter.io.Buf
 import com.twitter.util._
 import io.netty.handler.codec.http2.Http2CodecUtil
 import java.net.InetSocketAddress
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
-import scala.collection.mutable.ArrayBuffer
+import java.util.concurrent.atomic.AtomicInteger
+import scala.collection.mutable.{ArrayBuffer, Map => MMap}
 
 class Http2EndToEndTest extends AbstractEndToEndTest {
   def implName: String = "netty4 http/2"
-  def clientImpl(): finagle.Http.Client = finagle.Http.client.withHttp2
+  def clientImpl(): finagle.Http.Client = finagle.Http.client.withHttp2.withStatsReceiver(statsRecv)
 
   def serverImpl(): finagle.Http.Server = finagle.Http.server.withHttp2
 
   // Stats test requires examining the upgrade itself.
-  val shouldUpgrade = new AtomicBoolean(true)
+  private[this] val ShouldUpgrade = Contexts.local.newKey[Boolean]()
 
   /**
    * The client and server start with the plain-text upgrade so the first request
@@ -29,9 +32,12 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
    * fire a throw-away request first so we are testing a real HTTP/2 connection.
    */
   override def initClient(client: HttpService): Unit = {
-    if (shouldUpgrade.get()) {
+    if (Contexts.local.get(ShouldUpgrade).getOrElse(true)) {
       val request = Request("/")
       await(client(request))
+      eventually {
+        assert(statsRecv.counters(Seq("client", "requests")) == 1L)
+      }
       statsRecv.clear()
     }
   }
@@ -40,22 +46,54 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
     Future.value(Response())
   }
 
-  def featureImplemented(feature: Feature): Boolean = feature != MaxHeaderSize
+  def featureImplemented(feature: Feature): Boolean = true
 
   test("Upgrade stats are properly recorded") {
-    shouldUpgrade.set(false)
+    Contexts.local.let(ShouldUpgrade, false) {
+      val client = nonStreamingConnect(Service.mk { _: Request =>
+        Future.value(Response())
+      })
 
-    val client = nonStreamingConnect(Service.mk { req: Request =>
-      Future.value(Response())
-    })
+      await(client(Request("/"))) // Should be an upgrade request
 
-    await(client(Request("/"))) // Should be an upgrade request
+      assert(statsRecv.counters(Seq("client", "upgrade", "success")) == 1)
+      assert(statsRecv.counters(Seq("server", "upgrade", "success")) == 1)
+      await(client.close())
+    }
+  }
 
-    assert(statsRecv.counters(Seq("client", "upgrade", "success")) == 1)
-    assert(statsRecv.counters(Seq("server", "upgrade", "success")) == 1)
-    await(client.close())
+  test("Upgrade ignored") {
+    val req = Request(Method.Post, "/")
+    req.contentString = "body"
 
-    shouldUpgrade.set(true)
+    Contexts.local.let(ShouldUpgrade, false) {
+      val client = nonStreamingConnect(Service.mk { _: Request =>
+        Future.value(Response())
+      })
+
+      await(client(req))
+      // Should have been ignored by upgrade mechanisms since the request has a body
+      assert(statsRecv.counters(Seq("client", "upgrade", "ignored")) == 1)
+
+      // Should still be zero since the client didn't attempt the upgrade at all
+      assert(!statsRecv.counters.contains(Seq("server", "upgrade", "ignored")))
+      await(client.close())
+    }
+
+    Contexts.local.let(ShouldUpgrade, false) {
+      val client = nonStreamingConnect(Service.mk { _: Request =>
+        Future.value(Response())
+      })
+
+      // Spoof the upgrade: the client won't attempt it but the Upgrade header should
+      // still cause the server to consider it an upgrade request and tick the counter.
+      req.headerMap.set(Fields.Upgrade, "h2c")
+
+      await(client(req))
+      assert(statsRecv.counters(Seq("client", "upgrade", "ignored")) == 2)
+      assert(statsRecv.counters(Seq("server", "upgrade", "ignored")) == 1)
+      await(client.close())
+    }
   }
 
   // TODO: Consolidate behavior between h1 and h2
@@ -267,6 +305,7 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
 
     val responses = new ArrayBuffer[Promise[Response]]
 
+    private[this] val ref = new ServiceFactoryRef(ServiceFactory.const(initService))
     private[this] val service = Service.mk[Request, Response] { _ =>
       _pending.incrementAndGet()
       val p = new Promise[Response]
@@ -279,12 +318,16 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
     private[this] val _ls = finagle.Http.server
       .withHttp2
       .withLabel("server")
-      .serve("localhost:*", service)
+      .serve("localhost:*", ref)
 
     def pending(): Int = _pending.get()
     def startProcessing(idx: Int) = responses(idx).setValue(Response())
     def boundAddr = _ls.boundAddress.asInstanceOf[InetSocketAddress]
     def close(deadline: Time): Future[Unit] = _ls.close(deadline)
+    def upgrade(svc: Service[Request, Response]): Unit = {
+      initClient(svc)
+      ref() = ServiceFactory.const(service)
+    }
   }
 
 
@@ -296,7 +339,10 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
     val client =
       finagle.Http.client
         .withHttp2
+        .withStatsReceiver(statsRecv)
         .newService(dest, "client")
+
+    srv.upgrade(client)
 
     // dispatch a request that will be pending when the
     // server shutsdown.
@@ -319,5 +365,66 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
       case Return(resp) => assert(resp.status == Status.Ok)
       case Throw(t) => fail("didn't expect pendingReply to fail", t)
     }
+  }
+
+  test("illegal headers produce a non-zero error code on the client") {
+    val srv = serverImpl()
+      .serve("localhost:*", Service.mk[Request, Response](_ => Future.value(Response())))
+
+    val bound = srv.boundAddress.asInstanceOf[InetSocketAddress]
+    val dest = s"${bound.getHostName}:${bound.getPort}"
+
+    val client = clientImpl().newService(dest, "client")
+
+
+    // we need to circumvent the validations in the DefaultHeaderMap
+    val map = new HeaderMap {
+      val underlying = MMap.empty[String, String]
+
+      def get(key: String): Option[String] = underlying.get(key)
+
+      def set(k: String, v: String): HeaderMap = {
+        underlying.update(k, v)
+        this
+      }
+
+      def add(k: String, v: String): HeaderMap = {
+        underlying.update(k, v)
+        this
+      }
+
+      def getAll(key: String): Seq[String] = underlying.get(key).map(Seq(_)).getOrElse(Nil)
+
+      def +=(kv: (String, String)): this.type = {
+        underlying += kv
+        this
+      }
+
+      def -=(key: String): this.type = {
+        underlying -= (key)
+        this
+      }
+
+      def iterator: Iterator[(String, String)] = underlying.iterator
+    }
+
+    val req = new Request.Proxy {
+      val underlying = Request("/")
+      def request: Request = underlying
+      override def headerMap: HeaderMap = map
+    }
+
+    initClient(client)
+
+    // this sends illegal pseudo headers to the server, it should reject them with a non-zero
+    // error code.
+    req.headerMap.set(":invalid", "foo")
+
+    val rep = client(req)
+
+    val error = intercept[RstException] {
+      Await.result(rep, 5.seconds)
+    }
+    assert(error.errorCode != 0) // assert that this was not an error-free rejection
   }
 }

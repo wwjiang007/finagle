@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicReference
 import org.junit.runner.RunWith
 import org.scalatest.{FunSuite, Matchers}
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import scala.language.reflectiveCalls
 
 private object TimeoutFilterTest {
@@ -433,5 +433,31 @@ class TimeoutFilterTest extends FunSuite with Matchers with MockitoSugar {
         Await.result(res2, 1.second)
       }
     }
+  }
+
+  test("can disable deadline propagation") {
+    val service = new Service[String, Boolean] {
+      // returns a Future of a Boolean indicating whether or not there is a deadline defined
+      def apply(request: String): Future[Boolean] =
+        Future.value(Contexts.broadcast.get(Deadline).isDefined)
+    }
+
+    val timer = new MockTimer
+    val timeout = 1.second
+    val exceptionFn: Duration => RequestTimeoutException =
+      _ => new IndividualRequestTimeoutException(timeout)
+
+    val propagationDisabledFilter =
+      new TimeoutFilter[String, Boolean](() => timeout, exceptionFn, timer, false)
+    val propagationDisabledService = propagationDisabledFilter.andThen(service)
+
+    assert(Await.result(propagationDisabledService("foo")) == false)
+
+    val propagationEnabledFilter =
+      new TimeoutFilter[String, Boolean](() => timeout, exceptionFn, timer, true)
+    val propagationEnabledService = propagationEnabledFilter.andThen(service)
+
+
+    assert(Await.result(propagationEnabledService("bar")) == true)
   }
 }

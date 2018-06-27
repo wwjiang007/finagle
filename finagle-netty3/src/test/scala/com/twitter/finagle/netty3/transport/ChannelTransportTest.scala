@@ -10,7 +10,7 @@ import org.mockito.Mockito.{never, times, verify}
 import org.mockito.stubbing.OngoingStubbing
 import org.mockito.{Matchers, ArgumentCaptor}
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import org.scalatest.{OneInstancePerTest, FunSuite}
 import scala.language.reflectiveCalls
 
@@ -36,7 +36,7 @@ class ChannelTransportTest extends FunSuite with MockitoSugar with OneInstancePe
   pipeline.attach(ch, sink)
   val trans = new ChannelTransport[String, String](ch)
 
-  def sendUpstream(e: ChannelEvent) {
+  def sendUpstream(e: ChannelEvent): Unit = {
     val handler = pipeline.getLast.asInstanceOf[ChannelUpstreamHandler]
     val ctx = mock[ChannelHandlerContext]
     handler.handleUpstream(ctx, e)

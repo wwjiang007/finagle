@@ -1,13 +1,14 @@
 package com.twitter.finagle.exp.pushsession
 
 import com.twitter.conversions.time._
+import com.twitter.finagle.exp.pushsession.utils.MockChannelHandle
 import com.twitter.finagle.{Failure, IndividualRequestTimeoutException => FinagleTimeoutException}
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.util.{Await, MockTimer, Promise, Time, TimeoutException => UtilTimeoutException}
 import java.net.{InetSocketAddress, SocketAddress}
 import org.mockito.Mockito.never
 import org.scalatest.FunSuite
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
 class PipeliningMockChannelHandle[In, Out] extends MockChannelHandle[In, Out] {
 

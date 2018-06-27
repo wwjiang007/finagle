@@ -41,8 +41,25 @@ abstract class ToggleMap { self =>
    * @param id the identifying name of the `Toggle`.
    *           These should generally be fully qualified names to avoid conflicts
    *           between libraries. For example, "com.twitter.finagle.CoolThing".
+   *
+   * @see [[get]] for a Java friendly version
    */
   def apply(id: String): Toggle[Int]
+
+  /**
+   * Get a [[Toggle]] for this `id`.  Java-friendly synonym for `apply`.
+   *
+   * The `Toggle.isDefined` method should return `false` if the
+   * [[ToggleMap]] does not know about that [[Toggle]]
+   * or it is currently not "operating" on that `id`.
+   *
+   * @param id the identifying name of the `Toggle`.
+   *           These should generally be fully qualified names to avoid conflicts
+   *           between libraries. For example, "com.twitter.finagle.CoolThing".
+   *
+   * @note this returns a `java.lang.Integer` for Java compatibility.
+   */
+  def get(id: String): Toggle[jl.Integer] = apply(id).asInstanceOf[Toggle[jl.Integer]]
 
   def iterator: Iterator[Toggle.Metadata]
 
@@ -136,7 +153,7 @@ object ToggleMap {
    *                      scoped to "toggles/\$libraryName".
    */
   def observed(toggleMap: ToggleMap, statsReceiver: StatsReceiver): ToggleMap = {
-    new Proxy with Composite {
+    new ToggleMap with Proxy with Composite {
       private[this] val lastApplied =
         new ConcurrentHashMap[String, AtomicReference[jl.Boolean]]()
 
@@ -165,7 +182,7 @@ object ToggleMap {
         crc32.getValue.toFloat
       }
 
-      protected def underlying: ToggleMap = toggleMap
+      def underlying: ToggleMap = toggleMap
 
       override def toString: String =
         s"observed($toggleMap, $statsReceiver)"
@@ -227,6 +244,8 @@ object ToggleMap {
     toggleMap match {
       case composite: Composite =>
         composite.components.flatMap(components)
+      case proxy: Proxy =>
+        components(proxy.underlying)
       case _ =>
         Seq(toggleMap)
     }
@@ -238,7 +257,7 @@ object ToggleMap {
    *
    * Implementations are expected to be thread-safe.
    */
-  trait Mutable extends ToggleMap {
+  abstract class Mutable extends ToggleMap {
 
     /**
      * Add or replace the [[Toggle]] for this `id` with a
@@ -518,9 +537,12 @@ object ToggleMap {
 
   /**
    * A [[ToggleMap]] that proxies work to `underlying`.
+   *
+   * @note: Does not by itself denote that inheritors extends [[ToggleMap]], but
+   *        can only be used by traits or classes that extend [[ToggleMap]].
    */
-  trait Proxy extends ToggleMap {
-    protected def underlying: ToggleMap
+  trait Proxy { self: ToggleMap =>
+    def underlying: ToggleMap
 
     override def toString: String = underlying.toString
     def apply(id: String): Toggle[Int] = underlying(id)
@@ -549,5 +571,4 @@ object ToggleMap {
     def apply(id: String): Toggle[Int] = Toggle.off(id)
     def iterator: Iterator[Metadata] = Iterator.empty
   }
-
 }

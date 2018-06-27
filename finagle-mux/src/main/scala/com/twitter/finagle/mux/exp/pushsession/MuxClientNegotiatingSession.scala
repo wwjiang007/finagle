@@ -1,16 +1,32 @@
 package com.twitter.finagle.mux.exp.pushsession
 
-import com.twitter.finagle.{ChannelClosedException, Failure, Status, FailureFlags}
+import com.twitter.app.GlobalFlag
+import com.twitter.finagle.{ChannelClosedException, Failure, FailureFlags, Status}
 import com.twitter.finagle.mux.Handshake.{CanTinitMsg, Headers, TinitTag}
 import com.twitter.finagle.mux.exp.pushsession.MuxClientNegotiatingSession._
 import com.twitter.finagle.mux.transport.Message
 import com.twitter.finagle.exp.pushsession.{PushChannelHandle, PushSession}
 import com.twitter.finagle.mux.Handshake
+import com.twitter.finagle.stats.{StatsReceiver, Verbosity}
 import com.twitter.io.{Buf, ByteReader}
 import com.twitter.logging.Logger
 import com.twitter.util._
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.util.control.NonFatal
+
+/**
+ * Allow interrupting mux client negotiation. This is behind a flag because we've seen
+ * some ill effects in production. This is related to session acquisition being the burden
+ * of the first request of the session and interrupting a single request being able to
+ * abort session acquisition.
+ *
+ * @note flag is temporary so we can easily test it. After we resolve the production
+ *       issues this will become enabled by default, and soon thereafter the flag will
+ *       be removed.
+ */
+private object allowInterruptingClientNegotiation extends GlobalFlag[Boolean](
+  default = false,
+  help = "Allow interrupting the Mux client negotiation.")
 
 /**
  * Session implementation that attempts to negotiate configuration options with its peer.
@@ -20,11 +36,30 @@ private[finagle] final class MuxClientNegotiatingSession(
   version: Short,
   negotiator: Option[Headers] => MuxClientSession,
   headers: Handshake.Headers,
-  name: String
+  name: String,
+  stats: StatsReceiver
 ) extends PushSession[ByteReader, Buf](handle) {
 
-  private[this] val negotiatedSession = Promise[MuxClientSession]()
   private[this] val startNegotiation = new AtomicBoolean(false)
+  private[this] val negotiatedSession = Promise[MuxClientSession]()
+
+  if (allowInterruptingClientNegotiation()) {
+    // If the session is discarded we tear down and mark the exception
+    // as retryable since at this point, clearly nothing was dispatched
+    // to the peer.
+    negotiatedSession.setInterruptHandler {
+      case ex =>
+        log.info(ex, "Mux client negotiation interrupted.")
+        failHandshake(Failure.retryable(ex))
+    }
+  }
+
+  // A debug gauge used to track the number of sessions currently negotiating.
+  // The utility of this gauge may be short and will likely be removed fast.
+  private[this] val negotiatingGauge = stats.addGauge(Verbosity.Debug, "negotiating") {
+    if (startNegotiation.get) 1.0f else 0.0f
+  }
+  negotiatedSession.ensure(negotiatingGauge.remove())
 
   private type Phase = Message => Unit
 

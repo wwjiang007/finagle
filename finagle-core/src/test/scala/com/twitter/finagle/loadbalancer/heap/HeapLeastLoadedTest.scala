@@ -6,7 +6,7 @@ import com.twitter.util.{Var, ReadWriteVar, Activity, Await, Future, Time}
 import java.util.concurrent.atomic.AtomicInteger
 import org.scalatest.FunSuite
 import org.scalatest.junit.AssertionsForJUnit
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import scala.util.Random
 
 class HeapLeastLoadedTest extends FunSuite with MockitoSugar with AssertionsForJUnit {
@@ -15,7 +15,7 @@ class HeapLeastLoadedTest extends FunSuite with MockitoSugar with AssertionsForJ
     var _status: Status = Status.Open
     var _closed = false
 
-    def setStatus(x: Status) { _status = x }
+    def setStatus(x: Status): Unit = { _status = x }
 
     def apply(conn: ClientConnection) = Future.value {
       load += 1

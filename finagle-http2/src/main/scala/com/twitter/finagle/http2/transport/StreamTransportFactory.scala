@@ -1,6 +1,9 @@
 package com.twitter.finagle.http2.transport
 
 import com.twitter.concurrent.AsyncQueue
+import com.twitter.finagle.http.TooLongMessageException
+import com.twitter.finagle.http2.{GoAwayException, RstException}
+import com.twitter.finagle.http2.param.PriorKnowledge
 import com.twitter.finagle.http2.transport.Http2ClientDowngrader._
 import com.twitter.finagle.liveness.FailureDetector
 import com.twitter.finagle.netty4.transport.HasExecutor
@@ -58,7 +61,14 @@ final private[http2] class StreamTransportFactory(
   // A map of active streamIds -> StreamTransport. Concurrency issues are handled by the serial
   // executor.
   private[this] val activeStreams = new MutableHashMap[Int, StreamTransport]()
-  private[this] val id = new AtomicInteger(1)
+
+  // If it's not priorknowledge or tls/alpn, then it must be h2c
+  private[this] val isH2c =
+    !(params[PriorKnowledge].enabled || params[Transport.ClientSsl].sslClientConfiguration.isDefined)
+
+  // For non-H2C sessions we pick a higher initial id to avoid an NPE which can
+  // happen when the first stream is deregistered. see: https://github.com/netty/netty/issues/7898
+  private[this] val id = if (isH2c) new AtomicInteger(1) else new AtomicInteger(3)
 
   // This state as well as operations that start or stop streams and goaways are serialized via `exec`
   @volatile private[this] var dead = false
@@ -112,15 +122,14 @@ final private[http2] class StreamTransportFactory(
   // this connection as closed, it gets torn down.
   detector.onClose.ensure(close())
 
-  private[this] def handleGoaway(obj: HttpObject, lastStreamId: Int): Unit = {
+  private[this] def handleGoaway(addr: SocketAddress, obj: HttpObject, lastStreamId: Int, errorCode: Long): Unit = {
     dead = true
     activeStreams.values.foreach { stream =>
       if (stream.curId > lastStreamId) {
-        stream
-          .handleCloseStream(
-            s"the stream id (${stream.curId}) was higher than the last stream" +
-              s" id ($lastStreamId) on a GOAWAY"
-          )
+
+        // Any streams beyond `lastStreamId` haven't been processed so we mark them
+        // as retryable.
+        stream.handleCloseWith(new GoAwayException(errorCode, stream.curId, Some(addr), FailureFlags.Retryable))
       }
     }
   }
@@ -171,22 +180,20 @@ final private[http2] class StreamTransportFactory(
           }
       }
 
-    case GoAway(msg, lastStreamId, _) =>
-      handleGoaway(msg, lastStreamId)
+    case GoAway(msg, lastStreamId, errorCode) =>
+      handleGoaway(addr, msg, lastStreamId, errorCode)
 
     case Rst(streamId, errorCode) =>
       val error =
         if (errorCode == Http2Error.REFUSED_STREAM.code) Failure.RetryableNackFailure
         else if (errorCode == Http2Error.ENHANCE_YOUR_CALM.code) Failure.NonRetryableNackFailure
-        else new StreamClosedException(addr, streamId.toString)
+        else new RstException(errorCode, streamId, Some(addr))
 
       activeStreams.get(streamId) match {
         case Some(stream) =>
           handleRemoveStream(streamId)
           removeRstCounter.incr()
-          // mark the stream as dead to ensure we don't send an RST in response
-          stream.handleState(Dead)
-          stream.handleCloseWith(error)
+          stream.handleCloseWith(error, canRst = false)
         case None =>
           // According to spec, an endpoint should not send another RST upon receipt
           // of an RST for an absent stream ID as this could cause a loop.
@@ -194,6 +201,16 @@ final private[http2] class StreamTransportFactory(
             log.debug(s"Got RST for nonexistent stream: $streamId, code: $errorCode")
       }
 
+    case StreamException(exn, streamId) =>
+      val error = TooLongMessageException(exn, addr)
+      activeStreams.get(streamId) match {
+        case Some(stream) =>
+          handleRemoveStream(streamId)
+          stream.handleCloseWith(error, canRst = false)
+        case None =>
+          if (log.isLoggable(Level.DEBUG))
+            log.debug(exn, s"Got exception for nonexistent stream: $streamId")
+      }
     case Ping =>
       if (pingPromise != null) {
         pingPromise.setDone()
@@ -218,7 +235,6 @@ final private[http2] class StreamTransportFactory(
         case Return(msg) =>
           handleSuccessfulRead(msg)
           loop()
-
         case Throw(e) =>
           handleClose(Time.Bottom, Some(e))
       }
@@ -244,7 +260,7 @@ final private[http2] class StreamTransportFactory(
     if (firstOnce.compareAndSet(false, true)) {
       val st = new StreamTransport()
       st.handleNewStream()
-      st.handleState(Active(finishedWriting = true, finishedReading = false))
+      st.handleState(active(finishedWriting = true, finishedReading = false))
       st
     } else {
       throw new IllegalStateException(s"$this.first() was called multiple times")
@@ -331,6 +347,8 @@ final private[http2] class StreamTransportFactory(
       case Idle =>
         val newId = id.getAndAdd(2)
         if (newId < 0) {
+          // When stream identifiers have been exhausted, a new connection must be established
+          parent.dead = true
           handleCloseWith(new StreamIdOverflowException(addr))
         } else if (newId % 2 != 1) {
           handleCloseWith(new IllegalStreamIdException(addr, newId))
@@ -347,7 +365,7 @@ final private[http2] class StreamTransportFactory(
               s"Queue was not empty (size=$queueSize) when creating new stream. Head: $head"
             )
           } else {
-            handleState(Active(finishedReading = false, finishedWriting = false))
+            handleState(active(finishedReading = false, finishedWriting = false))
             activeStreams.put(newId, stream)
             _curId = newId
           }
@@ -375,7 +393,7 @@ final private[http2] class StreamTransportFactory(
 
     private[this] def handleCheckFinished() = state match {
       case a: Active if a.finished && queue.size == 0 =>
-        if (parent.dead) handleCloseStream(s"parent MultiplexedTransporter already dead")
+        if (parent.dead) handleCloseStream(s"parent StreamTransportFactory already dead")
         else {
           if (handleRemoveStream(curId)) {
             removeIdleCounter.incr()
@@ -402,7 +420,7 @@ final private[http2] class StreamTransportFactory(
     private[this] def handleWriteAndCheck(obj: HttpObject): Future[Unit] = state match {
       case a: Active =>
         if (obj.isInstanceOf[LastHttpContent]) {
-          handleState(a.copy(finishedWriting = true))
+          handleState(a.finishWriting)
           handleCheckFinished()
         }
 
@@ -490,7 +508,7 @@ final private[http2] class StreamTransportFactory(
       state match {
         case a: Active if !a.finishedReading =>
           if (obj.isInstanceOf[LastHttpContent]) {
-            handleState(a.copy(finishedReading = true))
+            handleState(a.finishReading)
           }
 
           if (!queue.offer(obj)) {
@@ -538,9 +556,9 @@ final private[http2] class StreamTransportFactory(
       handleCloseWith(new StreamClosedException(Some(addr), _curId.toString, whyFailed), deadline)
     }
 
-    private[http2] def handleCloseWith(exn: Throwable, deadline: Time = Time.Bottom): Unit = {
+    private[http2] def handleCloseWith(exn: Throwable, deadline: Time = Time.Bottom, canRst: Boolean = true): Unit = {
       state match {
-        case a: Active if !a.finished =>
+        case a: Active if (!a.finished) && canRst =>
           underlying
             .write(Rst(_curId, Http2Error.CANCEL.code))
             .by(deadline)(DefaultTimer) // TODO: Get Timer from stack params
@@ -576,9 +594,15 @@ private[http2] object StreamTransportFactory {
   }
 
   /**
-   * Stream represents a stream with active reading/writing
+   * Stream represents a stream with active reading/writing.
+   * Use [[active()]] to get instances.
+   *
+   * Note, these are immutable/persistent structs.
    */
-  private case class Active(finishedReading: Boolean, finishedWriting: Boolean) extends StreamState {
+  final class Active private[StreamTransportFactory](
+    val finishedReading: Boolean,
+    val finishedWriting: Boolean)
+  extends StreamState {
     def finished: Boolean = finishedWriting && finishedReading
     override def toString: String = {
       if (finished)
@@ -589,6 +613,35 @@ private[http2] object StreamTransportFactory {
         "Active(reading)"
       else
         "Active(reading/writing)"
+    }
+
+    def finishReading: Active =
+      active(finishedReading = true, this.finishedWriting)
+
+    def finishWriting: Active =
+      active(this.finishedReading, finishedWriting = true)
+  }
+
+  private val ActiveReadingAndWriting: Active =
+    new Active(finishedReading = false, finishedWriting = false)
+
+  private val ActiveWriting: Active =
+    new Active(finishedReading = true, finishedWriting = false)
+
+  private val ActiveReading: Active =
+    new Active(finishedReading = false, finishedWriting = true)
+
+  private val ActiveFinished: Active =
+    new Active(finishedReading = true, finishedWriting = true)
+
+  /** Get an instance of [[Active]]. */
+  def active(finishedReading: Boolean, finishedWriting: Boolean): Active = {
+    if (finishedReading) {
+      if (finishedWriting) ActiveFinished
+      else ActiveWriting
+    } else {
+      if (finishedWriting) ActiveReading
+      else ActiveReadingAndWriting
     }
   }
 

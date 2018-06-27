@@ -8,12 +8,7 @@ import com.twitter.finagle.service.{ReqRep, ResponseClass, ResponseClassifier}
 import com.twitter.finagle.ssl.{ClientAuth, KeyCredentials, TrustCredentials}
 import com.twitter.finagle.ssl.client.SslClientConfiguration
 import com.twitter.finagle.ssl.server.SslServerConfiguration
-import com.twitter.finagle.stats.{
-  InMemoryStatsReceiver,
-  LoadedStatsReceiver,
-  NullStatsReceiver,
-  StatsReceiver
-}
+import com.twitter.finagle.stats.{InMemoryStatsReceiver, LoadedStatsReceiver, NullStatsReceiver, StatsReceiver}
 import com.twitter.finagle.thrift.service.ThriftResponseClassifier
 import com.twitter.finagle.thrift.thriftscala._
 import com.twitter.finagle.tracing.{Annotation, Record, Trace}
@@ -24,7 +19,7 @@ import com.twitter.util._
 import java.io.{PrintWriter, StringWriter}
 import java.net.{InetAddress, InetSocketAddress, SocketAddress}
 import org.apache.thrift.TApplicationException
-import org.apache.thrift.protocol.{TCompactProtocol, TProtocolFactory}
+import org.apache.thrift.protocol.{TBinaryProtocol, TCompactProtocol, TProtocolFactory}
 import org.scalatest.{BeforeAndAfter, FunSuite}
 import scala.reflect.ClassTag
 
@@ -170,7 +165,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
         new InetSocketAddress(InetAddress.getLoopbackAddress, 0),
         ifaceToService(impl, RichServerParam())
       )
-    val client = Thrift.client.newIface[B.ServiceIface](
+    val client = Thrift.client.build[B.ServiceIface](
       Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
       "client"
     )
@@ -213,36 +208,6 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
   testThrift("(don't) propagate Dtab") { (client, tracer) =>
     val dtabSize = Await.result(client.show_me_your_dtab_size(), 10.seconds)
     assert(dtabSize == 0)
-  }
-
-  test("JSON is broken (before we upgrade)") {
-    // We test for the presence of a JSON encoding
-    // bug in thrift 0.5.0[1]. See THRIFT-1375.
-    //  When we upgrade, this test will fail and helpfully
-    // remind us to add JSON back.
-    import java.nio.ByteBuffer
-    import org.apache.thrift.protocol._
-    import org.apache.thrift.transport._
-
-    val bytes = Array[Byte](102, 100, 125, -96, 57, -55, -72, 18, -21, 15, -91, -36, 104, 111, 111,
-      -127, -21, 15, -91, -36, 104, 111, 111, -127, 0, 0, 0, 0, 0, 0, 0, 0)
-    val pf = new TJSONProtocol.Factory()
-
-    val json = {
-      val buf = new TMemoryBuffer(512)
-      pf.getProtocol(buf).writeBinary(ByteBuffer.wrap(bytes))
-      java.util.Arrays.copyOfRange(buf.getArray(), 0, buf.length())
-    }
-
-    val decoded = {
-      val trans = new TMemoryInputTransport(json)
-      val bin = pf.getProtocol(trans).readBinary()
-      val bytes = new Array[Byte](bin.remaining())
-      bin.get(bytes, 0, bin.remaining())
-      bytes
-    }
-
-    assert(bytes.toSeq != decoded.toSeq, "Add JSON support back")
   }
 
   testThrift("end-to-end tracing potpourri") { (client, tracer) =>
@@ -344,7 +309,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
             trustCredentials = TrustCredentials.CertCollection(interFile)
           )
         )
-        .newIface[B.ServiceIface](
+        .build[B.ServiceIface](
           Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
           "client"
         )
@@ -362,9 +327,9 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     server.close()
   }
 
-  test("serveIface works with X.FutureIface, X[Future] with extended services") {
-    // 1. Server extends X.FutureIface.
-    class ExtendedEchoService1 extends ExtendedEcho.FutureIface {
+  test("serveIface works with X.MethodPerEndpoint, X[Future] with extended services") {
+    // 1. Server extends X.MethodPerEndpoint.
+    class ExtendedEchoService1 extends ExtendedEcho.MethodPerEndpoint {
       override def echo(msg: String): Future[String] = Future.value(msg)
       override def getStatus(): Future[String] = Future.value("OK")
     }
@@ -373,7 +338,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
       new InetSocketAddress(InetAddress.getLoopbackAddress, 0),
       new ExtendedEchoService1()
     )
-    val client1 = Thrift.client.newIface[ExtendedEcho.FutureIface](
+    val client1 = Thrift.client.build[ExtendedEcho.MethodPerEndpoint](
       Name.bound(Address(server1.boundAddress.asInstanceOf[InetSocketAddress])),
       "client"
     )
@@ -390,7 +355,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
       new InetSocketAddress(InetAddress.getLoopbackAddress, 0),
       new ExtendedEchoService2()
     )
-    val client2 = Thrift.client.newIface[ExtendedEcho.FutureIface](
+    val client2 = Thrift.client.build[ExtendedEcho.MethodPerEndpoint](
       Name.bound(Address(server2.boundAddress.asInstanceOf[InetSocketAddress])),
       "client"
     )
@@ -419,7 +384,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
   }
 
   private def serverForClassifier(): ListeningServer = {
-    val iface = new Echo.FutureIface {
+    val iface = new Echo.MethodPerEndpoint {
       def echo(x: String) =
         if (x == "safe")
           Future.value("safe")
@@ -435,7 +400,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
   }
 
   private def serverWithClassifier(sr: InMemoryStatsReceiver): ListeningServer = {
-    val iface = new Echo.FutureIface {
+    val iface = new Echo.MethodPerEndpoint {
       def echo(x: String) =
         if (x == "safe")
           Future.value("safe")
@@ -449,12 +414,13 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
       .withStatsReceiver(sr)
       .withResponseClassifier(scalaClassifier)
       .withRequestTimeout(100.milliseconds)
+      .withPerEndpointStats
       .serveIface(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), iface)
   }
 
   private def testScalaClientResponseClassification(
     sr: InMemoryStatsReceiver,
-    client: Echo.FutureIface
+    client: Echo.MethodPerEndpoint
   ): Unit = {
     val ex = intercept[InvalidQueryException] {
       Await.result(client.echo("hi"), 5.seconds)
@@ -486,7 +452,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
 
   private def testScalaServerResponseClassification(
     sr: InMemoryStatsReceiver,
-    client: Echo.FutureIface
+    client: Echo.MethodPerEndpoint
   ): Unit = {
     val ex = intercept[InvalidQueryException] {
       Await.result(client.echo("hi"), 5.seconds)
@@ -547,7 +513,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
       .withStatsReceiver(sr)
       .withResponseClassifier(scalaClassifier)
       .withRequestTimeout(100.milliseconds) // used in conjuection with a "slow" query
-      .newIface[Echo.FutureIface](
+      .build[Echo.MethodPerEndpoint](
         Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
         "client"
       )
@@ -559,7 +525,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
   test("scala thrift stack server using response classification") {
     val sr = new InMemoryStatsReceiver()
     val server = serverWithClassifier(sr)
-    val client = Thrift.client.newIface[Echo.FutureIface](
+    val client = Thrift.client.build[Echo.MethodPerEndpoint](
       Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
       "client"
     )
@@ -574,7 +540,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     val client = Thrift.client
       .configured(Stats(sr))
       .withResponseClassifier(javaClassifier)
-      .newIface[thriftjava.Echo.ServiceIface](
+      .build[thriftjava.Echo.ServiceIface](
         Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
         "client"
       )
@@ -623,7 +589,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     val client = Thrift.client
       .configured(Stats(sr))
       .withResponseClassifier(ThriftResponseClassifier.ThriftExceptionsAsFailures)
-      .newIface[Echo.FutureIface](
+      .build[Echo.MethodPerEndpoint](
         Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
         "client"
       )
@@ -648,7 +614,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     val client = Thrift.client
       .configured(Stats(sr))
       .withResponseClassifier(ThriftResponseClassifier.ThriftExceptionsAsFailures)
-      .newIface[thriftjava.Echo.ServiceIface](
+      .build[thriftjava.Echo.ServiceIface](
         Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
         "client"
       )
@@ -668,7 +634,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
   }
 
   test("Thrift server stats are properly scoped") {
-    val iface: Echo.FutureIface = new Echo.FutureIface {
+    val iface: Echo.MethodPerEndpoint = new Echo.MethodPerEndpoint {
       def echo(x: String) =
         Future.value(x)
     }
@@ -680,9 +646,10 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     LoadedStatsReceiver.self = sr
 
     val server = Thrift.server
+      .withPerEndpointStats
       .serveIface(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), iface)
 
-    val client = Thrift.client.newIface[Echo.FutureIface](
+    val client = Thrift.client.build[Echo.MethodPerEndpoint](
       Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
       "client"
     )
@@ -702,7 +669,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
 
     val serverStats = new InMemoryStatsReceiver
 
-    val iface = new Echo.FutureIface {
+    val iface = new Echo.MethodPerEndpoint {
       def echo(x: String) =
         if (x == "safe")
           Future.value("safe")
@@ -714,6 +681,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     val server = Thrift.server
       .withMaxReusableBufferSize(15)
       .withStatsReceiver(serverStats)
+      .withPerEndpointStats
       .serveIface(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), iface)
 
     val clientStats = new InMemoryStatsReceiver
@@ -722,7 +690,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
       .withMaxReusableBufferSize(15)
       .withResponseClassifier(ThriftResponseClassifier.ThriftExceptionsAsFailures)
       .withStatsReceiver(clientStats)
-      .newIface[Echo.FutureIface](
+      .build[Echo.MethodPerEndpoint](
       Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
       "client"
     )
@@ -746,7 +714,29 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
 
   }
 
-  private[this] val servers: Seq[(String, (StatsReceiver, Echo.FutureIface) => ListeningServer)] =
+  test("per-endpoint stats won't be recorded if not explicitly set enabled") {
+    val iface: Echo.MethodPerEndpoint = new Echo.MethodPerEndpoint {
+      def echo(x: String) =
+        Future.value(x)
+    }
+    val sr = new InMemoryStatsReceiver
+    val server = Thrift.server
+      .withStatsReceiver(sr)
+      .serveIface(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), iface)
+
+    val client = Thrift.client.build[Echo.MethodPerEndpoint](
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
+
+    assert(Await.result(client.echo("hi"), 1.second) == "hi")
+    intercept[NoSuchElementException] {assert(sr.counters(Seq("thrift", "echo", "requests")) == 1)}
+    assert(sr.counters(Seq("requests")) == 1)
+
+    server.close()
+  }
+
+  private[this] val servers: Seq[(String, (StatsReceiver, Echo.MethodPerEndpoint) => ListeningServer)] =
     Seq(
       "Thrift.server" ->
         (
@@ -774,7 +764,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
         )
     )
 
-  private[this] val clients: Seq[(String, (StatsReceiver, Address) => Echo.FutureIface)] = Seq(
+  private[this] val clients: Seq[(String, (StatsReceiver, Address) => Echo.MethodPerEndpoint)] = Seq(
     "Thrift.client" ->
       (
         (
@@ -783,7 +773,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
         ) =>
           Thrift.client
             .withStatsReceiver(sr)
-            .newIface[Echo.FutureIface](Name.bound(addr), "client")
+            .build[Echo.MethodPerEndpoint](Name.bound(addr), "client")
       ),
     "ClientBuilder(stack)" ->
       (
@@ -810,7 +800,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     test(s"measures payload sizes: $s :: $c") {
       val sr = new InMemoryStatsReceiver
 
-      val fi = new Echo.FutureIface {
+      val fi = new Echo.MethodPerEndpoint {
         def echo(x: String) = Future.value(x + x)
       }
 
@@ -848,7 +838,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
       .withProtocolFactory(pf)
       .withClientId(ClientId("aClient"))
       .withNoAttemptTTwitterUpgrade
-      .newIface[B.ServiceIface](
+      .build[B.ServiceIface](
         Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
         "client"
       )
@@ -856,13 +846,52 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     assert(Await.result(client.someway(), timeout = 100.millis) == null)
     assert(sr.stats.get(Seq("codec_connection_preparation_latency_ms")) == None)
   }
+
+  test("default protocolFactory should return TFinagleProtocol") {
+
+    val clientParamDefault = RichClientParam()
+    clientParamDefault.protocolFactory.getClass.getName.contains("finagle.thrift.Protocols") == true
+  }
+
+  test ("TBinaryProtocol.Factory has all correct field") {
+    val clientParamTBF = RichClientParam(new TBinaryProtocol.Factory(false, false))
+    val strictReadField = clientParamTBF.protocolFactory.getClass.getDeclaredField("strictRead_")
+    val strictWriteField = clientParamTBF.protocolFactory.getClass.getDeclaredField("strictWrite_")
+    val readLimitField = clientParamTBF.protocolFactory.getClass.getDeclaredField("stringLengthLimit_")
+
+    strictReadField.setAccessible(true)
+    strictWriteField.setAccessible(true)
+    readLimitField.setAccessible(true)
+
+    strictReadField.get(clientParamTBF.protocolFactory) == false
+    strictWriteField.get(clientParamTBF.protocolFactory) == false
+    readLimitField.get(clientParamTBF.protocolFactory) == Protocols.NoReadLimit
+  }
+
+  test ("TBinaryProtocol.Factory has right info after we set system property") {
+
+    System.setProperty("org.apache.thrift.readLength", "1000")
+    val clientParamSysProp = RichClientParam(new TBinaryProtocol.Factory(false, false))
+    val strictReadField = clientParamSysProp.protocolFactory.getClass.getDeclaredField("strictRead_")
+    val strictWriteField = clientParamSysProp.protocolFactory.getClass.getDeclaredField("strictWrite_")
+    val readLimitField = clientParamSysProp.protocolFactory.getClass.getDeclaredField("stringLengthLimit_")
+
+    strictReadField.setAccessible(true)
+    strictWriteField.setAccessible(true)
+    readLimitField.setAccessible(true)
+
+    strictReadField.get(clientParamSysProp.protocolFactory) == false
+    strictWriteField.get(clientParamSysProp.protocolFactory) == false
+    readLimitField.get(clientParamSysProp.protocolFactory) == 1000
+    System.clearProperty("org.apache.thrift.readLength")
+  }
 }
 
 /*
 
 [1]
-% diff -u /Users/marius/src/thrift-0.5.0-finagle/lib/java/src/org/apache/thrift/protocol/TJSONProtocol.java /Users/marius/pkg/thrift/lib/java/src/org/apache/thrift/protocol/TJSONProtocol.java
---- /Users/marius/src/thrift-0.5.0-finagle/lib/java/src/org/apache/thrift/protocol/TJSONProtocol.java	2013-09-16 12:17:53.000000000 -0700
+% diff -u /Users/marius/src/thrift-finagle/lib/java/src/org/apache/thrift/protocol/TJSONProtocol.java /Users/marius/pkg/thrift/lib/java/src/org/apache/thrift/protocol/TJSONProtocol.java
+--- /Users/marius/src/thrift-finagle/lib/java/src/org/apache/thrift/protocol/TJSONProtocol.java	2013-09-16 12:17:53.000000000 -0700
 +++ /Users/marius/pkg/thrift/lib/java/src/org/apache/thrift/protocol/TJSONProtocol.java	2013-09-05 20:20:07.000000000 -0700
 @@ -313,7 +313,7 @@
    // Temporary buffer used by several methods

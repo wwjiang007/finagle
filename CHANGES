@@ -7,6 +7,273 @@ Note that ``PHAB_ID=#`` and ``RB_ID=#`` correspond to associated messages in com
 Unreleased
 ----------
 
+New Features
+~~~~~~~~~~~~
+
+  * finagle-core: There is now an implicit instance for Finagle's default timer:
+    `DefaultTimer.Implicit`. ``PHAB_ID=D185896``
+
+  * finagle-mysql: `com.twitter.util.Time` can now be used with
+    `PreparedStatement`s without converting the `ctu.Time` to a `java.sql.Timestamp`.
+    ``PHAB_ID=D182973``
+
+  * finagle-stats: Adds a lint rule to detect when metrics with colliding names are used.
+    ``PHAB_ID=D183494``
+
+Breaking API Changes
+~~~~~~~~~~~~~~~~~~~~
+
+  * finagle-mux: `ClientDiscardedRequestException` now extends `FailureFlags` and is no longer
+    a case class. ``PHAB_ID=D183456``
+
+Runtime Behavior Changes
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+  * finagle-mux: When mux propagates an interrupt started by `BackupRequestFilter` over the
+    network, the `FailureFlags.Ignorable` status is propagated with it.  ``PHAB_ID=D183456``
+
+18.6.0
+-------
+
+Runtime Behavior Changes
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+  * finagle-core: By default, the deterministic aperture load balancer doesn't expand
+    based on the loadband. This is because the loadband is influenced by a degree of
+    randomness, and this breaks the deterministic part of deterministic aperture and
+    can lead to aggressive banding on backends. ``PHAB_ID=D180922``
+
+  * finagle-http2: Unprocessed streams are retryable in case of GOAWAY.
+    ``PHAB_ID=D174401``
+
+New Features
+~~~~~~~~~~~~
+
+  * finagle-core: Add `PropagateDeadlines` `Stack.Param` to `TimeoutFilter` for
+    disabling propagation of deadlines to outbound requests.
+    ``PHAB_ID=D168405``
+
+  * finagle-core: Add `toString` implementations to `c.t.finagle.Service` and
+    `c.t.finagle.Filter`. Update in `Filter#andThen` composition to expose a
+    useful `toString` for composed Filters and a composed Service (a Filter chain
+    with a terminal Service or ServiceFactory).
+
+    The default implementation for `Filter` and `Service` is `getClass.getName`. When
+    composing filters, the `andThen` composition method correctly tracks the composed
+    parts to produce a useful `toString`, e.g.,
+
+.. code-block:: scala
+
+  package com.foo
+
+  import com.twitter.finagle.{Filter, Service}
+  import com.twitter.util.Future
+
+  class MyFilter1 extends Filter[Int, Int, Int, Int] {
+     def apply(request: Int, service: Service[Int, Int]): Future[Int] = ???
+  }
+
+.. code-block:: scala
+
+  package com.foo
+
+  import com.twitter.finagle.{Filter, Service}
+  import com.twitter.util.Future
+
+  class MyFilter2 extends Filter[Int, Int, Int, Int] {
+    def apply(request: Int, service: Service[Int, Int]): Future[Int] = ???
+  }
+
+.. code-block:: scala
+
+  val filters = (new MyFilter1).andThen(new MyFilter2)
+
+`filters.toString` would emit the String "com.foo.MyFilter1.andThen(com.foo.MyFilter2)"
+
+If a Service (or ServiceFactory) were then added:
+
+.. code-block:: scala
+
+  import com.twitter.finagle.{Filter, Service}
+  import com.twitter.finagle.service.ConstantService
+  import com.twitter.util.Future
+
+  ...
+
+  val svc: Service[Int, Int] = filters.andThen(new ConstantService[Int, Int](Future.value(2)))
+
+Then, `svc.toString` would thus return the String:
+"com.foo.MyFilter1.andThen(com.foo.MyFilter2).andThen(com.twitter.finagle.service.ConstantService(ConstFuture(2)))"
+
+Filter implementations are permitted to override their `toString` implementations which would
+replace the default of `getClass.getName`. ``PHAB_ID=D172526``
+
+  * finagle-core: Make `Filter.TypeAgnostic` an abstract class for Java usability.
+    ``PHAB_ID=D172716``
+
+  * finagle-core: `c.t.f.filter.NackAdmissionFilter` is now public. ``PHAB_ID=D177322``
+
+  * finagle-core: Extended `c.t.f.ssl.KeyCredentials` and `c.t.f.ssl.TrustCredentials` to work
+    with `javax.net.ssl.KeyManagerFactory` and `javax.net.ssl.TrustManagerFactory` respectively.
+    ``PHAB_ID=D177484``
+
+Breaking API Changes
+~~~~~~~~~~~~~~~~~~~~
+  * finagle-core: Rename `DeadlineFilter.Param(maxRejectFraction)` to
+    `DeadlineFilter.MaxRejectFraction(maxRejectFraction)` to reduce confusion
+    when adding additional params.
+    ``PHAB_ID=D172402``
+
+
+Bug Fixes
+~~~~~~~~~
+
+  * finagle-http2: `StreamTransportFactory` now marks itself as dead/closed when it runs out of
+    HTTP/2 stream IDs instead of stalling. This allows the connection to be closed/reestablished in
+    accordance with the spec ``PHAB_ID=D175898``
+
+  * finagle-netty4: `SslServerSessionVerifier` is now supplied with the proper peer address
+    rather than `Address.failing`. ``PHAB_ID=D168334``
+
+  * finagle-thrift/thriftmux: Disabled client side per-endpoint stats by default for client
+    ServicePerEndpoint. It can be set via `c.t.f.thrift.RichClientParam` or a `with`-method
+    as `Thrift{Mux}.client.withPerEndpointStats`. ``PHAB_ID=D169427``
+
+  * finagle-netty4: Avoid NoClassDefFoundError if netty-transport-native-epoll is not available
+    on the classpath.
+
+18.5.0
+-------
+
+New Features
+~~~~~~~~~~~~
+
+  * finagle-base-http: Added ability to add SameSite attribute to Cookies to
+    comply with https://tools.ietf.org/html/draft-west-first-party-cookies-07.
+    The attribute may be set in the constructor via the `c.t.f.http.Cookie`
+    `sameSite` param or via the `c.t.f.http.Cookie.sameSite` method. ``PHAB_ID=D157942``
+
+    - Pass `SameSite.Lax` to the `Cookie` to add the "Lax" attribute.
+    - Pass `SameSite.Strict` to the `Cookie` to add the "Strict" attribute.
+
+  * finagle-base-http: Introduced an API to extract query string params from a
+    `c.t.f.http.Request`, `c.t.f.http.Uri.fromRequest` and `c.t.f.http.Uri#params`.
+    ``PHAB_ID=D160298``
+
+  * finagle-mysql: Added APIs to `Row` which simplify the common access pattern.
+    For example, `Row.stringOrNull(columnName: String): String` and
+    `Row.getString(columnName: String): Option[String]`.
+    ``PHAB_ID=D156926``, ``PHAB_ID=D157360``
+
+  * finagle-mysql: Added `read` and `modify` APIs to `c.t.f.mysql.Client` and
+    `c.t.f.mysql.PreparedStatement` for that return the specific type of
+    `Result` for those operations, `ResultSet` and `OK` respectively.
+    ``PHAB_ID=D160215``
+
+  * finagle-serversets: Zk2Session's AsyncSemaphore which controls the maximum
+    concurrent Zk operations is configurable (GlobalFlag c.t.f.serverset2.zkConcurrentOperations).
+    ```PHAB_ID=D157709```
+
+  * finagle-mysql: Address `CursoredStatement` usability from Java via
+    `CursoredStatement.asJava()`. Through this, you can use the API with
+    varargs and Java 8 lambdas. ``PHAB_ID=D158399``
+
+  * finagle-toggle: Improved Java compatibility for `ToggleMap` and `Toggle`. ``PHAB_ID=D164489``
+
+  * finagle-toggle: `StandardToggleMap.apply` and `StandardToggleMap.registeredLibraries` now
+    use `ToggleMap.Mutable` to better support mutating the underlying mutable `ToggleMap`.
+    ``PHAB_ID=D167046``
+
+Breaking API Changes
+~~~~~~~~~~~~~~~~~~~~
+
+  * finagle-mux: With the introduction of the push-based mux client, we've
+    removed the need for the optimized `c.t.f.Mux.Netty4RefCountingControl`
+    MuxImpl, which has been removed. ``PHAB_ID=D141010``
+
+  * finagle-mysql: `c.t.f.mysql.Client.ping` now returns a `Future[Unit]`
+    instead of the broad `Future[Result]` ADT. ``PHAB_ID=D160215``
+
+  * finagle-toggle: Changed `ToggleMap.Mutable` from a trait to an abstract class, and
+    `ToggleMap.Proxy` no longer extends `ToggleMap`, but now has a self-type that conforms to
+    `ToggleMap` instead. ``PHAB_ID=D164489``
+
+Runtime Behavior Changes
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+  * finagle-core: Add `c.t.f.SslException` to better model exceptions related to SSL/TLS.
+    The `c.t.f.ChannelException.apply` method will now wrap `javax.net.ssl.SSLException`s in
+    `c.t.f.SslException`. ``PHAB_ID=D158344``
+
+  * finagle-core: MethodBuilder metrics now include failures.
+    ``PHAB_ID=D167589``, ``PHAB_ID=D168095``
+
+  * finagle-http: ServerAdmissionControl is circumvented for HTTP requests that have
+    a body unless the request contains the header 'finagle-http-retryable-request' since
+    it cannot be known whether the client can actually retry them, potentially resulting
+    in depressed success rates during periods of throttling. ``PHAB_ID=D134209``
+
+  * finagle-http2: Clients and servers no longer attempt a cleartext upgrade if the
+    first request of the HTTP/1.1 session has a body. ``PHAB_ID=D153986``
+
+  * finagle-thriftmux: The push-based client muxer is now the default muxer implementation.
+    The push-based muxer has better performance and a simpler architecture. ``PHAB_ID=D158134``
+
+  * finagle-toggle: `ToggleMap.Proxy#underlying` is now public, and `ToggleMap.Proxy`
+    participates in `ToggleMap.components`. ``PHAB_ID=D167046``
+
+Bug Fixes
+~~~~~~~~~
+
+  * finagle-base-http: Concurrent modification of the `c.t.f.http.DefaultHeaderMap` could
+    result in an infinite loop due to HashMap corruption. Access is now synchronized to avoid
+    the infinite loop. ``PHAB_ID=D159250``
+
+  * finagle-core: `FailureFlags` that have their flags set modified will now
+    retain the original stack trace, suppressed Throwables, and cause when possible.
+    ``PHAB_ID=D160402``
+
+  * finagle-memcached: Added the missing support for partial success for the batch
+    operations in the new PartitioningService based Memcached client. ``PHAB_ID=D161249``
+
+  * finagle-thrift: Removed copied libthrift files. ``PHAB_ID=D165455``
+
+  * finagle-thrift/thriftmux: Server side per-endpoint statsFilter by default is disabled now.
+    It can be set via `c.t.f.thrift.RichServerParam` or a `with`-method as
+    `Thrift{Mux}.server.withPerEndpointStats`. ``PHAB_ID=D167433``
+
+18.4.0
+-------
+
+New Features
+~~~~~~~~~~~~
+
+  * finagle-core: `c.t.f.filter.NackAdmissionFilter` can now be disabled via a `with`-method.
+    `$Protocol.client.withAdmissionControl.noNackAdmissionControl` ``PHAB_ID=D146873``
+
+  * finagle-mysql: Exceptions now include the SQL that was being executed when possible.
+    ``PHAB_ID=D150503``
+
+  * finagle-mysql: Address `PreparedStatement` usability from Java via
+    `PreparedStatement.asJava()`. Through this, you can use the API with
+    varargs and Java 8 lambdas. ``PHAB_ID=D156755``
+
+  * finagle-mysql: Added support for `Option`\s to `Parameter` implicits. This
+    allows for the natural representation of nullable columns with an `Option`
+    where a `None` is treated as a `null`. ``PHAB_ID=D156186``
+
+  * finagle-netty4: Add 'tls/connections' gauge for Finagle on Netty 4 which tracks the number
+    of open SSL/TLS connections per Finagle client or server.
+    ``PHAB_ID=D144184``
+
+  * finagle-redis: Support has been added for a number of new cluster commands
+    introduced in Redis 3.0.0. ``PHAB_ID=D152186``
+
+Bug Fixes
+~~~~~~~~~
+
+  * finagle-mysql: Fix handling of interrupts during transactions. ``PHAB_ID=D154441``
+
 Breaking API Changes
 ~~~~~~~~~~~~~~~~~~~~
 
@@ -14,8 +281,30 @@ Breaking API Changes
     `sun.security.util.HostnameChecker` which is no longer accessible in JDK 9.
     ``PHAB_ID=D144149``
 
+  * finagle-thrift: Upgraded libthrift to 0.10.0, `c.t.f.thrift.Protocols.TFinagleBinaryProtocol`
+    constructor now takes `stringLengthLimit` and `containerLengthLimit`, `NO_LENGTH_LIMIT` value
+    changed from 0 to -1. ``PHAB_ID=D124620``
+
+  * finagle-thrift: Move "stateless" methods in `c.t.finagle.thrift.ThriftRichClient`
+    to `c.t.finagle.thrift.ThriftClient`. Then mix the `ThriftClient` trait into the
+    ThriftMux and Thrift Client companions to make it clearer that these stateless methods
+    are not affected by the changing state of the configured client instance but are instead
+    simply utility methods which convert or wrap the incoming argument. ``PHAB_ID=D143185``
+
+  * finagle-base-http: Removed deprecated `c.t.f.Cookie.value_=`; use `c.t.f.Cookie.value`
+    instead. ``PHAB_ID=D148266``
+
+  * finagle-base-http: Removed deprecated `c.t.f.Cookie.domain_=`; use `c.t.f.Cookie.domain`
+    instead. ``PHAB_ID=D148266``
+
+  * finagle-base-http: Removed deprecated `c.t.f.Cookie.path_=`; use `c.t.f.Cookie.path`
+    instead. ``PHAB_ID=D148266``
+
 Runtime Behavior Changes
 ~~~~~~~~~~~~~~~~~~~~~~~~
+
+  * finagle-core: Add minimum request threshold for `successRateWithinDuration` failure accrual.
+    ``PHAB_ID=D154129``
 
   * finagle-core: `c.t.f.filter.NackAdmissionFilter` no longer takes effect when
     the client's request rate is too low to accurately update the EMA value or
@@ -27,6 +316,17 @@ Runtime Behavior Changes
     However it now occurs before the SSL/TLS handshake has been completed, and the
     exception on failure has changes from a `c.t.f.SslHostVerificationException` to a
     `javax.net.ssl.CertificateException`. ``PHAB_ID=D144149``
+
+  * finagle-core: Closing `c.t.f.NullServer` is now a no-op. ``PHAB_ID=D156098``
+
+  * finagle-netty4: Netty ByteBuf leak tracking is enabled by default. ``PHAB_ID=D152828``
+
+Deprecations
+~~~~~~~~~~~~
+
+  * finagle-thrift: System property "-Dorg.apache.thrift.readLength" is deprecated. Use
+    constructors to set read length limit for TBinaryProtocol.Factory and TCompactProtocol.Factory.
+    ``PHAB_ID=D124620``
 
 18.3.0
 -------
@@ -89,6 +389,12 @@ Breaking API Changes
 
   * finagle-base-http: Removed deprecated `c.t.f.http.Cookie.version` and
     `c.t.f.http.Cookie.version_=`, per RFC-6265. ``PHAB_ID=D142672``
+
+  * finagle-base-http: Removed deprecated `c.t.f.Cookie.httpOnly_=`; use `c.t.f.Cookie.httpOnly`
+    instead. ``PHAB_ID=D143177``
+
+  * finagle-base-http: Removed deprecated `c.t.f.Cookie.maxAge_=`; use `c.t.f.Cookie.maxAge`
+    instead. ``PHAB_ID=D143177``
 
   * finagle-core: `c.t.f.pool.WatermarkPool` was finalized. ``PHAB_ID=D137198``
 
@@ -235,7 +541,7 @@ Runtime Behavior Changes
 Breaking API Changes
 ~~~~~~~~~~~~~~~~~~~~
 
-    * finagle-base-http, finagle-http: Removed Apache Commons Lang dependency,
+  * finagle-base-http, finagle-http: Removed Apache Commons Lang dependency,
     `org.apache.commons.lang3.time.FastDateFormat` now is `java.time.format.DateTimeFormatter`.
     ``PHAB_ID=D121479``
 

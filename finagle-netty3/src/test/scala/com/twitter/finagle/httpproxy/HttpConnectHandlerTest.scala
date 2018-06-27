@@ -10,7 +10,7 @@ import org.mockito.Matchers._
 import org.mockito.Mockito.{times, verify, when, atLeastOnce}
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
 @RunWith(classOf[JUnitRunner])
 class HttpConnectHandlerTest extends FunSuite with MockitoSugar {
@@ -33,7 +33,7 @@ class HttpConnectHandlerTest extends FunSuite with MockitoSugar {
     val ch = HttpConnectHandler.addHandler(proxyAddress, remoteAddress, pipeline, None)
     ch.handleDownstream(ctx, connectRequested)
 
-    def checkDidClose() {
+    def checkDidClose(): Unit = {
       val ec = ArgumentCaptor.forClass(classOf[DownstreamChannelStateEvent])
       verify(pipeline).sendDownstream(ec.capture)
       val e = ec.getValue

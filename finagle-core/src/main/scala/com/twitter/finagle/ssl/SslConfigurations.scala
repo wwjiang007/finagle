@@ -26,13 +26,15 @@ private[ssl] object SslConfigurations {
         val tryKms = factory.getKeyManagers()
         tryKms match {
           case Return(kms) => Some(kms)
-          case Throw(ex) => throw SslConfigurationException(ex.getMessage, ex)
+          case Throw(ex) => throw SslConfigurationException(ex)
         }
       case _: KeyCredentials.CertKeyAndChain =>
         throw SslConfigurationException.notSupported(
           "KeyCredentials.CertKeyAndChain",
           "SslConfigurations"
         )
+      case KeyCredentials.KeyManagerFactory(keyManagerFactory) =>
+        Some(keyManagerFactory.getKeyManagers)
     }
 
   /**
@@ -56,8 +58,10 @@ private[ssl] object SslConfigurations {
         val tryTms = factory.getTrustManagers()
         tryTms match {
           case Return(tms) => Some(tms)
-          case Throw(ex) => throw SslConfigurationException(ex.getMessage, ex)
+          case Throw(ex) => throw SslConfigurationException(ex)
         }
+      case TrustCredentials.TrustManagerFactory(trustManagerFactory) =>
+        Some(trustManagerFactory.getTrustManagers)
     }
 
   /**
@@ -151,6 +155,11 @@ private[ssl] object SslConfigurations {
           "KeyCredentials.CertKeyAndChain",
           engineFactoryName
         )
+      case KeyCredentials.KeyManagerFactory(_) =>
+        throw SslConfigurationException.notSupported(
+          "KeyCredentials.KeyManagerFactory",
+          engineFactoryName
+        )
     }
 
   /**
@@ -170,6 +179,8 @@ private[ssl] object SslConfigurations {
           "TrustCredentials.CertCollection",
           engineFactoryName
         )
+      case TrustCredentials.TrustManagerFactory(_) =>
+        throw SslConfigurationException.notSupported("TrustCredentials.TrustManagerFactory", engineFactoryName)
     }
 
   /**

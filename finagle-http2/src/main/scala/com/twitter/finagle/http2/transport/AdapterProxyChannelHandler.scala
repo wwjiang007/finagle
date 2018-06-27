@@ -6,7 +6,6 @@ import com.twitter.finagle.stats.{StatsReceiver, NullStatsReceiver}
 import com.twitter.logging.{Logger, Level, HasLogLevel}
 import io.netty.channel._
 import io.netty.channel.embedded.EmbeddedChannel
-import io.netty.handler.codec.http.HttpClientUpgradeHandler.UpgradeEvent
 import io.netty.handler.codec.http.{HttpObject, LastHttpContent}
 import io.netty.util.ReferenceCountUtil
 import io.netty.util.concurrent.PromiseCombiner
@@ -154,7 +153,8 @@ private[http2] final class AdapterProxyChannelHandler(
       ctx.fireChannelRead(rst)
     case goaway: GoAway => ctx.fireChannelRead(goaway)
     case Ping => ctx.fireChannelRead(Ping)
-    case upgrade: UpgradeEvent => ctx.fireChannelRead(upgrade)
+    case exn: StreamException => ctx.fireChannelRead(exn)
+    case upgrade: UpgradeRequestHandler.UpgradeResult => ctx.fireChannelRead(upgrade)
     case _ =>
       val wrongType = new IllegalArgumentException(
         s"Expected a StreamMessage or UpgradeEvent, got ${msg.getClass.getName} instead."
@@ -186,6 +186,14 @@ private[http2] final class AdapterProxyChannelHandler(
             ctx.write(rst, promise)
           case goaway: GoAway => ctx.write(goaway, promise)
           case Ping => ctx.write(Ping, promise)
+          case StreamException(exn, _) =>
+            // this doesn't make sense.  fail hard here.
+            val wrongType = new IllegalArgumentException(
+              "StreamExceptions can not be written to the netty pipeline.",
+              exn
+            )
+            log.error(wrongType, "Tried to write a stream exception to the http2 client pipeline")
+            promise.setFailure(wrongType)
         }
       case _ =>
         val wrongType = new IllegalArgumentException(

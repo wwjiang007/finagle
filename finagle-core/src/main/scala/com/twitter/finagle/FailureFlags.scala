@@ -50,6 +50,12 @@ object FailureFlags {
   private[twitter] val Ignorable: Long = 1L << 5
 
   /**
+   * DeadlineExceeded indicates that the error occurred because a request was received past its
+   * deadline.
+   */
+  private[twitter] val DeadlineExceeded: Long = 1L << 6
+
+  /**
    * Naming indicates a naming failure. This is Finagle-internal.
    */
   private[finagle] val Naming: Long = 1L << 32
@@ -62,7 +68,7 @@ object FailureFlags {
    * whose behalf the client is working - it may have performed some side
    * effect before issuing the client call.
    */
-  private[finagle] val ShowMask: Long = Interrupted | Rejected | NonRetryable
+  private[finagle] val ShowMask: Long = Interrupted | Rejected | NonRetryable | DeadlineExceeded
 
   /**
    * Expose flags as strings. Used for stats reporting. Here, Retryable is named
@@ -76,6 +82,8 @@ object FailureFlags {
     if ((flags & Rejected) > 0) names += "rejected"
     if ((flags & Naming) > 0) names += "naming"
     if ((flags & NonRetryable) > 0) names += "nonretryable"
+    if ((flags & Ignorable) > 0) names += "ignorable"
+    if ((flags & DeadlineExceeded) > 0) names += "deadline_exceeded"
     names
   }
 
@@ -143,6 +151,9 @@ private[finagle] trait FailureFlags[T <: FailureFlags[T]] extends Throwable { th
    * A copy of this object with the given flags replacing the current flags. The
    * caller of this method should check to see if a copy is necessary before
    * calling.
+   *
+   * As this is an internal API, the other `Throwable` fields such as the cause
+   * and stack trace should be handled by callers.
    */
   protected def copyWithFlags(flags: Long): T
 
@@ -150,7 +161,19 @@ private[finagle] trait FailureFlags[T <: FailureFlags[T]] extends Throwable { th
    * This with the current flags replaced by newFlags. This does not mutate.
    */
   private[finagle] def withFlags(newFlags: Long): T =
-    if (flags == newFlags) this else copyWithFlags(newFlags)
+    if (newFlags == flags) {
+      this
+    } else {
+      val copied = copyWithFlags(newFlags)
+      copied.setStackTrace(getStackTrace)
+      if (getCause != null && copied.getCause == null) {
+        copied.initCause(getCause)
+      }
+      getSuppressed.toSeq.foreach { t =>
+        copied.addSuppressed(t)
+      }
+      copied
+    }
 
   /**
    * This with the given flags added. This does not mutate.

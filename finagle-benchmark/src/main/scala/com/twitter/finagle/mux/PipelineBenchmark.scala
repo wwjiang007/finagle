@@ -1,13 +1,10 @@
 package com.twitter.finagle.mux
 
 import com.twitter.finagle.benchmark.StdBenchAnnotations
-import com.twitter.finagle.mux.transport.{Message, Netty4Framer, RefCountingFramer}
-import com.twitter.finagle.{Dtab, Path}
+import com.twitter.finagle.mux.transport.{CopyingFramer, Message, Netty4Framer}
 import com.twitter.io.Buf
-import com.twitter.util.Time
 import io.netty.buffer.ByteBuf
 import io.netty.channel.embedded.EmbeddedChannel
-import java.util.concurrent.TimeUnit
 import org.openjdk.jmh.annotations._
 
 @State(Scope.Benchmark)
@@ -81,4 +78,4 @@ abstract class PipelineBenchmark(framer: Netty4Framer) extends StdBenchAnnotatio
 }
 
 // ./sbt 'project finagle-benchmark' 'jmh:run PipelineBenchmark'
-class RefCountingPipelineBenchmark extends PipelineBenchmark(RefCountingFramer)
+class CopyingPipelineBenchmark extends PipelineBenchmark(CopyingFramer)

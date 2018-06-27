@@ -1,14 +1,15 @@
 package com.twitter.finagle.http.netty4
 
 import com.twitter.conversions.time._
-import com.twitter.finagle.http.{Cookie, CookieCodec}
+import com.twitter.finagle.http.{Cookie, CookieCodec, CookieMap}
+import com.twitter.finagle.http.cookie.SameSiteCodec
 import io.netty.handler.codec.http.cookie.{
-Cookie => NettyCookie,
-ClientCookieDecoder => NettyClientCookieDecoder,
-ClientCookieEncoder => NettyClientCookieEncoder,
-DefaultCookie => NettyDefaultCookie,
-ServerCookieDecoder => NettyServerCookieDecoder,
-ServerCookieEncoder => NettyServerCookieEncoder
+  ClientCookieDecoder => NettyClientCookieDecoder,
+  ClientCookieEncoder => NettyClientCookieEncoder,
+  Cookie => NettyCookie,
+  DefaultCookie => NettyDefaultCookie,
+  ServerCookieDecoder => NettyServerCookieDecoder,
+  ServerCookieEncoder => NettyServerCookieEncoder
 }
 import java.util.{BitSet => JBitSet}
 import scala.collection.JavaConverters._
@@ -24,7 +25,7 @@ private[finagle] object Netty4CookieCodec extends CookieCodec {
   // characters that are prohibited in Netty 4.
   private[this] val ShouldWrapCharsBitSet: JBitSet = {
     val bs = new JBitSet
-    "()/:;<?@[]=>{}".foreach(bs.set(_))
+    "()/:<?@[]=>{}".foreach(bs.set(_))
     bs
   }
 
@@ -33,12 +34,21 @@ private[finagle] object Netty4CookieCodec extends CookieCodec {
     if (cookies.isEmpty) ""
     else clientEncoder.encode(cookies.map(cookieToNetty).asJava)
 
-  def encodeServer(cookie: Cookie): String =
-    serverEncoder.encode(cookieToNetty(cookie))
+  def encodeServer(cookie: Cookie): String = {
+    val encoded = serverEncoder.encode(cookieToNetty(cookie))
+    if (CookieMap.includeSameSite) SameSiteCodec.encodeSameSite(cookie, encoded)
+    else encoded
+  }
 
   def decodeClient(header: String): Option[Iterable[Cookie]] = {
     val cookie = clientDecoder.decode(header)
-    if (cookie != null) Some(Seq(cookieToFinagle(cookie)))
+    if (cookie != null) {
+      val decoded = cookieToFinagle(cookie)
+      val finagleCookie =
+        if (CookieMap.includeSameSite) SameSiteCodec.decodeSameSite(header, decoded)
+        else decoded
+      Some(Seq(finagleCookie))
+    }
     else None
   }
 

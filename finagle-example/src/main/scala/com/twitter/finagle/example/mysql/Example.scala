@@ -55,11 +55,11 @@ object Example extends App {
   val password = flag("password", "<password>", "mysql password")
   val dbname = flag("database", "test", "default database to connect to")
 
-  def main() {
+  def main(): Unit = {
     val client = Mysql.client
       .withCredentials(username(), password())
       .withDatabase(dbname())
-      .newRichClient("%s:%d".format(host().getHostName, host().getPort))
+      .newRichClient(s"${host().getHostName}:${host().getPort}")
 
     val resultFuture = for {
       _ <- createTable(client)
@@ -75,7 +75,7 @@ object Example extends App {
         println(e)
       }
       .ensure {
-        client.query("DROP TABLE IF EXISTS `finagle-mysql-example`") ensure {
+        client.query("DROP TABLE IF EXISTS `finagle-mysql-example`").ensure {
           client.close()
         }
       }
@@ -83,16 +83,16 @@ object Example extends App {
     Await.ready(resultFuture)
   }
 
-  def createTable(client: Client): Future[Result] = {
-    client.query(SwimmingRecord.createTableSQL)
+  def createTable(client: Client): Future[OK] = {
+    client.modify(SwimmingRecord.createTableSQL)
   }
 
-  def insertValues(client: Client): Future[Seq[Result]] = {
+  def insertValues(client: Client): Future[Seq[OK]] = {
     val insertSQL =
       "INSERT INTO `finagle-mysql-example` (`event`, `time`, `name`, `nationality`, `date`) VALUES (?,?,?,?,?)"
     val ps = client.prepare(insertSQL)
-    val insertResults = SwimmingRecord.records map { r =>
-      ps(r.event, r.time, r.name, r.nationality, r.date)
+    val insertResults = SwimmingRecord.records.map { r =>
+      ps.modify(r.event, r.time, r.name, r.nationality, r.date)
     }
     Future.collect(insertResults)
   }
@@ -101,13 +101,9 @@ object Example extends App {
     val query =
       "SELECT * FROM `finagle-mysql-example` WHERE `date` BETWEEN '2009-06-01' AND '2009-08-31'"
     client.select(query) { row =>
-      val StringValue(event) = row("event").get
-      val DateValue(date) = row("date").get
-      val StringValue(name) = row("name").get
-      val time = row("time").map {
-        case FloatValue(f) => f
-        case _ => 0.0F
-      }.get
+      val date = row.javaSqlDateOrNull("date")
+      val name = row.stringOrNull("name")
+      val time = row.floatOrZero("time")
 
       (name, time, date)
     }

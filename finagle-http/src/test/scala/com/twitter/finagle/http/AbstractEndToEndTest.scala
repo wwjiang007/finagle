@@ -6,7 +6,9 @@ import com.twitter.finagle
 import com.twitter.finagle._
 import com.twitter.finagle.builder.ClientBuilder
 import com.twitter.finagle.context.{Contexts, Deadline, Retries}
+import com.twitter.finagle.filter.ServerAdmissionControl
 import com.twitter.finagle.http.service.HttpResponseClassifier
+import com.twitter.finagle.http2.param.EncoderIgnoreMaxHeaderListSize
 import com.twitter.finagle.liveness.FailureAccrualFactory
 import com.twitter.finagle.service._
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
@@ -17,6 +19,7 @@ import com.twitter.util._
 import io.netty.buffer.PooledByteBufAllocator
 import java.io.{PrintWriter, StringWriter}
 import java.net.{InetAddress, InetSocketAddress}
+import java.util.concurrent.atomic.AtomicBoolean
 import org.scalactic.source.Position
 import org.scalatest.{BeforeAndAfter, FunSuite, OneInstancePerTest, Tag}
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
@@ -31,7 +34,6 @@ abstract class AbstractEndToEndTest
 
   sealed trait Feature
   object TooLongStream extends Feature
-  object MaxHeaderSize extends Feature
   object ClientAbort extends Feature
   object HeaderFields extends Feature
   object ReaderClose extends Feature
@@ -260,7 +262,7 @@ abstract class AbstractEndToEndTest
       }
   }
 
-  def standardBehaviour(connect: HttpService => HttpService) {
+  def standardBehaviour(connect: HttpService => HttpService): Unit = {
 
     test(implName + ": client stack observes max header size") {
       val service = new HttpService {
@@ -419,10 +421,13 @@ abstract class AbstractEndToEndTest
       req.content = Buf.Utf8("." * 10)
       await(client(req))
 
-      assert(statsRecv.stat("client", "request_payload_bytes")() == Seq(10.0f))
-      assert(statsRecv.stat("client", "response_payload_bytes")() == Seq(20.0f))
-      assert(statsRecv.stat("server", "request_payload_bytes")() == Seq(10.0f))
-      assert(statsRecv.stat("server", "response_payload_bytes")() == Seq(20.0f))
+      eventually {
+        assert(statsRecv.stat("client", "request_payload_bytes")() == Seq(10.0f))
+        assert(statsRecv.stat("client", "response_payload_bytes")() == Seq(20.0f))
+        assert(statsRecv.stat("server", "request_payload_bytes")() == Seq(10.0f))
+        assert(statsRecv.stat("server", "response_payload_bytes")() == Seq(20.0f))
+      }
+
       await(client.close())
     }
 
@@ -507,7 +512,7 @@ abstract class AbstractEndToEndTest
     }
   }
 
-  def streaming(connect: HttpService => HttpService) {
+  def streaming(connect: HttpService => HttpService): Unit = {
     test(s"$implName (streaming)" + ": stream") {
       def service(r: Reader) = new HttpService {
         def apply(request: Request) = {
@@ -805,7 +810,7 @@ abstract class AbstractEndToEndTest
     }
   }
 
-  def tracing(connect: HttpService => HttpService) {
+  def tracing(connect: HttpService => HttpService): Unit = {
     test(implName + ": trace") {
       var (outerTrace, outerSpan) = ("", "")
 
@@ -882,7 +887,6 @@ abstract class AbstractEndToEndTest
   }
 
   test(implName + ": Status.busy propagates along the Stack") {
-    val st = new InMemoryStatsReceiver
     val failService = new HttpService {
       def apply(req: Request): Future[Response] =
         Future.exception(Failure.rejected("unhappy"))
@@ -891,8 +895,8 @@ abstract class AbstractEndToEndTest
     val clientName = "http"
     val server = serverImpl().serve(new InetSocketAddress(0), failService)
     val client = clientImpl()
-      .withStatsReceiver(st)
       .configured(FailureAccrualFactory.Param(failureAccrualFailures, () => 1.minute))
+      .withStatsReceiver(statsRecv)
       .newService(
         Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
         clientName
@@ -903,14 +907,13 @@ abstract class AbstractEndToEndTest
     }
     assert(e.isFlagged(FailureFlags.Rejected))
 
-    assert(st.counters(Seq(clientName, "failure_accrual", "removals")) == 1)
-    assert(st.counters(Seq(clientName, "retries", "requeues")) == failureAccrualFailures - 1)
-    assert(st.counters(Seq(clientName, "failures", "restartable")) == failureAccrualFailures)
+    assert(statsRecv.counters(Seq(clientName, "failure_accrual", "removals")) == 1)
+    assert(statsRecv.counters(Seq(clientName, "retries", "requeues")) == failureAccrualFailures - 1)
+    assert(statsRecv.counters(Seq(clientName, "failures", "restartable")) == failureAccrualFailures)
     await(Closable.all(client, server).close())
   }
 
   test(implName + ": nonretryable isn't retried") {
-    val st = new InMemoryStatsReceiver
     val failService = new HttpService {
       def apply(req: Request): Future[Response] =
         Future.exception(Failure("unhappy", FailureFlags.NonRetryable | FailureFlags.Rejected))
@@ -919,8 +922,8 @@ abstract class AbstractEndToEndTest
     val clientName = "http"
     val server = serverImpl().serve(new InetSocketAddress(0), failService)
     val client = clientImpl()
-      .withStatsReceiver(st)
       .configured(FailureAccrualFactory.Param(failureAccrualFailures, () => 1.minute))
+      .withStatsReceiver(statsRecv)
       .newService(
         Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
         clientName
@@ -932,11 +935,11 @@ abstract class AbstractEndToEndTest
     }
     assert(e.isFlagged(FailureFlags.Rejected))
 
-    assert(!st.counters.contains(Seq(clientName, "failure_accrual", "removals")))
-    assert(!st.counters.contains(Seq(clientName, "retries", "requeues")))
-    assert(!st.counters.contains(Seq(clientName, "failures", "restartable")))
-    assert(st.counters(Seq(clientName, "failures")) == 1)
-    assert(st.counters(Seq(clientName, "requests")) == 1)
+    assert(!statsRecv.counters.contains(Seq(clientName, "failure_accrual", "removals")))
+    assert(!statsRecv.counters.contains(Seq(clientName, "retries", "requeues")))
+    assert(!statsRecv.counters.contains(Seq(clientName, "failures", "restartable")))
+    assert(statsRecv.counters(Seq(clientName, "failures")) == 1)
+    assert(statsRecv.counters(Seq(clientName, "requests")) == 1)
     await(Closable.all(client, server).close())
   }
 
@@ -1055,7 +1058,21 @@ abstract class AbstractEndToEndTest
     assert(rep.status == Status.InternalServerError)
   }
 
-  testIfImplemented(MaxHeaderSize)("client respects MaxHeaderSize in response") {
+  test("client respects MaxHeaderSize in response") {
+    val ref = new ServiceFactoryRef(ServiceFactory.const(initService))
+
+    val server = serverImpl()
+      .withStatsReceiver(NullStatsReceiver)
+      // we need to ignore header list size so we can examine behavior on the client-side
+      .configured(EncoderIgnoreMaxHeaderListSize(true))
+      .serve("localhost:*", ref)
+
+    val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
+    val client = clientImpl()
+      .withMaxHeaderSize(1.kilobyte)
+      .newService(s"${addr.getHostName}:${addr.getPort}", "client")
+
+    initClient(client)
     val svc = new Service[Request, Response] {
       def apply(request: Request) = {
         val response = Response()
@@ -1063,18 +1080,7 @@ abstract class AbstractEndToEndTest
         Future.value(response)
       }
     }
-
-    val server = serverImpl()
-      .withStatsReceiver(NullStatsReceiver)
-      .serve("localhost:*", svc)
-
-    val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
-    val client = clientImpl()
-      .withMaxHeaderSize(1.kilobyte)
-      .withStatsReceiver(NullStatsReceiver)
-      .newService(s"${addr.getHostName}:${addr.getPort}", "client")
-
-    initClient(client)
+    ref() = ServiceFactory.const(svc)
 
     val req = Request("/")
     intercept[TooLongMessageException] {
@@ -1607,6 +1613,91 @@ abstract class AbstractEndToEndTest
     assert(!res.isChunked)
     assert(res.length == 0)
     assert(res.contentLength.contains(body.length.toLong))
+    await(client.close())
+    await(server.close())
+  }
+
+  test("ServerAdmissionControl doesn't filter requests with a chunked body") {
+    val responseString = "a response"
+    val svc = Service.mk[Request, Response] { _ =>
+      val response = Response()
+      response.contentString = responseString
+      Future.value(response)
+    }
+
+    val nacked = new AtomicBoolean(false)
+    val filter = new Filter.TypeAgnostic {
+      override def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = new SimpleFilter[Req, Rep] {
+        // nacks them all
+        def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = {
+          if (nacked.compareAndSet(false, true)) Future.exception(Failure.rejected)
+          else service(request)
+        }
+      }
+    }
+
+    val server = serverImpl()
+      .configured(ServerAdmissionControl.Filters(Some(Seq(_ => filter))))
+      .serve("localhost:*", svc)
+
+    val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
+    val client = clientImpl()
+      .newService(s"${addr.getHostName}:${addr.getPort}", "client")
+
+    // first, a request with a body
+    val reqWithBody = Request(Method.Post, "/")
+    reqWithBody.setChunked(true)
+    val writer = reqWithBody.writer
+    writer.write(Buf.Utf8("data")).before(writer.close())
+
+    // Shouldn't be nacked
+    assert(await(client(reqWithBody)).contentString == responseString)
+    assert(!nacked.get)
+
+    // Should be nacked the first time
+    val reqWithoutBody = Request(Method.Get, "/")
+    assert(await(client(reqWithoutBody)).contentString == responseString)
+    assert(nacked.get)
+
+    await(client.close())
+    await(server.close())
+  }
+
+  test("ServerAdmissionControl can filter requests with the magic header") {
+    val responseString = "a response"
+    val svc = Service.mk[Request, Response] { _ =>
+      val response = Response()
+      response.contentString = responseString
+      Future.value(response)
+    }
+
+    val nacked = new AtomicBoolean(false)
+    val filter = new Filter.TypeAgnostic {
+      override def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = new SimpleFilter[Req, Rep] {
+        // nacks them all
+        def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = {
+          if (nacked.compareAndSet(false, true)) Future.exception(Failure.rejected)
+          else service(request)
+        }
+      }
+    }
+
+    val server = serverImpl()
+      .configured(ServerAdmissionControl.Filters(Some(Seq(_ => filter))))
+      .serve("localhost:*", svc)
+
+    val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
+    val client = clientImpl()
+      .newService(s"${addr.getHostName}:${addr.getPort}", "client")
+
+    // first, a request with a body
+    val reqWithBody = Request(Method.Post, "/")
+    reqWithBody.contentString = "not-empty"
+
+    // Header should be there so we can nack it
+    assert(await(client(reqWithBody)).contentString == responseString)
+    assert(nacked.get)
+
     await(client.close())
     await(server.close())
   }

@@ -28,8 +28,8 @@ case object NullValue extends Value
  * a value and enough meta data to decode the
  * bytes.
  *
- * @param typ The mysql type code for this value.
- * @param charset The charset encoding of the bytes.
+ * @param typ The MySQL [[Type type]] code for this value.
+ * @param charset The [[Charset charset]] encoding of the bytes.
  * @param isBinary Disambiguates between the text and binary protocol.
  * @param bytes The raw bytes for this value.
  */
@@ -94,26 +94,80 @@ class TimestampValue(val injectionTimeZone: TimeZone, val extractionTimeZone: Ti
    * Extracts timestamps in `extractionTimeZone` for values encoded in either
    * the binary or text MySQL protocols.
    */
-  def unapply(v: Value): Option[Timestamp] = v match {
-    case RawValue(t, charset, false, bytes) if t == Type.Timestamp || t == Type.DateTime =>
-      val str = new String(bytes, Charset(charset))
-      val ts = fromString(str)
-      Some(ts)
+  def unapply(v: Value): Option[Timestamp] =
+    TimestampValue.fromValue(v, extractionTimeZone)
 
-    case RawValue(t, _, true, bytes) if t == Type.Timestamp || t == Type.DateTime =>
-      val ts = fromBytes(bytes)
-      Some(ts)
+}
 
-    case _ => None
+/**
+ * Extracts a value in UTC. To use a different time zone, create an instance of
+ * [[com.twitter.finagle.mysql.TimestampValue]].
+ */
+object TimestampValue
+    extends TimestampValue(
+      TimeZone.getDefault(),
+      TimeZone.getTimeZone("UTC")
+    ) {
+  private[this] val log = Logger.getLogger("finagle-mysql")
+
+  @deprecated(
+    "Injects `java.sql.Timestamp`s in local time and extracts them in UTC." +
+      "To use a different time zone, create an instance of " +
+      "TimestampValue(InjectionTimeZone, ExtractionTimeZone)",
+    "6.20.2"
+  )
+  override def apply(ts: Timestamp): Value = {
+    log.warning(
+      "Injecting timezone-less `java.sql.Timestamp` with a hardcoded local timezone (%s)"
+        .format(injectionTimeZone.getID)
+    )
+    super.apply(ts)
   }
+
+  @deprecated(
+    "Injects `java.sql.Timestamp`s in local time and extracts them in UTC." +
+      "To use a different time zone, create an instance of " +
+      "TimestampValue(InjectionTimeZone, ExtractionTimeZone)",
+    "6.20.2"
+  )
+  override def unapply(v: Value): Option[Timestamp] = {
+    log.warning(
+      "Extracting TIMESTAMP or DATETIME row as a `java.sql.Timestamp` with a hardcoded timezone (%s)"
+        .format(extractionTimeZone.getID)
+    )
+    super.unapply(v)
+  }
+
+  private[mysql] def isTimestamp(value: Value): Boolean =
+    value match {
+      case raw: RawValue if raw.typ == Type.Timestamp || raw.typ == Type.DateTime => true
+      case _ => false
+    }
+
+  /**
+   * Extracts timestamps in the given `TimeZone` for [[Value]]s encoded in either
+   * the binary or text MySQL protocols.
+   */
+  private[mysql] def fromValue(value: Value, timeZone: TimeZone): Option[Timestamp] =
+    value match {
+      case raw: RawValue if isTimestamp(raw) =>
+        val timestamp = if (!raw.isBinary) {
+          val str = new String(raw.bytes, Charset(raw.charset))
+          fromString(str, timeZone)
+        } else {
+          fromBytes(raw.bytes, timeZone)
+        }
+        Some(timestamp)
+      case _ => None
+    }
 
   /**
    * Timestamp object that can appropriately
    * represent MySQL zero Timestamp.
    */
   private[this] object Zero extends Timestamp(0) {
-    override val getTime = 0L
-    override val toString = "0000-00-00 00:00:00"
+    override val getTime: Long = 0L
+    override val toString: String = "0000-00-00 00:00:00"
   }
 
   /**
@@ -126,14 +180,14 @@ class TimestampValue(val injectionTimeZone: TimeZone, val extractionTimeZone: Ti
    * @param str A string representing a TIMESTAMP written in the
    * MySQL text protocol.
    */
-  private[this] def fromString(str: String): Timestamp = {
+  private[this] def fromString(str: String, timeZone: TimeZone): Timestamp = {
     if (str == Zero.toString) {
       return Zero
     }
 
     val parsePosition = new ParsePosition(0)
     val format = TwitterDateFormat("yyyy-MM-dd HH:mm:ss")
-    format.setTimeZone(extractionTimeZone)
+    format.setTimeZone(timeZone)
     val timeInMillis = format.parse(str, parsePosition).getTime
 
     /**
@@ -142,25 +196,31 @@ class TimestampValue(val injectionTimeZone: TimeZone, val extractionTimeZone: Ti
      * is interpreted as 100 millis and not 1 nanoseconds (like
      * SimpleDateFormat wrongly does.)
      */
-    object Nanos {
-      def unapply(str: String): Option[Int] = {
-        str match {
-          case "" => Some(0)
-          case s: String if !s.startsWith(".") => None
-          case s: String if s.length() > 10 => None
-          case s: String => Some(s.stripPrefix(".").padTo(9, '0').toInt)
-          case _ => None
+    val index = parsePosition.getIndex
+    if (index >= str.length) {
+      // nothing left to parse, therefore no nanos
+      new Timestamp(timeInMillis)
+    } else if (str.charAt(index) != '.') {
+      // if the next char isn't a . it isn't valid
+      Zero
+    } else {
+      // see what comes after the '.'
+      val rest = str.substring(index + 1)
+      if (rest.length > 9) {
+        // too many characters
+        Zero
+      } else {
+        // convert to an integer then convert to nanos by adding trailing 0s
+        val multiple = math.pow(10, 9 - rest.length).toInt
+        try {
+          val nanos = Integer.parseInt(rest) * multiple
+          val ts = new Timestamp(timeInMillis)
+          ts.setNanos(nanos)
+          ts
+        } catch {
+          case _: NumberFormatException => Zero
         }
       }
-    }
-
-    // Parse fractional part
-    str.substring(parsePosition.getIndex) match {
-      case Nanos(nanos) =>
-        val ts = new Timestamp(timeInMillis)
-        ts.setNanos(nanos)
-        ts
-      case _ => Zero
     }
   }
 
@@ -174,8 +234,8 @@ class TimestampValue(val injectionTimeZone: TimeZone, val extractionTimeZone: Ti
    * @param bytes A byte-array representing a TIMESTAMP written in the
    * MySQL binary protocol.
    */
-  private[this] def fromBytes(bytes: Array[Byte]): Timestamp = {
-    if (bytes.isEmpty) {
+  private[this] def fromBytes(bytes: Array[Byte], timeZone: TimeZone): Timestamp = {
+    if (bytes.length == 0) {
       return Zero
     }
 
@@ -205,7 +265,7 @@ class TimestampValue(val injectionTimeZone: TimeZone, val extractionTimeZone: Ti
         micro = br.readIntLE()
       }
 
-      val cal = Calendar.getInstance(extractionTimeZone)
+      val cal = Calendar.getInstance(timeZone)
       cal.set(year, month - 1, day, hour, min, sec)
 
       val ts = new Timestamp(0)
@@ -214,40 +274,7 @@ class TimestampValue(val injectionTimeZone: TimeZone, val extractionTimeZone: Ti
       ts
     } finally br.close()
   }
-}
 
-/**
- * Extracts a value in UTC. To use a different time zone, create an instance of
- * [[com.twitter.finagle.mysql.TimestampValue]].
- */
-@deprecated(
-  "Injects `java.sql.Timestamp`s in local time and extracts them in UTC." +
-    "To use a different time zone, create an instance of " +
-    "TimestampValue(InjectionTimeZone, ExtractionTimeZone)",
-  "6.20.2"
-)
-object TimestampValue
-    extends TimestampValue(
-      TimeZone.getDefault(),
-      TimeZone.getTimeZone("UTC")
-    ) {
-  private[this] val log = Logger.getLogger("finagle-mysql")
-
-  override def apply(ts: Timestamp): Value = {
-    log.warning(
-      "Injecting timezone-less `java.sql.Timestamp` with a hardcoded local timezone (%s)"
-        .format(injectionTimeZone.getID)
-    )
-    super.apply(ts)
-  }
-
-  override def unapply(v: Value): Option[Timestamp] = {
-    log.warning(
-      "Extracting TIMESTAMP or DATETIME row as a `java.sql.Timestamp` with a hardcoded timezone (%s)"
-        .format(extractionTimeZone.getID)
-    )
-    super.unapply(v)
-  }
 }
 
 object DateValue extends Injectable[Date] with Extractable[Date] {
@@ -298,7 +325,7 @@ object DateValue extends Injectable[Date] with Extractable[Date] {
    * MySQL binary protocol.
    */
   private[this] def fromBytes(bytes: Array[Byte]): Date = {
-    if (bytes.isEmpty) {
+    if (bytes.length == 0) {
       return Zero
     }
 

@@ -1,26 +1,11 @@
 package com.twitter.finagle.http
 
 import com.twitter.conversions.time._
+import com.twitter.finagle.http.cookie.SameSite
 import org.jboss.netty.handler.codec.http.DefaultCookie
 import org.scalatest.FunSuite
 
 class CookieTest extends FunSuite {
-
-  test("mutate underlying") {
-    val cookie = new Cookie("name", "value")
-    cookie.domain = ".twitter.com"
-    cookie.maxAge = 100.seconds
-    cookie.path = "/1/statuses/show"
-    cookie.value = "value2"
-    cookie.httpOnly = true
-
-    assert(cookie.name == "name")
-    assert(cookie.domain == ".twitter.com")
-    assert(cookie.maxAge == 100.seconds)
-    assert(cookie.path == "/1/statuses/show")
-    assert(cookie.value == "value2")
-    assert(cookie.httpOnly == true)
-  }
 
   test("constructor sets correct params") {
     val cookie = new Cookie(
@@ -30,7 +15,8 @@ class CookieTest extends FunSuite {
       path = Some("path"),
       maxAge = Some(99.seconds),
       secure = true,
-      httpOnly = false
+      httpOnly = false,
+      sameSite = SameSite.Strict
     )
 
     assert(cookie.name == "name")
@@ -40,6 +26,9 @@ class CookieTest extends FunSuite {
     assert(cookie.maxAge == 99.seconds)
     assert(cookie.secure == true)
     assert(cookie.httpOnly == false)
+
+    /* Experimental */
+    assert(cookie.sameSite == SameSite.Strict)
   }
 
   test("equals: not equal if object is different") {
@@ -116,6 +105,9 @@ class CookieTest extends FunSuite {
     assert(cookie.maxAge == nettyCookie.getMaxAge.seconds)
     assert(cookie.secure == nettyCookie.isSecure)
     assert(cookie.httpOnly == nettyCookie.isHttpOnly)
+
+    /* Experimental */
+    assert(cookie.sameSite == SameSite.Unset)
   }
 
   test("Throws exception if name is empty") {
@@ -151,9 +143,6 @@ class CookieTest extends FunSuite {
 
     IllegalFieldChars.foreach { c =>
       intercept[IllegalArgumentException] {
-        cookie.path = s"hello${c}goodbye"
-      }
-      intercept[IllegalArgumentException] {
         new Cookie("name", "value", path = Some(s"hello${c}goodbye"))
       }
     }
@@ -165,9 +154,6 @@ class CookieTest extends FunSuite {
 
     IllegalFieldChars.foreach { c =>
       intercept[IllegalArgumentException] {
-        cookie.domain = s"hello${c}goodbye"
-      }
-      intercept[IllegalArgumentException] {
         new Cookie("name", "value", domain = Some(s"hello${c}goodbye"))
       }
     }
@@ -178,16 +164,21 @@ class CookieTest extends FunSuite {
   ) {
     val cookie = new Cookie("name", "value")
       .domain(Some("domain"))
+      .value("value2")
       .maxAge(Some(99.seconds))
       .httpOnly(true)
       .secure(true)
+      .sameSite(SameSite.Lax)
 
     assert(cookie.name == "name")
-    assert(cookie.value == "value")
+    assert(cookie.value == "value2")
     assert(cookie.domain == "domain")
     assert(cookie.maxAge == 99.seconds)
     assert(cookie.httpOnly == true)
     assert(cookie.secure == true)
+
+    /* Experimental */
+    assert(cookie.sameSite == SameSite.Lax)
   }
 
   test("maxAge is default if set to None") {

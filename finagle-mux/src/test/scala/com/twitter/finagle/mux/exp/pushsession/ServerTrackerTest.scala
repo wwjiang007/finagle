@@ -1,13 +1,15 @@
 package com.twitter.finagle.mux.exp.pushsession
 
 import com.twitter.conversions.time._
-import com.twitter.finagle.{Dtab, Path, Service, mux}
-import com.twitter.finagle.exp.pushsession.DeferredExecutor
-import com.twitter.finagle.mux.{ClientDiscardedRequestException, Request, Response}
+import com.twitter.finagle.{CancelledRequestException, FailureFlags}
+import com.twitter.finagle.client.BackupRequestFilter
+import com.twitter.finagle.exp.pushsession.utils.DeferredExecutor
 import com.twitter.finagle.mux.exp.pushsession.MessageWriter.DiscardResult
 import com.twitter.finagle.mux.lease.exp.{Lessor, nackOnExpiredLease}
 import com.twitter.finagle.mux.transport.Message._
+import com.twitter.finagle.mux.{ClientDiscardedRequestException, Request, Response}
 import com.twitter.finagle.stats.InMemoryStatsReceiver
+import com.twitter.finagle.{Dtab, Path, Service, mux}
 import com.twitter.io.Buf
 import com.twitter.util._
 import java.net.InetSocketAddress
@@ -95,10 +97,10 @@ class ServerTrackerTest extends FunSuite {
       assert(tracker.npending == 1)
       assert(!p.isDefined)
 
-      tracker.interruptOutstandingDispatches()
+      tracker.interruptOutstandingDispatches(new CancelledRequestException(new Exception))
       val Some(ex) = p.isInterrupted
 
-      assert(ex.isInstanceOf[InterruptedException])
+      assert(ex.isInstanceOf[CancelledRequestException])
       assert(tracker.npending == 0)
     }
   }
@@ -121,6 +123,39 @@ class ServerTrackerTest extends FunSuite {
       val Some(ex) = p.isInterrupted
 
       assert(ex.isInstanceOf[ClientDiscardedRequestException])
+      assert(tracker.npending == 0)
+
+      val Rdiscarded(2) = messageWriter.messages.dequeue()
+
+      // If the promise still completes, its result is just discarded
+      p.setValue(Response(data))
+      executor.executeAll()
+
+      assert(tracker.npending == 0)
+      assert(messageWriter.messages.isEmpty)
+    }
+  }
+
+  test("Discards dispatches that haven't returned and should be ignorable") {
+    new Ctx {
+      val p = Promise[Response]()
+      override val service: Service[Request, Response] = Service.const(p)
+
+      tracker.dispatch(
+        Tdispatch(tag = 2, contexts = Nil, dst = Path.empty, dtab = Dtab.empty, req = data))
+
+      executor.executeAll()
+
+      assert(tracker.npending == 1)
+      assert(!p.isDefined)
+
+      tracker.discarded(2, BackupRequestFilter.SupersededRequestFailureToString)
+
+      val ex = intercept[ClientDiscardedRequestException] {
+        throw p.isInterrupted.get
+      }
+
+      assert(ex.flags == (FailureFlags.Interrupted | FailureFlags.Ignorable))
       assert(tracker.npending == 0)
 
       val Rdiscarded(2) = messageWriter.messages.dequeue()

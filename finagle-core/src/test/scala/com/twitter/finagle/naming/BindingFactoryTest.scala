@@ -9,7 +9,7 @@ import com.twitter.util._
 import org.mockito.ArgumentCaptor
 import org.mockito.Matchers.any
 import org.mockito.Mockito.{atLeastOnce, spy, verify, when}
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import org.scalatest.{BeforeAndAfter, FunSuite}
 import scala.collection.JavaConverters._
 
@@ -48,7 +48,7 @@ class BindingFactoryTest extends FunSuite with MockitoSugar with BeforeAndAfter 
     def withExpectedTrace(
       f: => Unit,
       expected: Seq[Annotation]
-    ) {
+    ): Unit = {
       val tracer: Tracer = spy(new NullTracer)
       when(tracer.isActivelyTracing(any[TraceId])).thenReturn(true)
       val captor: ArgumentCaptor[Record] = ArgumentCaptor.forClass(classOf[Record])

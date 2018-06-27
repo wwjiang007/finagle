@@ -44,7 +44,7 @@ private[lease] class WindowedByteCounter private[lease] (
 
   def this(
     info: JvmInfo
-  ) = this(info, new Context(0))
+  ) = this(info, Local.Context.empty)
 
   /*
    Should we be conservative wrt. count vs. usage?
@@ -92,7 +92,7 @@ private[lease] class WindowedByteCounter private[lease] (
    * Measures the amount of bytes used since the last sample, and bumps
    * the collection number if necessary.
    */
-  override def run() {
+  override def run(): Unit = {
     Local.restore(ctx)
     var prevUsed = info.used()
 

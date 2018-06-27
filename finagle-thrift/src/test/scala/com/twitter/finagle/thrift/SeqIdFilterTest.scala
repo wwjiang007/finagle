@@ -4,14 +4,11 @@ import com.twitter.finagle.Service
 import com.twitter.util.{Return, Throw, Promise, Time}
 import org.apache.thrift.protocol.{TBinaryProtocol, TMessage, TMessageType}
 import org.apache.thrift.transport.TMemoryBuffer
-import org.junit.runner.RunWith
 import org.mockito.{Matchers, ArgumentCaptor}
 import org.mockito.Mockito.{verify, when}
 import org.scalatest.{OneInstancePerTest, FunSuite}
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
 class SeqIdFilterTest extends FunSuite with MockitoSugar with OneInstancePerTest {
   val protocolFactory = new TBinaryProtocol.Factory()
 
@@ -31,7 +28,7 @@ class SeqIdFilterTest extends FunSuite with MockitoSugar with OneInstancePerTest
     testFilter("nonstrict(%s)".format(seqId), seqId, mkmsg(_, false))
   }
 
-  def testFilter(how: String, seqId: Int, mkmsg: TMessage => Array[Byte]) {
+  def testFilter(how: String, seqId: Int, mkmsg: TMessage => Array[Byte]): Unit = {
     val service = mock[Service[ThriftClientRequest, Array[Byte]]]
     val p = new Promise[Array[Byte]]
     when(service(Matchers.any[ThriftClientRequest])).thenReturn(p)
@@ -84,7 +81,7 @@ class SeqIdFilterTest extends FunSuite with MockitoSugar with OneInstancePerTest
       }
     }
 
-    def mustExcept(bytes: Array[Byte], exceptionMsg: String) {
+    def mustExcept(bytes: Array[Byte], exceptionMsg: String): Unit = {
       filtered(new ThriftClientRequest(bytes, false)).poll match {
         case Some(Throw(exc: IllegalArgumentException)) => assert(exc.getMessage == exceptionMsg)
         case _ => fail()
