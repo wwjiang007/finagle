@@ -1,7 +1,7 @@
 package com.twitter.finagle.http
 
 import com.twitter.collection.RecordSchema
-import com.twitter.io.{Buf, Reader, Writer}
+import com.twitter.io.{Buf, Pipe, Reader, Writer}
 import com.twitter.util.Closable
 import java.net.{InetAddress, InetSocketAddress}
 import java.util.{AbstractMap, List => JList, Map => JMap, Set => JSet}
@@ -317,10 +317,10 @@ object Request {
    * Create an HTTP/1.1 request from version, method, and URI string.
    */
   def apply(version: Version, method: Method, uri: String): Request = {
-    // Since this is a user made `Request` we use the joined Reader.writable so they
+    // Since this is a user made `Request` we use a Pipe so they
     // can keep a handle to the writer half and the client implementation can use
     // the reader half.
-    val rw = Reader.writable()
+    val rw = new Pipe[Buf]()
     val req = new Request.Impl(rw, rw, new InetSocketAddress(0))
 
     req.version = version
@@ -351,7 +351,7 @@ object Request {
     version: Version,
     method: Method,
     uri: String,
-    reader: Reader
+    reader: Reader[Buf]
   ): Request = {
     val req = new Request.Impl(reader, Writer.FailingWriter, new InetSocketAddress(0))
 
@@ -398,8 +398,8 @@ object Request {
 
     def ctx: Schema.Record = request.ctx
     def remoteSocketAddress: InetSocketAddress = request.remoteSocketAddress
-    def reader: Reader = request.reader
-    def writer: Writer with Closable = request.writer
+    def reader: Reader[Buf] = request.reader
+    def writer: Writer[Buf] with Closable = request.writer
     override lazy val cookies: CookieMap = request.cookies
     def headerMap: HeaderMap = request.headerMap
     override def params: ParamMap = request.params
@@ -419,8 +419,8 @@ object Request {
   }
 
   private[finagle] final class Impl(
-    val reader: Reader,
-    val writer: Writer with Closable,
+    val reader: Reader[Buf],
+    val writer: Writer[Buf] with Closable,
     val remoteSocketAddress: InetSocketAddress) extends Request {
 
     private var _method: Method = Method.Get

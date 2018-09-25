@@ -61,10 +61,17 @@ trait ListeningStackServer[Req, Rep, This <: ListeningStackServer[Req, Rep, This
       // We re-parameterize in case `newListeningServer` needs to access the
       // finalized parameters.
       private[this] val server: This = {
-        val withEndpoint = withStack(stack ++ Stack.Leaf(Endpoint, factory))
-        withEndpoint
-          .transformed(RequestLogger.newStackTransformer(serverLabel))
-          .withParams(serverParams)
+        val withEndpoint = withStack(stack ++ Stack.leaf(Endpoint, factory))
+        val transformed =
+          params[RequestLogger.Param] match {
+            case RequestLogger.Param.Enabled =>
+              withEndpoint.transformed(RequestLogger.newStackTransformer(serverLabel))
+            case RequestLogger.Param.Disabled =>
+              withEndpoint
+        }
+        StackServer.DefaultTransformer.transformers.foldLeft(
+          transformed.withParams(serverParams)
+        )((srv, transformer) => srv.transformed(transformer))
       }
 
       private[this] val serviceFactory = server.stack.make(serverParams)

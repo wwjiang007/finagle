@@ -1,10 +1,12 @@
 package com.twitter.finagle.mysql.integration
 
 import com.twitter.conversions.time._
-import com.twitter.finagle.Mysql
+import com.twitter.finagle.{IndividualRequestTimeoutException, Mysql}
 import com.twitter.finagle.mysql._
+import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.util.{Await, Future}
 import java.sql.Date
+import org.scalatest.concurrent.Eventually
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
 case class SwimmingRecord(
@@ -69,7 +71,8 @@ object SwimmingRecord {
 
 class ClientTest extends FunSuite
   with IntegrationClient
-  with BeforeAndAfterAll {
+  with BeforeAndAfterAll
+  with Eventually {
   import SwimmingRecord._
 
   private[this] def await[T](f: Future[T]): T =
@@ -241,15 +244,20 @@ class ClientTest extends FunSuite
     assert(err.getMessage.contains(invalidSql))
   }
 
-  test("PreparedStatement reading empty strings") {
+  test("prepare can read records with empty strings") {
     val sql =
       """
-        |INSERT INTO
+        |SELECT *
+        |FROM `finagle-mysql-test`
+        |WHERE `name` = ?
       """.stripMargin
+    val prepared = c.prepare(sql)
+    val res = prepared.select("")(identity)
+    val rows = await(res)
+    assert(rows.size == 1)
+    assert(rows.head("time").get == FloatValue(100))
   }
 
-  // NOTE: this test case seems to do something bad to the client
-  // and we leave it as the last test case and investigate separately.
   test("CursorResult does not store head of stream") {
     val query = "select * from `finagle-mysql-test`"
     val cursoredStatement = c.cursor(query)
@@ -257,6 +265,96 @@ class ClientTest extends FunSuite
     val first = cursorResult.stream.take(1)
     val second = cursorResult.stream.take(1)
     assert(first != second)
+    cursorResult.close()
+  }
+
+  // NOTE: This relies on the timeout being shorter than the time it takes for
+  // the benchmark to run (1.34 sec). If the machine finishes the query before
+  // the timeout then it's possible the test will fail.
+  //
+  // We may wish to mark this test flaky if we observe that it fails.
+  test("client connection closed on interrupt") {
+    val stats: InMemoryStatsReceiver = new InMemoryStatsReceiver()
+
+    val timeoutClient: Client with Transactions = configureClient()
+      .withLabel("timeoutClient")
+      .withStatsReceiver(stats)
+      .withRequestTimeout(100.milliseconds)
+      .newRichClient(dest)
+
+    def poolSize: Int = {
+      stats.gauges.get(Seq("timeoutClient", "pool_size")) match {
+        case Some(f) => f().toInt
+        case None => -1
+      }
+    }
+
+    val processesQuery: String = "select * from information_schema.processlist"
+
+    // Running time on an early 2015 MacBook Pro.
+    // mysql> select benchmark(100000000, 1+1);
+    // <snip>
+    // 1 row in set (1.34 sec)
+    val expensiveQuery: String = "select benchmark(100000000, 1+1)"
+    val res: Future[Result] = timeoutClient.query(expensiveQuery)
+
+    intercept[IndividualRequestTimeoutException] {
+      await(res)
+    }
+
+    // Query timed out but it's still running on the server.
+    def processes: String = await(c.query(processesQuery)).asInstanceOf[ResultSet].rows.toString
+    assert(processes.contains(expensiveQuery))
+
+    // Client connection closed.
+    eventually {
+      assert(poolSize == 0)
+    }
+  }
+
+  test("stored procedure returns result set") {
+    val createProcedure =
+      """
+        |create procedure getSwimmerByEvent(IN eventName varchar(30))
+        |begin
+        |select *
+        |from `finagle-mysql-test`
+        |where `event` = eventName collate utf8_general_ci;
+        |end
+      """.stripMargin
+
+    val executeProcedure =
+      """
+        |call getSwimmerByEvent('50 m freestyle')
+      """.stripMargin
+
+    val dropProcedure =
+      """
+        |drop procedure if exists getSwimmerByEvent
+      """.stripMargin
+
+    await(c.query(createProcedure))
+
+    val result = await(
+      c.select(executeProcedure) { row =>
+        row.stringOrNull("name")
+      }
+    )
+
+    assert(result == List("Cesar Cielo"))
+    await(c.query(dropProcedure))
+  }
+
+  test("mysql server error during handshake is reported with error code") {
+    // The default maximum number of connections is 150, so we open 151.
+    val err = intercept[Exception] {
+      for (i <- 0 to 150) {
+        val newClient = configureClient().newRichClient(dest)
+        await(newClient.ping)
+      }
+    }
+
+    assert(err.getMessage.contains("Exception in MySQL handshake, error code 1040"))
   }
 
 }

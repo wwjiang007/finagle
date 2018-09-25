@@ -1,7 +1,6 @@
 package com.twitter.finagle.http
 
-import com.twitter.finagle.http.cookie.SameSite
-import com.twitter.finagle.http.cookie.exp.supportSameSiteCodec
+import com.twitter.finagle.http.cookie.{SameSite, supportSameSiteCodec}
 import com.twitter.finagle.http.netty3.Netty3CookieCodec
 import com.twitter.finagle.http.netty4.Netty4CookieCodec
 import com.twitter.finagle.server.ServerInfo
@@ -14,8 +13,10 @@ private[finagle] object CookieMap {
   val UseNetty4CookieCodec =
     Toggles("com.twitter.finagle.http.UseNetty4CookieCodec")
 
-  private val cookieCodec =
-    if (UseNetty4CookieCodec(ServerInfo().id.hashCode())) Netty4CookieCodec
+  private val serverIdHashCode = ServerInfo().id.hashCode()
+
+  private def cookieCodec =
+    if (UseNetty4CookieCodec(serverIdHashCode)) Netty4CookieCodec
     else Netty3CookieCodec
 
   // Note that this is a def to allow it to be toggled for unit tests.
@@ -36,7 +37,7 @@ private[finagle] object CookieMap {
  * cookie is removed from the CookieMap, a header is automatically removed from
  * the ''message''
  */
-class CookieMap private[twitter](message: Message, cookieCodec: CookieCodec)
+class CookieMap private[finagle](message: Message, cookieCodec: CookieCodec)
     extends mutable.Map[String, Cookie]
     with mutable.MapLike[String, Cookie, CookieMap] {
 

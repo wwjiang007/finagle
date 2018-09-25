@@ -1,6 +1,6 @@
 scala_library(
     sources = rglobs("*.scala"),
-    fatal_warnings = True,
+    compiler_option_sets = {"fatal_warnings"},
     provides = scala_artifact(
         org = "com.twitter",
         name = "finagle-mux",
@@ -12,9 +12,7 @@ scala_library(
         "3rdparty/jvm/io/netty:netty4-codec-http",
         "3rdparty/jvm/io/netty:netty4-handler-proxy",
         "finagle/finagle-core",
-        "finagle/finagle-mux/src/main/resources",
         "finagle/finagle-netty4",
-        "finagle/finagle-toggle",
         "util/util-app/src/main/scala",
         "util/util-core/src/main/scala",
         "util/util-logging/src/main/scala",

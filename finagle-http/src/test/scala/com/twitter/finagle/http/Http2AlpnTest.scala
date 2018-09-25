@@ -2,6 +2,7 @@ package com.twitter.finagle.http
 
 import com.twitter.finagle
 import com.twitter.finagle.Service
+import com.twitter.finagle.liveness.FailureDetector
 import com.twitter.finagle.ssl.{KeyCredentials, TrustCredentials}
 import com.twitter.finagle.ssl.client.SslClientConfiguration
 import com.twitter.finagle.ssl.server.SslServerConfiguration
@@ -12,7 +13,7 @@ import com.twitter.io.TempFile
 import com.twitter.util.{Closable, Future}
 import java.net.InetSocketAddress
 
-class Http2AlpnTest extends AbstractEndToEndTest {
+class Http2AlpnTest extends AbstractHttp2EndToEndTest {
 
   def clientConfiguration(): SslClientConfiguration = {
     val intermediateFile = TempFile.fromResourcePath("/ssl/certs/intermediate.cert.pem")
@@ -38,7 +39,9 @@ class Http2AlpnTest extends AbstractEndToEndTest {
   def clientImpl(): finagle.Http.Client =
     finagle.Http.client
       .withHttp2
+      .configured(FailureDetector.Param(FailureDetector.NullConfig))
       .configured(Transport.ClientSsl(Some(clientConfiguration())))
+      .withStatsReceiver(statsRecv)
 
   def serverImpl(): finagle.Http.Server =
     finagle.Http.server
@@ -105,33 +108,14 @@ class Http2AlpnTest extends AbstractEndToEndTest {
         val errorMsg = s"Upgraded when the client was $clientStatus, the server was " +
           s"$serverStatus, the client toggle was $clientToggleName, the server toggle was " +
           s"$serverToggleName"
-        assert(!sr.counters.contains(Seq("client", "upgrade", "success")), errorMsg)
-        assert(!sr.counters.contains(Seq("server", "upgrade", "success")), errorMsg)
+
+        val clientSuccess = sr.counters.get(Seq("client", "upgrade", "success"))
+        assert(clientSuccess.isEmpty || clientSuccess.contains(0), errorMsg)
+        val serverSuccess = sr.counters.get(Seq("server", "upgrade", "success"))
+        assert(serverSuccess.isEmpty || serverSuccess.contains(0L))
       }
       await(Closable.all(client, server).close())
     }
-  }
-
-  test("client closes properly when closed") {
-    val sr = new InMemoryStatsReceiver()
-    val server = serverImpl()
-      .serve("localhost:*", initService)
-
-    val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
-    val client = clientImpl()
-      .withStatsReceiver(sr)
-      .newService(s"${addr.getHostName}:${addr.getPort}", "client")
-
-    initClient(client)
-
-    val request = Request(Method.Post, "/")
-
-    val rep = await(client(request))
-
-    await(client.close())
-    assert(sr.counters(Seq("client", "closes")) == 1)
-
-    await(server.close())
   }
 
   test("clients don't leak connections when h2 is rejected") {

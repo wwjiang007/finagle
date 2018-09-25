@@ -134,10 +134,18 @@ class GlobalRequestTimeoutException(timeout: Duration)
  *
  * [1] https://twitter.github.io/finagle/guide/Names.html
  */
-class NoBrokersAvailableException(val name: String, val baseDtab: Dtab, val localDtab: Dtab)
+class NoBrokersAvailableException(val name: String, val baseDtabFn: () => Dtab, val localDtabFn: () => Dtab)
     extends RequestException
     with SourcedException {
-  def this(name: String = "unknown") = this(name, Dtab.empty, Dtab.empty)
+
+  // backwards compatibility constructor
+  def this(name: String, baseDtab: Dtab, localDtab: Dtab) =
+    this(name, () => baseDtab, () => localDtab)
+
+  def this(name: String = "unknown") = this(name, () => Dtab.base, () => Dtab.local)
+
+  def baseDtab: Dtab = baseDtabFn()
+  def localDtab: Dtab = localDtabFn()
 
   override def exceptionMessage: String =
     s"No hosts are available for $name, Dtab.base=[${baseDtab.show}], Dtab.local=[${localDtab.show}]"
@@ -208,7 +216,7 @@ class CancelledConnectionException(cause: Throwable)
 class FailedFastException(
   message: String,
   cause: Throwable,
-  private[finagle] val flags: Long = FailureFlags.Empty
+  val flags: Long = FailureFlags.Empty
 ) extends RequestException(message, cause)
     with WriteException
     with HasLogLevel
@@ -338,7 +346,7 @@ class ConnectionFailedException(underlying: Option[Throwable], remoteAddress: Op
 class ChannelClosedException private[finagle](
   underlying: Option[Throwable],
   remoteAddress: Option[SocketAddress],
-  private[finagle] val flags: Long)
+  val flags: Long)
     extends ChannelException(underlying, remoteAddress)
     with FailureFlags[ChannelClosedException] {
 
@@ -362,7 +370,7 @@ class StreamClosedException(
   remoteAddress: Option[SocketAddress],
   streamId: String,
   whyFailed: String,
-  private[finagle] val flags: Long)
+  val flags: Long)
     extends ChannelException(None, remoteAddress)
     with FailureFlags[StreamClosedException]
     with NoStackTrace {
@@ -608,7 +616,7 @@ class ChannelBufferUsageException(description: String) extends Exception(descrip
  * their corresponding backup requests succeeded first. See
  * `com.twitter.finagle.exp.BackupRequestFilter` for details.
  */
-@deprecated("Use Failure flagged Failure.Ignorable", "2017-11-20")
+@deprecated("Use Failure flagged FailureFlags.Ignorable", "2017-11-20")
 object BackupRequestLost extends Exception with NoStackTrace with HasLogLevel {
   def logLevel: Level = Level.TRACE
 }

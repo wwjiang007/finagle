@@ -22,36 +22,48 @@ object ZkMetadata {
 
   /**
    * Orders a Finagle [[Address]] based on a deterministic hash of its shard id.
+   *
+   * If shard id information is identical, either both lack metadata, both lack
+   * a shard id, or both have the same shard id, ordering is then computed by
+   * [[Address.hashOrdering]].
+   *
+   * @note Avoiding collisions in this hash ordering where inputs are equal is
+   * an important property in keeping it deterministic. Thus, it uses a murmurhash
+   * under the hood which is known to not have collisions for 32-bit inputs. However,
+   * if the input collection does not have shard ids available, we fall back to
+   * [[Address.hashOrdering]] which may have some caveats to this.
    */
-  val shardHashOrdering: Ordering[Address] = new Ordering[Address] {
-    private[this] val hashSeed = key.hashCode
-
+  def shardHashOrdering(seed: Int): Ordering[Address] = new Ordering[Address] {
     private[this] def hash(shardId: Int): Int = {
       // We effectively unroll what MurmurHash3.bytesHash does for a single
       // iteration. That is, it packs groups of four bytes into an int and
       // mixes then finalizes.
       MurmurHash3.finalizeHash(
-        hash = MurmurHash3.mixLast(hashSeed, shardId),
+        hash = MurmurHash3.mixLast(seed, shardId),
         // we have four bytes in `shardId`
         length = 4
       )
     }
 
+    private[this] val addressHashOrder = Address.hashOrdering(seed)
+
     def compare(a0: Address, a1: Address): Int = (a0, a1) match {
       case (Address.Inet(_, md0), Address.Inet(_, md1)) =>
         (fromAddrMetadata(md0), fromAddrMetadata(md1)) match {
           case (Some(ZkMetadata(Some(id0))), Some(ZkMetadata(Some(id1)))) =>
-            Integer.compare(hash(id0), hash(id1))
-          // If they don't have two shardIds to compare, we don't really care
-          // about the ordering only that it's consistent.
+            if (id0 == id1) addressHashOrder.compare(a0, a1)
+            else Integer.compare(hash(id0), hash(id1))
           case (Some(ZkMetadata(Some(_))), Some(ZkMetadata(None))) => -1
           case (Some(ZkMetadata(None)), Some(ZkMetadata(Some(_)))) => 1
-          case (Some(ZkMetadata(None)), Some(ZkMetadata(None))) => 0
+          case (Some(ZkMetadata(None)), Some(ZkMetadata(None))) =>
+            addressHashOrder.compare(a0, a1)
           case (Some(_), None) => -1
           case (None, Some(_)) => 1
-          case (None, None) => 0
+          case (None, None) =>
+            addressHashOrder.compare(a0, a1)
         }
-      case _ => 0
+      case _ =>
+        addressHashOrder.compare(a0, a1)
     }
 
     override def toString: String = "ZkMetadata.shardHashOrdering"

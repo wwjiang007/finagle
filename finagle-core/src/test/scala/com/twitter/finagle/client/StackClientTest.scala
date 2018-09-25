@@ -167,7 +167,7 @@ abstract class AbstractStackClientTest
       assert(e == ex)
       failFastOn match {
         case Some(on) if !on =>
-          assert(ctx.sr.counters.get(Seq(name, "failfast", "marked_dead")) == None)
+          assert(!ctx.sr.counters.contains(Seq(name, "failfast", "marked_dead")))
           intercept[RuntimeException] { await(svc("hi2")) }
         case _ =>
           eventually {
@@ -205,7 +205,7 @@ abstract class AbstractStackClientTest
 
     val stack = StackClient
       .newStack[Unit, Unit]
-      .concat(Stack.Leaf(Stack.Role("role"), underlyingFactory))
+      .concat(Stack.leaf(Stack.Role("role"), underlyingFactory))
       // don't pool or else we don't see underlying close until service is ejected from pool
       .remove(DefaultPool.Role)
 
@@ -249,7 +249,7 @@ abstract class AbstractStackClientTest
 
     val stack = StackClient
       .newStack[Unit, Unit]
-      .concat(Stack.Leaf(Stack.Role("role"), underlyingFactory))
+      .concat(Stack.leaf(Stack.Role("role"), underlyingFactory))
       // don't pool or else we don't see underlying close until service is ejected from pool
       .remove(DefaultPool.Role)
       .replace(
@@ -343,7 +343,7 @@ abstract class AbstractStackClientTest
       // failing request and Busy | Closed load balancer => zero requeues
       _svcFacStatus = status
       await(cl().map(_("hi")))
-      assert(requeues.isEmpty)
+      assert(requeues == Some(0))
     })
   }
 
@@ -369,7 +369,7 @@ abstract class AbstractStackClientTest
     assert(budget > 0)
   })
 
-  test("service acquisition requeues respect Failure.Restartable")(new RequeueCtx {
+  test("service acquisition requeues respect FailureFlags.Retryable")(new RequeueCtx {
     override val stubLB = new ServiceFactory[String, String] {
       def apply(conn: ClientConnection) = Future.exception(
         Failure("don't restart this!")
@@ -379,19 +379,19 @@ abstract class AbstractStackClientTest
 
     intercept[Failure] { await(cl()) }
 
-    assert(requeues.isEmpty)
+    assert(requeues == Some(0))
     assert(budget > 0)
   })
 
   test("service acquisition requeues respect Status.Open")(new RequeueCtx {
     _svcFacStatus = Status.Closed
     await(cl())
-    assert(requeues.isEmpty)
+    assert(requeues == Some(0))
     assert(budget > 0)
   })
 
   test("service acquisition requeues will close Status.Closed sessions") {
-    val ctx = new RequeueCtx { }
+    val ctx = new RequeueCtx {}
     ctx._svcFacStatus = Status.Open
     ctx._sessionStatus = Status.Closed
     ctx.closeSideEffect = () => ctx._sessionStatus = Status.Open
@@ -408,15 +408,15 @@ abstract class AbstractStackClientTest
     class CountFactory extends ServiceFactory[Unit, Unit] {
       var count = 0
 
-      val service = new Service[Unit, Unit] {
+      val service: Service[Unit, Unit] = new Service[Unit, Unit] {
         def apply(request: Unit): Future[Unit] = {
           count = count + 1
           Future.exception(WriteException(null))
         }
       }
 
-      def apply(conn: ClientConnection) = Future.value(service)
-      def close(deadline: Time) = Future.Done
+      def apply(conn: ClientConnection): Future[Service[Unit, Unit]] = Future.value(service)
+      def close(deadline: Time): Future[Unit] = Future.Done
     }
 
     val fac1 = new CountFactory
@@ -449,7 +449,7 @@ abstract class AbstractStackClientTest
       .replace(
         LoadBalancerFactory.role,
         new Stack.Module1[LoadBalancerFactory.Dest, ServiceFactory[Unit, Unit]] {
-          val role = new Stack.Role("role")
+          val role = Stack.Role("role")
           val description = "description"
           def make(dest: LoadBalancerFactory.Dest, next: ServiceFactory[Unit, Unit]) = {
             val LoadBalancerFactory.Dest(va) = dest
@@ -474,7 +474,7 @@ abstract class AbstractStackClientTest
         )
       )
 
-    intercept[Failure] {
+    intercept[ChannelWriteException] {
       await(service(()))
     }
 
@@ -545,7 +545,7 @@ abstract class AbstractStackClientTest
         StringServer.server.serve(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), echoSvc)
       val ia = server.boundAddress.asInstanceOf[InetSocketAddress]
 
-      val client = new LocalCheckingStringClient(key)
+      val client = LocalCheckingStringClient(key)
         .newService(Name.bound(Address(ia)), "a-label")
 
       val result = await(client("abc"))
@@ -571,7 +571,7 @@ abstract class AbstractStackClientTest
     val stack = StackClient
       .newStack[Unit, Unit]
       .concat(
-        Stack.Leaf(
+        Stack.leaf(
           Stack.Role("role"),
           new ServiceFactory[Unit, Unit] {
             def apply(conn: ClientConnection): Future[Service[Unit, Unit]] =
@@ -703,14 +703,14 @@ abstract class AbstractStackClientTest
     // We could insert using [[ExceptionSourceFilter]] as the relative insertion point, but we use
     // another module instead so that if the [[ExceptionSourceFilter]] were moved earlier in the
     // stack, this test would fail.
-    val svc = baseClient.withStack(baseClient.stack.insertBefore(
-      ClearContextValueFilter.role, throwsModule))
+    val svc = baseClient
+      .withStack(baseClient.stack.insertBefore(ClearContextValueFilter.role, throwsModule))
       .newService(Name.bound(Address(boundAddress)), label)
 
     val failure = intercept[Failure] {
       await(svc("hello"))
     }
 
-   assert(failure.toString == "Failure(boom!, flags=0x00) with Service -> stringClient")
+    assert(failure.toString == "Failure(boom!, flags=0x00) with Service -> stringClient")
   }
 }

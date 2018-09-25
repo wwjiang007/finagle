@@ -228,16 +228,35 @@ private object StdClient {
 }
 
 /**
+ * Creates a standard implementation of the mysql client interfaces.
+ *
+ * Note that command interrupts are handled by `GenSerialClientDispatcher`'s
+ * interrupt handler. It initiates closing the transport but does not cancel
+ * the interrupted command. That is, the client's connection will be closed,
+ * the server will finish executing the command, and no dependent work
+ * (e.g., via `flatMap`) will run.
+ *
+ * @param factory the underlying factory used to checkout services from.
+ * This is usually a finagle client.
+ *
+ * @param supportUnsigned Configures whether to support unsigned integer fields when
+ * returning elements of a [[Row]]. If disabled, unsigned fields will be decoded
+ * as if they were signed, potentially resulting in corruption in the case of
+ * overflowing the signed representation. Because Java doesn't support unsigned
+ * integer types widening may be necessary to support the unsigned variants.
+ * For example, an unsigned Int is represented as a Long.
+ *
+ * @param statsReceiver The [[StatsReceiver]] used to export stats for this client.
+ *
  * @param rollbackQuery the query used to rollback a transaction, "ROLLBACK".
- *                      This is customizable to allow for failure testing.
+ * This is customizable to allow for failure testing.
  */
 private class StdClient(
   factory: ServiceFactory[Request, Result],
   supportUnsigned: Boolean,
   statsReceiver: StatsReceiver,
   rollbackQuery: String
-) extends Client
-    with Transactions {
+) extends Client with Transactions {
 
   import StdClient._
   import Client._
@@ -249,8 +268,6 @@ private class StdClient(
   ) = this(factory, supportUnsigned, statsReceiver, "ROLLBACK")
 
   private[this] val service = factory.toService
-
-  private[this] val cursorStats = new CursorStats(statsReceiver)
 
   def query(sql: String): Future[Result] = service(QueryRequest(sql))
 
@@ -276,6 +293,9 @@ private class StdClient(
 
   def cursor(sql: String): CursoredStatement = {
     new CursoredStatement {
+
+      private[this] val cursorStats = new CursorStats(statsReceiver)
+
       def apply[T](rowsPerFetch: Int, params: Parameter*)(
         f: (Row) => T
       ): Future[CursorResult[T]] = {

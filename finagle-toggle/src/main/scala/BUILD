@@ -1,6 +1,9 @@
 scala_library(
-    sources = rglobs("*.scala"),
-    fatal_warnings = True,
+    sources = globs(
+        "com/twitter/finagle/toggle/*.scala",
+        "com/twitter/finagle/toggle/flag/*.scala",
+    ),
+    compiler_option_sets = {"fatal_warnings"},
     provides = scala_artifact(
         org = "com.twitter",
         name = "finagle-toggle",
@@ -10,6 +13,7 @@ scala_library(
         "3rdparty/jvm/com/fasterxml/jackson/core:jackson-annotations",
         "3rdparty/jvm/com/fasterxml/jackson/core:jackson-databind",
         "3rdparty/jvm/com/fasterxml/jackson/module:jackson-module-scala",
+        "finagle/finagle-toggle/src/main/scala/com/twitter/finagle/server",
         "util/util-app/src/main/java",
         "util/util-app/src/main/scala",
         "util/util-core/src/main/scala",
@@ -19,5 +23,6 @@ scala_library(
     ],
     exports = [
         "3rdparty/jvm/com/fasterxml/jackson/core:jackson-annotations",
+        "finagle/finagle-toggle/src/main/scala/com/twitter/finagle/server",
     ],
 )

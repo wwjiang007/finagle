@@ -61,8 +61,8 @@ object MySqlClientTracingFilter {
       // TODO(jeff): should be able to get this directly from ClientTracingFilter
       val annotations = new AnnotatingTracingFilter[Request, Result](
         _label.label,
-        Annotation.ClientSend(),
-        Annotation.ClientRecv()
+        Annotation.ClientSend,
+        Annotation.ClientRecv
       )
       annotations.andThen(TracingFilter).andThen(next)
     }
@@ -70,15 +70,17 @@ object MySqlClientTracingFilter {
 
   object TracingFilter extends SimpleFilter[Request, Result] {
     def apply(request: Request, service: Service[Request, Result]): Future[Result] = {
-      if (Trace.isActivelyTracing) {
+      val trace = Trace()
+      if (trace.isActivelyTracing) {
         request match {
-          case QueryRequest(sqlStatement) => Trace.recordBinary("mysql.query", sqlStatement)
-          case PrepareRequest(sqlStatement) => Trace.recordBinary("mysql.prepare", sqlStatement)
+          case QueryRequest(sqlStatement) => trace.recordBinary("mysql.query", sqlStatement)
+          case PrepareRequest(sqlStatement) => trace.recordBinary("mysql.prepare", sqlStatement)
           // TODO: save the prepared statement and put it in the executed request trace
-          case ExecuteRequest(id, _, _, _) => Trace.recordBinary("mysql.execute", id)
-          case _ => Trace.record("mysql." + request.getClass.getSimpleName.replace("$", ""))
+          case ExecuteRequest(id, _, _, _) => trace.recordBinary("mysql.execute", id)
+          case _ => trace.record("mysql." + request.getClass.getSimpleName.replace("$", ""))
         }
       }
+
       service(request)
     }
   }
@@ -117,12 +119,11 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
     }
 
     /**
-     * Configure whether to support unsigned integer fields should be considered when
-     * returning elements of a [[Row]]. If not supported, unsigned fields will be decoded
-     * as if they were signed, potentially resulting in corruption in the case of overflowing
-     * the signed representation. Because Java doesn't support unsigned integer types
-     * widening may be necessary to support the unsigned variants. For example, an unsigned
-     * Int is represented as a Long.
+     * Configure whether to support unsigned integer fields when returning elements of a [[Row]].
+     * If not supported, unsigned fields will be decoded as if they were signed, potentially
+     * resulting in corruption in the case of overflowing the signed representation. Because
+     * Java doesn't support unsigned integer types widening may be necessary to support the
+     * unsigned variants. For example, an unsigned Int is represented as a Long.
      *
      * `Value` representations of unsigned columns which are widened when enabled:
      * `ByteValue` -> `ShortValue``
@@ -189,6 +190,7 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
       .replace(ClientTracingFilter.role, MySqlClientTracingFilter.Stackable)
       // Note: there is a stack overflow in insertAfter using CanStackFrom, thus the module.
       .insertAfter(DefaultPool.Role, PoisonConnection.module)
+      .prepend(RollbackFactory.module)
   }
 
   /**
@@ -297,6 +299,44 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
       */
     def withAffectedRows(): Client =
       configured(Handshake.FoundRows(false))
+
+    /**
+     * Installs a module on the client which issues a ROLLBACK statement when a service is put
+     * back into the pool. This exists to ensure that a "clean" connection is always returned
+     * from the connection pool. For example, it prevents situations where an unfinished
+     * transaction has been written to the wire, the service has been released back into
+     * the pool, the same service is again checked out of the pool, and a statement
+     * that causes an implicit commit is issued.
+     *
+     * The additional work incurred for the rollback may result in less throughput from the
+     * connection pool and, as such, may require configuring the pool (via `withSessionPool`)
+     * to offer more available connections connections.
+     *
+     * @see [[com.twitter.finagle.mysql.RollbackFactory]]
+     * @see https://dev.mysql.com/doc/en/implicit-commit.html
+     * @note this module is installed by default.
+     */
+    def withRollback: Client =
+      if (stack.contains(RollbackFactory.Role)) {
+        this
+      } else {
+        withStack(stack.prepend(RollbackFactory.module))
+      }
+
+    /**
+     * Removes the module on the client which issues a ROLLBACK statement each time a
+     * service is put back into the pool. This ''may'' result in better performance
+     * at the risk of receiving a connection from the pool with uncommitted state.
+     *
+     * Instead of disabling this feature, consider configuring the connection pool
+     * for the client (via `withSessionPool`) to offer more available connections.
+     *
+     * @see [[com.twitter.finagle.mysql.RollbackFactory]]
+     * @see https://dev.mysql.com/doc/en/implicit-commit.html
+     * @note the rollback module is installed by default.
+     */
+    def withNoRollback: Client =
+      withStack(stack.remove(RollbackFactory.Role))
 
     // Java-friendly forwarders
     // See https://issues.scala-lang.org/browse/SI-8905

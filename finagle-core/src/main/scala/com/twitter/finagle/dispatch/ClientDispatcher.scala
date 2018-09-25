@@ -4,7 +4,7 @@ import com.twitter.concurrent.AsyncSemaphore
 import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
 import com.twitter.finagle.tracing.Trace
 import com.twitter.finagle.transport.Transport
-import com.twitter.finagle.{Failure, Service, Status, WriteException}
+import com.twitter.finagle.{Failure, FailureFlags, Service, Status, WriteException}
 import com.twitter.util._
 import java.net.InetSocketAddress
 
@@ -60,7 +60,7 @@ abstract class GenSerialClientDispatcher[Req, Rep, In, Out](
   private[this] def tryDispatch(req: Req, p: Promise[Rep]): Future[Unit] =
     p.isInterrupted match {
       case Some(intr) =>
-        p.setException(Failure.adapt(intr, Failure.Interrupted))
+        p.setException(Failure.adapt(intr, FailureFlags.Interrupted))
         Future.Done
       case None =>
         Trace.recordClientAddr(localAddress)
@@ -102,9 +102,8 @@ object GenSerialClientDispatcher {
 
   val StatsScope: String = "dispatcher"
 
-  val wrapWriteException: PartialFunction[Throwable, Future[Nothing]] = {
-    case exc: Throwable => Future.exception(WriteException(exc))
-  }
+  def wrapWriteException(exc: Throwable): Future[Nothing] =
+    Future.exception(WriteException(exc))
 }
 
 /**
@@ -118,13 +117,15 @@ class SerialClientDispatcher[Req, Rep](trans: Transport[Req, Rep], statsReceiver
   def this(trans: Transport[Req, Rep]) =
     this(trans, NullStatsReceiver)
 
-  private[this] val readTheTransport: Unit => Future[Rep] = _ => trans.read()
+  private[this] val tryReadTheTransport: Try[Unit] => Future[Rep] = {
+    case Return(_) => trans.read()
+    case Throw(exc) => wrapWriteException(exc)
+  }
 
   protected def dispatch(req: Req, p: Promise[Rep]): Future[Unit] =
     trans
       .write(req)
-      .rescue(wrapWriteException)
-      .flatMap(readTheTransport)
+      .transform(tryReadTheTransport)
       .respond(rep => p.updateIfEmpty(rep))
       .unit
 

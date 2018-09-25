@@ -26,6 +26,19 @@ class FailureAccrualFactoryTest extends FunSuite with MockitoSugar {
 
   def consecutiveFailures = FailureAccrualPolicy.consecutiveFailures(3, markDeadFor)
 
+  class ExceptionWithFailureFlags(
+    val flags: Long = FailureFlags.Empty
+  ) extends FailureFlags[ExceptionWithFailureFlags] {
+
+    def copyWithFlags(newFlags: Long): ExceptionWithFailureFlags =
+      new ExceptionWithFailureFlags(newFlags)
+  }
+
+  val ignorableFailures = Seq(
+    Failure.ignorable("ignore me!"),
+    new ExceptionWithFailureFlags(FailureFlags.Ignorable)
+  )
+
   class Helper(failureAccrualPolicy: FailureAccrualPolicy) {
     val statsReceiver = new InMemoryStatsReceiver
     val underlyingService = mock[Service[Int, Int]]
@@ -82,7 +95,7 @@ class FailureAccrualFactoryTest extends FunSuite with MockitoSugar {
       }
       // Now failed
 
-      assert(statsReceiver.counters.get(List("removals")) == Some(1))
+      assert(statsReceiver.counters(List("removals")) == 1)
       assert(!factory.isAvailable)
       assert(!service.isAvailable)
 
@@ -120,104 +133,106 @@ class FailureAccrualFactoryTest extends FunSuite with MockitoSugar {
     assert(stats.counter("removals")() == 1)
   }
 
-  test("does not count ignorable failure as failure") {
-    val svcFactory = ServiceFactory.const {
-      Service.mk { i: Int =>
-        Future.exception[Int](Failure.ignorable("ignore me!"))
-      }
-    }
-    val stats = new InMemoryStatsReceiver()
-    val faf = new FailureAccrualFactory[Int, Int](
-      underlying = svcFactory,
-      policy = FailureAccrualPolicy.consecutiveFailures(1, Backoff.const(2.seconds)),
-      timer = Timer.Nil,
-      statsReceiver = stats,
-      responseClassifier = ResponseClassifier.Default
-    )
-
-    val svc = Await.result(faf(), 5.seconds)
-    svc(-1)
-    assert(stats.counter("removals")() == 0)
-    assert(faf.isAvailable)
-  }
-
-  test("does not count ignorable failure as success") {
-    var ret = Future.exception[Int](new Exception("boom!"))
-    val svcFactory = ServiceFactory.const {
-      Service.mk { i: Int =>
-        ret
-      }
-    }
-    val stats = new InMemoryStatsReceiver()
-    val faf = new FailureAccrualFactory[Int, Int](
-      underlying = svcFactory,
-      policy = FailureAccrualPolicy.consecutiveFailures(3, Backoff.const(2.seconds)),
-      timer = new MockTimer,
-      statsReceiver = stats,
-      responseClassifier = ResponseClassifier.Default
-    )
-
-    val svc = Await.result(faf(), 5.seconds)
-    svc(-1)
-    svc(-1)
-
-    assert(stats.counter("removals")() == 0)
-    assert(faf.isAvailable)
-
-    ret = Future.exception[Int](Failure.ignorable("ignore me!"))
-
-    svc(-1) // this should not be counted as a success
-    assert(stats.counter("removals")() == 0)
-    assert(faf.isAvailable)
-
-    ret = Future.exception[Int](new Exception("boom!"))
-
-    svc(-1) // Third "real" exception in a row; should trip FA
-
-    assert(stats.counter("removals")() == 1)
-    assert(!faf.isAvailable)
-  }
-
-  test("keeps probe open on ignorable failure") {
-    var ret = Future.exception[Int](new Exception("boom!"))
-    Time.withCurrentTimeFrozen { timeControl =>
+  ignorableFailures.foreach { ignorableFailure =>
+    test(s"does not count ignorable failure ($ignorableFailure) as failure") {
       val svcFactory = ServiceFactory.const {
         Service.mk { i: Int =>
-          ret
+          Future.exception[Int](ignorableFailure)
         }
       }
       val stats = new InMemoryStatsReceiver()
-      val timer = new MockTimer
       val faf = new FailureAccrualFactory[Int, Int](
         underlying = svcFactory,
         policy = FailureAccrualPolicy.consecutiveFailures(1, Backoff.const(2.seconds)),
-        timer = timer,
+        timer = Timer.Nil,
         statsReceiver = stats,
         responseClassifier = ResponseClassifier.Default
       )
 
       val svc = Await.result(faf(), 5.seconds)
       svc(-1)
-
-      // Trip FA
-      assert(stats.counter("removals")() == 1)
-      assert(!faf.isAvailable)
-
-      timeControl.advance(10.seconds)
-      timer.tick()
-
+      assert(stats.counter("removals")() == 0)
       assert(faf.isAvailable)
+    }
 
-      ret = Future.exception[Int](Failure.ignorable("ignore me!"))
+    test(s"does not count ignorable failure ($ignorableFailure) as success") {
+      var ret = Future.exception[Int](new Exception("boom!"))
+      val svcFactory = ServiceFactory.const {
+        Service.mk { i: Int =>
+          ret
+        }
+      }
+      val stats = new InMemoryStatsReceiver()
+      val faf = new FailureAccrualFactory[Int, Int](
+        underlying = svcFactory,
+        policy = FailureAccrualPolicy.consecutiveFailures(3, Backoff.const(2.seconds)),
+        timer = new MockTimer,
+        statsReceiver = stats,
+        responseClassifier = ResponseClassifier.Default
+      )
 
+      val svc = Await.result(faf(), 5.seconds)
+      svc(-1)
       svc(-1)
 
-      // ensure that the ignorable not counted as a success, but that we can still send requests
-      // (ProbeOpen state)
-      assert(stats.counters.get(List("revivals")) == None)
-      assert(stats.counter("probes")() == 1)
-      assert(stats.counter("removals")() == 1)
+      assert(stats.counter("removals")() == 0)
       assert(faf.isAvailable)
+
+      ret = Future.exception[Int](ignorableFailure)
+
+      svc(-1) // this should not be counted as a success
+      assert(stats.counter("removals")() == 0)
+      assert(faf.isAvailable)
+
+      ret = Future.exception[Int](new Exception("boom!"))
+
+      svc(-1) // Third "real" exception in a row; should trip FA
+
+      assert(stats.counter("removals")() == 1)
+      assert(!faf.isAvailable)
+    }
+
+    test(s"keeps probe open on ignorable failure ($ignorableFailure)") {
+      var ret = Future.exception[Int](new Exception("boom!"))
+      Time.withCurrentTimeFrozen { timeControl =>
+        val svcFactory = ServiceFactory.const {
+          Service.mk { i: Int =>
+            ret
+          }
+        }
+        val stats = new InMemoryStatsReceiver()
+        val timer = new MockTimer
+        val faf = new FailureAccrualFactory[Int, Int](
+          underlying = svcFactory,
+          policy = FailureAccrualPolicy.consecutiveFailures(1, Backoff.const(2.seconds)),
+          timer = timer,
+          statsReceiver = stats,
+          responseClassifier = ResponseClassifier.Default
+        )
+
+        val svc = Await.result(faf(), 5.seconds)
+        svc(-1)
+
+        // Trip FA
+        assert(stats.counter("removals")() == 1)
+        assert(!faf.isAvailable)
+
+        timeControl.advance(10.seconds)
+        timer.tick()
+
+        assert(faf.isAvailable)
+
+        ret = Future.exception[Int](ignorableFailure)
+
+        svc(-1)
+
+        // ensure that the ignorable not counted as a success, but that we can still send requests
+        // (ProbeOpen state)
+        assert(stats.counters(List("revivals")) == 0)
+        assert(stats.counter("probes")() == 1)
+        assert(stats.counter("removals")() == 1)
+        assert(faf.isAvailable)
+      }
     }
   }
 
@@ -231,7 +246,7 @@ class FailureAccrualFactoryTest extends FunSuite with MockitoSugar {
           Await.result(service(123), 5.seconds)
         }
       }
-      assert(statsReceiver.counters.get(List("removals")) == Some(1))
+      assert(statsReceiver.counters(List("removals")) == 1)
       assert(!factory.isAvailable)
       assert(!service.isAvailable)
 
@@ -239,8 +254,8 @@ class FailureAccrualFactoryTest extends FunSuite with MockitoSugar {
       timer.tick()
 
       // Probing, not revived yet.
-      assert(statsReceiver.counters.get(List("removals")) == Some(1))
-      assert(statsReceiver.counters.get(List("revivals")) == None)
+      assert(statsReceiver.counters(List("removals")) == 1)
+      assert(statsReceiver.counters(List("revivals")) == 0)
 
       assert(factory.isAvailable)
       assert(service.isAvailable)
@@ -297,7 +312,7 @@ class FailureAccrualFactoryTest extends FunSuite with MockitoSugar {
 
         // The service should be available for a probe
         assert(statsReceiver.counters.get(List("removals")) == Some(1))
-        assert(statsReceiver.counters.get(List("revivals")) == None)
+        assert(statsReceiver.counters(List("revivals")) == 0)
         assert(factory.isAvailable)
         assert(service.isAvailable)
 
@@ -373,7 +388,7 @@ class FailureAccrualFactoryTest extends FunSuite with MockitoSugar {
 
         // The service should be available for a probe
         assert(statsReceiver.counters.get(List("removals")) == Some(1))
-        assert(statsReceiver.counters.get(List("revivals")) == None)
+        assert(statsReceiver.counters(List("revivals")) == 0)
         assert(factory.isAvailable)
         assert(service.isAvailable)
       }
@@ -577,7 +592,7 @@ class FailureAccrualFactoryTest extends FunSuite with MockitoSugar {
       timer.tick()
 
       // Probing, not revived yet.
-      assert(statsReceiver.counters.get(List("revivals")) == None)
+      assert(statsReceiver.counters(List("revivals")) == 0)
       assert(statsReceiver.counters.get(List("removals")) == Some(1))
       assert(factory.isAvailable)
       assert(service.isAvailable)
@@ -875,7 +890,7 @@ class FailureAccrualFactoryTest extends FunSuite with MockitoSugar {
     val s: Stack[ServiceFactory[Int, Int]] =
       FailureAccrualFactory
         .module[Int, Int]
-        .toStack(Stack.Leaf(Stack.Role("Service"), h.underlying))
+        .toStack(Stack.leaf(Stack.Role("Service"), h.underlying))
 
     val ps: Stack.Params = Stack.Params.empty + param.Stats(h.statsReceiver)
 

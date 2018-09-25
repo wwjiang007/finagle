@@ -6,7 +6,6 @@ import com.twitter.finagle.memcached.protocol.Value
 import com.twitter.finagle.memcached.protocol.text.server.ResponseToBuf
 import com.twitter.finagle.memcached.protocol.text.transport.MemcachedNetty4ClientPipelineInit
 import com.twitter.finagle.memcached.{protocol => memcached}
-import com.twitter.finagle.mux.{transport => mux}
 import com.twitter.finagle.thrift.transport.{netty4 => thrift}
 import com.twitter.io.Buf
 import io.netty.buffer.Unpooled
@@ -14,9 +13,7 @@ import io.netty.channel.ChannelPipeline
 import io.netty.channel.embedded.EmbeddedChannel
 import org.apache.thrift.protocol.TBinaryProtocol
 import org.apache.thrift.transport.{TFramedTransport, TMemoryBuffer}
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
 /**
  * The majority of finagle protocols manage inbound direct buffers in their netty pipeline.
@@ -25,13 +22,11 @@ import org.scalatest.junit.JUnitRunner
  *
  *  kestrel (implicitly via memcached)
  *  memcached
- *  mux (copying framer only)
  *  thrift
- *
  *  mysql (coverage from c.t.f.netty4.channel.Netty4ClientChannelInitializerTest)
+ *  redis (uses framed n4 channel init so coverage comes from c.t.f.n4.channel.Netty4ClientChannelInitializerTest)
  *  http/1.1, http/2 (coverage from c.t.f.http.DirectPayloadsLifecycleTest)
  */
-@RunWith(classOf[JUnitRunner])
 class DirectBufferLifecycleTest extends FunSuite {
 
   /**
@@ -51,12 +46,6 @@ class DirectBufferLifecycleTest extends FunSuite {
     assert(direct.refCnt() == 0)
     val framed: T = e.readInbound[T]()
   }
-
-  testDirect[Buf](
-    protocol = "mux client/server",
-    msg = Buf.U32BE(4).concat(mux.Message.encode(mux.Message.Tping(123))),
-    pipelineInit = mux.CopyingFramer
-  )
 
   testDirect[Buf](
     protocol = "memcached server",

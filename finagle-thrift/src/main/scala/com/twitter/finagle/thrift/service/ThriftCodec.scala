@@ -1,7 +1,7 @@
 package com.twitter.finagle.thrift.service
 
 import com.twitter.finagle.context.Contexts
-import com.twitter.finagle.thrift.{DeserializeCtx, ThriftClientRequest, maxReusableBufferSize}
+import com.twitter.finagle.thrift.{ClientDeserializeCtx, ThriftClientRequest, maxReusableBufferSize}
 import com.twitter.finagle.{Filter, Service}
 import com.twitter.scrooge.{TReusableBuffer, ThriftMethod, ThriftStruct, ThriftStructCodec}
 import com.twitter.util.{Future, Return, Throw, Try}
@@ -23,16 +23,16 @@ private[thrift] object ThriftCodec {
     new Filter[method.Args, method.SuccessType, ThriftClientRequest, Array[Byte]] {
       private[this] val decodeRepFn: Array[Byte] => Try[method.SuccessType] = { bytes =>
         val result: method.Result = decodeResponse(bytes, method.responseCodec, pf)
-        result.successField match {
-          case Some(v) => Return(v)
+        result.firstException() match {
+          case Some(ex) => Throw(ex)
           case None =>
-            result.firstException() match {
-              case Some(ex) => Throw(ex)
+            result.successField match {
+              case Some(v) => Return(v)
               case None =>
                 Throw(
                   new TApplicationException(
                     TApplicationException.MISSING_RESULT,
-                    s"Thrift method '${method.name}' failed: missing result"
+                    s"Thrift method '${ method.name }' failed: missing result"
                   )
                 )
             }
@@ -44,8 +44,8 @@ private[thrift] object ThriftCodec {
         service: Service[ThriftClientRequest, Array[Byte]]
       ): Future[method.SuccessType] = {
         val request = encodeRequest(method.name, args, pf, method.oneway)
-        val serdeCtx = new DeserializeCtx[method.SuccessType](args, decodeRepFn)
-        Contexts.local.let(DeserializeCtx.Key, serdeCtx) {
+        val serdeCtx = new ClientDeserializeCtx[method.SuccessType](args, decodeRepFn)
+        Contexts.local.let(ClientDeserializeCtx.Key, serdeCtx) {
           service(request).flatMap { response =>
             Future.const(serdeCtx.deserialize(response))
           }

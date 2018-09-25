@@ -10,7 +10,11 @@ import org.scalatest.FunSuite
 
 class RetriesTest extends FunSuite {
 
-  private[this] class MyRetryEx extends Exception
+  private[this] class MyRetryEx(val flags: Long = FailureFlags.Empty)
+      extends Exception
+      with FailureFlags[MyRetryEx] {
+    protected def copyWithFlags(flags: Long): MyRetryEx = new MyRetryEx(flags)
+  }
   private[this] class AnotherEx extends Exception
 
   private[this] val retryFn: PartialFunction[Try[Nothing], Boolean] = {
@@ -24,11 +28,11 @@ class RetriesTest extends FunSuite {
     )
 
   private[this] val requeableEx =
-    Failure.wrap(new RuntimeException("yep"), Failure.Restartable)
+    Failure.wrap(new RuntimeException("yep"), FailureFlags.Retryable)
 
   private[this] val notRequeueableEx = new RuntimeException("nope")
 
-  private val end: Stack[ServiceFactory[Exception, Int]] = Stack.Leaf(
+  private val end: Stack[ServiceFactory[Exception, Int]] = Stack.leaf(
     Stack.Role("test"),
     ServiceFactory.const(
       Service.mk[Exception, Int] { req =>
@@ -54,9 +58,9 @@ class RetriesTest extends FunSuite {
       param.Stats(stats) +
       Retries.Budget(RetryBudget.Empty)
 
-    val failingFactory: Stack[ServiceFactory[String, String]] = Stack.Leaf(
+    val failingFactory: Stack[ServiceFactory[String, String]] = Stack.leaf(
       Stack.Role("FailingFactory"),
-      new FailingFactory[String, String](new Failure("boom", flags = Failure.Restartable))
+      new FailingFactory[String, String](new Failure("boom", flags = FailureFlags.Retryable))
     )
 
     val svcFactory: ServiceFactory[String, String] =
@@ -79,9 +83,9 @@ class RetriesTest extends FunSuite {
       param.Stats(stats) +
       Retries.Budget(RetryBudget.Empty)
 
-    val failingFactory: Stack[ServiceFactory[String, String]] = Stack.Leaf(
+    val failingFactory: Stack[ServiceFactory[String, String]] = Stack.leaf(
       Stack.Role("test"),
-      new FailingFactory[String, String](new Failure("boom", flags = Failure.Restartable))
+      new FailingFactory[String, String](new Failure("boom", flags = FailureFlags.Retryable))
     )
 
     val svcFactory: ServiceFactory[String, String] =
@@ -214,13 +218,13 @@ class RetriesTest extends FunSuite {
     val svc: Service[Exception, Int] =
       Await.result(svcFactory(), 5.seconds)
 
-    intercept[Failure] {
+    intercept[MyRetryEx] {
       Await.result(svc(new MyRetryEx()), 5.seconds)
     }
 
     // should not be requeued, but should have been retried
     // up to what the budget allows for.
-    assert(!stats.counters.contains(Seq("retries", "requeues")))
+    assert(stats.counters(Seq("retries", "requeues")) == 0)
     // the budget gives us 20, we should use only that many
     // and not all the way up to the RetryPolicy's allotment of 100.
     assert(Seq(20f) == stats.stats(Seq("retries")))
@@ -246,7 +250,7 @@ class RetriesTest extends FunSuite {
     }
 
     // should not have triggered either requeue or retries
-    assert(!stats.counters.contains(Seq("retries", "requeues")))
+    assert(stats.counters(Seq("retries", "requeues")) == 0)
     assert(Seq(0.0) == stats.stats(Seq("retries")))
     assert(0 == stats.counter("retries", "budget_exhausted")())
   }
@@ -276,11 +280,11 @@ class RetriesTest extends FunSuite {
 
     // wire em together.
     val midToBack: Stack[ServiceFactory[Exception, Int]] =
-      Stack.Leaf(Stack.Role("mid-back"), backSvc)
+      Stack.leaf(Stack.Role("mid-back"), backSvc)
     val midSvcFactory = Retries.moduleWithRetryPolicy.toStack(midToBack).make(midParams)
 
     val frontToMid: Stack[ServiceFactory[Exception, Int]] =
-      Stack.Leaf(Stack.Role("front-mid"), midSvcFactory)
+      Stack.leaf(Stack.Role("front-mid"), midSvcFactory)
     val frontSvcFactory = Retries.moduleWithRetryPolicy.toStack(frontToMid).make(frontParams)
     Await.result(frontSvcFactory(), 5.seconds)
   }
@@ -308,7 +312,7 @@ class RetriesTest extends FunSuite {
     val numReqs = 100
     Time.withCurrentTimeFrozen { _ =>
       0.until(numReqs).foreach { _ =>
-        intercept[Failure] {
+        intercept[MyRetryEx] {
           Await.result(svc(new MyRetryEx()), 5.seconds)
         }
       }
@@ -388,7 +392,7 @@ class RetriesTest extends FunSuite {
 
         def make(params: Stack.Params, next: Stack[ServiceFactory[Unit, Unit]]) = {
           assert(params.size == 1 && params.head._2.isInstanceOf[Retries.Budget])
-          Stack.Leaf(this, next.make(params))
+          Stack.leaf(this, next.make(params))
         }
       }
 
@@ -412,7 +416,7 @@ class RetriesTest extends FunSuite {
 
         def make(params: Stack.Params, next: Stack[ServiceFactory[Unit, Unit]]) = {
           assert(params.size == 1 && (params[Retries.Budget] eq budget))
-          Stack.Leaf(this, next.make(params))
+          Stack.leaf(this, next.make(params))
         }
       }
 
@@ -426,12 +430,13 @@ class RetriesTest extends FunSuite {
 
   test("hashCode and equals for Retries.Budget only checks RetryBudget, not Backoff stream") {
     val budget = Retries.Budget(RetryBudget.Empty, Backoff.const(1.second))
-    val budgetWithDifferentBackoffStream = Retries.Budget(RetryBudget.Empty, Backoff.const(2.second))
+    val budgetWithDifferentBackoffStream =
+      Retries.Budget(RetryBudget.Empty, Backoff.const(2.second))
     val differentBudget = Retries.Budget(RetryBudget.Infinite, Backoff.const(3.second))
 
     assert(budget.equals(budget))
     assert(budget.equals(budgetWithDifferentBackoffStream))
-    assert(! budget.equals(differentBudget))
+    assert(!budget.equals(differentBudget))
 
     assert(budget.## == budget.##)
     assert(budget.## == budgetWithDifferentBackoffStream.##)

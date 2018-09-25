@@ -4,6 +4,7 @@ import com.twitter.finagle.{
   CancelledConnectionException,
   ConnectionFailedException,
   Failure,
+  FailureFlags,
   ProxyConnectException,
   Stack
 }
@@ -21,7 +22,7 @@ import io.netty.channel.{
   ChannelInitializer,
   ChannelOption
 }
-import io.netty.channel.epoll.EpollSocketChannel
+import io.netty.channel.epoll.{Epoll, EpollSocketChannel}
 import io.netty.channel.socket.nio.NioSocketChannel
 import java.lang.{Boolean => JBool, Integer => JInt}
 import java.net.SocketAddress
@@ -46,6 +47,7 @@ private final class ConnectionBuilder(
   private[this] val connectLatencyStat = statsReceiver.stat("connect_latency_ms")
   private[this] val failedConnectLatencyStat = statsReceiver.stat("failed_connect_latency_ms")
   private[this] val cancelledConnects = statsReceiver.counter("cancelled_connects")
+  private[this] val bootstrap = ConnectionBuilder.makeBootstrap(init, params)
 
   /**
    * Creates a new connection then, from within the channels event loop, passes it to the
@@ -58,37 +60,6 @@ private final class ConnectionBuilder(
    *       the spawned channel.
    */
   def build[T](builder: Channel => Future[T]): Future[T] = {
-    val Transport.Options(noDelay, reuseAddr) = params[Transport.Options]
-    val LatencyCompensation.Compensation(compensation) = params[LatencyCompensation.Compensation]
-    val Transporter.ConnectTimeout(connectTimeout) = params[Transporter.ConnectTimeout]
-    val Transport.BufferSizes(sendBufSize, recvBufSize) = params[Transport.BufferSizes]
-    val Backpressure(backpressure) = params[Backpressure]
-    val param.Allocator(allocator) = params[param.Allocator]
-
-    // max connect timeout is ~24.8 days
-    val compensatedConnectTimeoutMs =
-      (compensation + connectTimeout).inMillis.min(Int.MaxValue)
-
-    val channelClass =
-      if (nativeEpoll.enabled) classOf[EpollSocketChannel]
-      else classOf[NioSocketChannel]
-
-    val bootstrap =
-      new Bootstrap()
-        .group(params[param.WorkerPool].eventLoopGroup)
-        .channel(channelClass)
-        .option(ChannelOption.ALLOCATOR, allocator)
-        .option[JBool](ChannelOption.TCP_NODELAY, noDelay)
-        .option[JBool](ChannelOption.SO_REUSEADDR, reuseAddr)
-        .option[JBool](ChannelOption.AUTO_READ, !backpressure) // backpressure! no reads on transport => no reads on the socket
-        .option[JInt](ChannelOption.CONNECT_TIMEOUT_MILLIS, compensatedConnectTimeoutMs.toInt)
-        .handler(init)
-
-    val Transport.Liveness(_, _, keepAlive) = params[Transport.Liveness]
-    keepAlive.foreach(bootstrap.option[JBool](ChannelOption.SO_KEEPALIVE, _))
-    sendBufSize.foreach(bootstrap.option[JInt](ChannelOption.SO_SNDBUF, _))
-    recvBufSize.foreach(bootstrap.option[JInt](ChannelOption.SO_RCVBUF, _))
-
     val elapsed = Stopwatch.start()
     val nettyConnectF = bootstrap.connect(addr)
 
@@ -112,7 +83,7 @@ private final class ConnectionBuilder(
           transportP.setException(
             Failure(
               cause = new CancelledConnectionException,
-              flags = Failure.Interrupted | Failure.Restartable,
+              flags = FailureFlags.Interrupted | FailureFlags.Retryable,
               logLevel = Level.DEBUG
             )
           )
@@ -159,5 +130,43 @@ private final class ConnectionBuilder(
     })
 
     transportP
+  }
+}
+
+private object ConnectionBuilder {
+
+  // Construct an appropriate `Bootstrap` from the provided params
+  private def makeBootstrap(init: ChannelInitializer[Channel], params: Stack.Params): Bootstrap = {
+    val Transport.Options(noDelay, reuseAddr, _) = params[Transport.Options]
+    val LatencyCompensation.Compensation(compensation) = params[LatencyCompensation.Compensation]
+    val Transporter.ConnectTimeout(connectTimeout) = params[Transporter.ConnectTimeout]
+    val Transport.BufferSizes(sendBufSize, recvBufSize) = params[Transport.BufferSizes]
+    val Backpressure(backpressure) = params[Backpressure]
+    val param.Allocator(allocator) = params[param.Allocator]
+
+    // max connect timeout is ~24.8 days
+    val compensatedConnectTimeoutMs =
+      (compensation + connectTimeout).inMillis.min(Int.MaxValue)
+
+    val channelClass =
+      if (useNativeEpoll() && Epoll.isAvailable) classOf[EpollSocketChannel]
+      else classOf[NioSocketChannel]
+
+    val bootstrap = new Bootstrap()
+      .group(params[param.WorkerPool].eventLoopGroup)
+      .channel(channelClass)
+      .option(ChannelOption.ALLOCATOR, allocator)
+      .option[JBool](ChannelOption.TCP_NODELAY, noDelay)
+      .option[JBool](ChannelOption.SO_REUSEADDR, reuseAddr)
+      .option[JBool](ChannelOption.AUTO_READ, !backpressure) // backpressure! no reads on transport => no reads on the socket
+      .option[JInt](ChannelOption.CONNECT_TIMEOUT_MILLIS, compensatedConnectTimeoutMs.toInt)
+      .handler(init)
+
+    val Transport.Liveness(_, _, keepAlive) = params[Transport.Liveness]
+    keepAlive.foreach(bootstrap.option[JBool](ChannelOption.SO_KEEPALIVE, _))
+    sendBufSize.foreach(bootstrap.option[JInt](ChannelOption.SO_SNDBUF, _))
+    recvBufSize.foreach(bootstrap.option[JInt](ChannelOption.SO_RCVBUF, _))
+
+    bootstrap
   }
 }

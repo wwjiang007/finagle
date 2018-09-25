@@ -9,8 +9,8 @@ import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.dispatch.PipeliningDispatcher
 import com.twitter.finagle.param.{Label, Stats, Tracer => PTracer}
 import com.twitter.finagle.service._
-import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
-import com.twitter.finagle.thrift.{ClientId, Protocols, ThriftClientRequest}
+import com.twitter.finagle.stats._
+import com.twitter.finagle.thrift.{ClientId, Protocols, RichServerParam, ThriftClientRequest}
 import com.twitter.finagle.thriftmux.service.ThriftMuxResponseClassifier
 import com.twitter.finagle.thriftmux.thriftscala._
 import com.twitter.finagle.tracing.Annotation.{ClientSend, ServerRecv}
@@ -22,13 +22,15 @@ import com.twitter.scrooge
 import com.twitter.util._
 import com.twitter.util.tunable.Tunable
 import java.net.{InetAddress, InetSocketAddress, SocketAddress}
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import org.apache.thrift.TApplicationException
 import org.apache.thrift.protocol._
 import org.scalactic.source.Position
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
 import org.scalatest.junit.AssertionsForJUnit
 import org.scalatest.{FunSuite, Tag}
+import scala.collection.JavaConverters._
 import scala.language.reflectiveCalls
 
 abstract class AbstractEndToEndTest
@@ -234,8 +236,8 @@ abstract class AbstractEndToEndTest
     val tracer = new Tracer {
       def record(record: Record): Unit = {
         record match {
-          case Record(id, _, ServerRecv(), _) => srvTraceId = Some(id)
-          case Record(id, _, ClientSend(), _) => cltTraceId = Some(id)
+          case Record(id, _, ServerRecv, _) => srvTraceId = Some(id)
+          case Record(id, _, ClientSend, _) => cltTraceId = Some(id)
           case _ =>
         }
       }
@@ -278,8 +280,8 @@ abstract class AbstractEndToEndTest
     val tracer = new Tracer {
       def record(record: Record): Unit = {
         record match {
-          case Record(id, _, ServerRecv(), _) => srvTraceId = Some(id)
-          case Record(id, _, ClientSend(), _) => cltTraceId = Some(id)
+          case Record(id, _, ServerRecv, _) => srvTraceId = Some(id)
+          case Record(id, _, ClientSend, _) => cltTraceId = Some(id)
           case _ =>
         }
       }
@@ -562,7 +564,7 @@ abstract class AbstractEndToEndTest
     }
     assert(ex.getMessage.contains("lolol"))
     assert(sr.counters(Seq("thrift", "requests")) == 1)
-    assert(sr.counters.get(Seq("thrift", "success")) == None)
+    assert(sr.counters(Seq("thrift", "success")) == 0)
     assert(sr.counters(Seq("thrift", "failures")) == 1)
 
     await(server.close())
@@ -606,9 +608,10 @@ abstract class AbstractEndToEndTest
         ResponseClass.Success
       case ReqRep(_, Throw(_: InvalidQueryException)) =>
         ResponseClass.NonRetryableFailure
-      case ReqRep(_, Throw(_: RequestTimeoutException)) =>
+      case ReqRep(_, Throw(_: RequestTimeoutException)) |
+           ReqRep(_, Throw(_: java.util.concurrent.TimeoutException)) =>
         ResponseClass.Success
-      case ReqRep(_, Return(s: String)) =>
+      case ReqRep(_, Return(_: String)) =>
         ResponseClass.NonRetryableFailure
     }
 
@@ -622,23 +625,34 @@ abstract class AbstractEndToEndTest
       ResponseClass.NonRetryableFailure
   }
 
+  val iface = new TestService.MethodPerEndpoint {
+    def query(x: String): Future[String] =
+      if (x == "safe")
+        Future.value("safe")
+      else if (x == "slow")
+        Future.sleep(1.second)(DefaultTimer).before(Future.value("slow"))
+      else
+        Future.exception(new InvalidQueryException(x.length))
+  }
+
+  private class TestServiceImpl extends thriftjava.TestService.ServiceIface {
+    def query(x: String): Future[String] =
+      if (x == "safe")
+        Future.value("safe")
+      else if (x == "slow")
+        Future.sleep(1.second)(DefaultTimer).before(Future.value("slow"))
+      else
+        Future.exception(new thriftjava.InvalidQueryException(x.length))
+  }
+
   def serverForClassifier(): ListeningServer = {
-    val iface = new TestService.MethodPerEndpoint {
-      def query(x: String): Future[String] =
-        if (x == "safe")
-          Future.value("safe")
-        else if (x == "slow")
-          Future.sleep(1.second)(DefaultTimer).before(Future.value("slow"))
-        else
-          Future.exception(new InvalidQueryException(x.length))
-    }
-    val svc = new TestService.FinagledService(iface, Protocols.binaryFactory())
+    val svc = new TestService.FinagledService(iface, RichServerParam())
     serverImpl
       .withStatsReceiver(NullStatsReceiver)
       .serve(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), svc)
   }
 
-  private def testScalaFailureClassification(
+  private def testScalaClientFailureClassification(
     sr: InMemoryStatsReceiver,
     client: TestService.MethodPerEndpoint
   ): Unit = {
@@ -647,11 +661,11 @@ abstract class AbstractEndToEndTest
     }
     assert("hi".length == ex.errorCode)
     assert(sr.counters(Seq("client", "requests")) == 1)
-    assert(sr.counters.get(Seq("client", "success")) == None)
+    assert(sr.counters(Seq("client", "success")) == 0)
     assert(sr.counters(Seq("client", "query", "requests")) == 1)
     eventually {
       assert(sr.counters(Seq("client", "query", "failures")) == 1)
-      assert(sr.counters.get(Seq("client", "query", "success")) == None)
+      assert(sr.counters(Seq("client", "query", "success")) == 0)
     }
 
     // test that we can examine the request as well.
@@ -690,29 +704,99 @@ abstract class AbstractEndToEndTest
     }
   }
 
-  private def testJavaFailureClassification(
+  private def testScalaServerResponseClassification(
+    sr: InMemoryStatsReceiver,
+    client: TestService.MethodPerEndpoint
+  ): Unit = {
+
+    val ex = intercept[InvalidQueryException] {
+      await(client.query("hi"))
+    }
+    assert("hi".length == ex.errorCode)
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 1)
+    assert(sr.counters.get(Seq("thrift", "query", "success")) == Some(0))
+
+    assert(sr.counters(Seq("thrift", "requests")) == 1)
+    assert(sr.counters.get(Seq("thrift", "success")) == Some(0))
+
+    // test that we can examine the request as well.
+    intercept[InvalidQueryException] {
+      await(client.query("ok"))
+    }
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 2)
+    assert(sr.counters(Seq("thrift", "query", "success")) == 1)
+
+    assert(sr.counters(Seq("thrift", "requests")) == 2)
+    assert(sr.counters(Seq("thrift", "success")) == 1)
+
+    // test that we can mark a successfully deserialized result as a failure
+    assert("safe" == await(client.query("safe")))
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 3)
+    assert(sr.counters(Seq("thrift", "query", "success")) == 1)
+
+    assert(sr.counters(Seq("thrift", "requests")) == 3)
+    assert(sr.counters(Seq("thrift", "success")) == 1)
+
+    // this query produces a Timeout exception in server side and it should be
+    // translated to `Success`
+    intercept[TApplicationException] {
+      await(client.query("slow"))
+    }
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 4)
+    assert(sr.counters(Seq("thrift", "query", "success")) == 2)
+
+    assert(sr.counters(Seq("thrift", "requests")) == 4)
+    assert(sr.counters(Seq("thrift", "success")) == 2)
+  }
+
+  private def testJavaClientFailureClassification(
     sr: InMemoryStatsReceiver,
     client: thriftjava.TestService.ServiceIface
   ): Unit = {
     val ex = intercept[thriftjava.InvalidQueryException] {
-      Await.result(client.query("hi"), 5.seconds)
+      await(client.query("hi"))
     }
     assert("hi".length == ex.errorCode)
     assert(sr.counters(Seq("client", "requests")) == 1)
-    assert(sr.counters.get(Seq("client", "success")) == None)
+    assert(sr.counters(Seq("client", "success")) == 0)
 
     // test that we can examine the request as well.
     intercept[thriftjava.InvalidQueryException] {
-      Await.result(client.query("ok"), 5.seconds)
+      await(client.query("ok"))
     }
     assert(sr.counters(Seq("client", "requests")) == 2)
     assert(sr.counters(Seq("client", "success")) == 1)
 
     // test that we can mark a successfully deserialized result as a failure
-    assert("safe" == Await.result(client.query("safe")))
+    assert("safe" == await(client.query("safe")))
     assert(sr.counters(Seq("client", "requests")) == 3)
     assert(sr.counters(Seq("client", "success")) == 1)
     assert(sr.counters(Seq("client", "failures")) == 2)
+  }
+
+  private def testJavaServerFailureClassification(
+    sr: InMemoryStatsReceiver,
+    client: thriftjava.TestService.ServiceIface
+  ): Unit = {
+    val ex = intercept[thriftjava.InvalidQueryException] {
+      await(client.query("hi"))
+    }
+    assert("hi".length == ex.errorCode)
+    assert(sr.counters(Seq("thrift", "requests")) == 1)
+    assert(sr.counters.get(Seq("thrift", "success")) == Some(0))
+
+    // test that we can examine the request as well.
+    intercept[thriftjava.InvalidQueryException] {
+      await(client.query("ok"))
+    }
+    assert(sr.counters(Seq("thrift", "requests")) == 2)
+    assert(sr.counters(Seq("thrift", "success")) == 1)
+
+    // test that we can mark a successfully deserialized result as a failure
+    assert("safe" == await(client.query("safe")))
+    assert(sr.counters(Seq("thrift", "requests")) == 3)
+    assert(sr.counters(Seq("thrift", "success")) == 1)
+    assert(sr.counters(Seq("thrift", "failures")) == 2)
   }
 
   test("scala thriftmux stack client deserialized response classification with `build`") {
@@ -727,69 +811,184 @@ abstract class AbstractEndToEndTest
         "client"
       )
 
-    testScalaFailureClassification(sr, client)
+    testScalaClientFailureClassification(sr, client)
     server.close()
   }
 
-  test("scala thriftmux stack client deserialized response classification with `servicePerEndpoint`") {
-    val server = serverForClassifier()
+  test("scala thriftmux stack server deserialized response classification with `serveIface`") {
     val sr = new InMemoryStatsReceiver()
-    val client = clientImpl
-      .withPerEndpointStats
+
+    val server = ThriftMux.server
       .withStatsReceiver(sr)
       .withResponseClassifier(scalaClassifier)
-      .withRequestTimeout(100.milliseconds) // used in conjuection with a "slow" query
-      .servicePerEndpoint[TestService.ServicePerEndpoint](
-        Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
-        "client"
-      )
+      .withRequestTimeout(100.milliseconds)
+      .withPerEndpointStats
+      .serveIface(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), iface)
+
+    val client = ThriftMux.client.build[TestService.MethodPerEndpoint](
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
+
+    testScalaServerResponseClassification(sr, client)
+    server.close()
+  }
+
+  test("scala thriftmux stack server deserialized response classification with `serve`") {
+    val sr = new InMemoryStatsReceiver()
+
+    val svc = new TestService.FinagledService(iface, RichServerParam(
+      serverStats = sr,
+      responseClassifier = scalaClassifier,
+      perEndpointStats = true
+    ))
+
+    val server = ThriftMux.server
+      .withStatsReceiver(sr)
+      .withResponseClassifier(scalaClassifier)
+      .withRequestTimeout(100.milliseconds)
+      .withPerEndpointStats
+      .serve(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), svc)
+
+    val client = ThriftMux.client.build[TestService.MethodPerEndpoint](
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
+
+    testScalaServerResponseClassification(sr, client)
+    server.close()
+  }
+
+  test("scala thriftmux stack server deserialized response classification with " +
+    "`servicePerEndpoint[ServicePerEndpoint]`") {
+    val sr = new InMemoryStatsReceiver()
+
+    val svc = new TestService.FinagledService(iface, RichServerParam(
+      serverStats = sr,
+      responseClassifier = scalaClassifier,
+      perEndpointStats = true
+    ))
+
+    val server = ThriftMux.server
+      .withStatsReceiver(sr)
+      .withResponseClassifier(scalaClassifier)
+      .withRequestTimeout(100.milliseconds)
+      .withPerEndpointStats
+      .serve(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), svc)
+
+    val client = ThriftMux.client.servicePerEndpoint[TestService.ServicePerEndpoint](
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
+
+    def thriftQuerySuccess: Long =
+      sr.counters.getOrElse(Seq("thrift", "query", "success"), 0L)
+
+    def thriftSuccess: Long =
+      sr.counters.getOrElse(Seq("thrift", "success"), 0L)
+
     val ex = intercept[InvalidQueryException] {
       await(client.query(TestService.Query.Args("hi")))
     }
+
     assert("hi".length == ex.errorCode)
-    assert(sr.counters(Seq("client", "requests")) == 1)
-    assert(sr.counters.get(Seq("client", "success")) == None)
-    assert(sr.counters(Seq("client", "TestService", "query", "requests")) == 1)
-    eventually {
-      assert(sr.counters(Seq("client", "TestService", "query", "failures")) == 1)
-      assert(sr.counters.get(Seq("client", "TestService", "query", "success")) == None)
-    }
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 1)
+    assert(thriftQuerySuccess == 0L)
+
+    assert(sr.counters(Seq("thrift", "requests")) == 1)
+    assert(thriftSuccess == 0)
 
     // test that we can examine the request as well.
     intercept[InvalidQueryException] {
       await(client.query(TestService.Query.Args("ok")))
     }
-    assert(sr.counters(Seq("client", "requests")) == 2)
-    assert(sr.counters(Seq("client", "success")) == 1)
-    assert(sr.counters(Seq("client", "TestService", "query", "requests")) == 2)
-    eventually {
-      assert(sr.counters(Seq("client", "TestService", "query", "success")) == 1)
-      assert(sr.counters(Seq("client", "TestService", "query", "failures")) == 1)
-    }
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 2)
+    assert(thriftQuerySuccess == 1)
+
+    assert(sr.counters(Seq("thrift", "requests")) == 2)
+    assert(thriftSuccess == 1)
 
     // test that we can mark a successfully deserialized result as a failure
     assert("safe" == await(client.query(TestService.Query.Args("safe"))))
-    assert(sr.counters(Seq("client", "requests")) == 3)
-    assert(sr.counters(Seq("client", "success")) == 1)
-    assert(sr.counters(Seq("client", "TestService", "query", "requests")) == 3)
-    eventually {
-      assert(sr.counters(Seq("client", "TestService", "query", "success")) == 1)
-      assert(sr.counters(Seq("client", "TestService", "query", "failures")) == 2)
-    }
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 3)
+    assert(thriftQuerySuccess == 1)
 
-    // this query produces a `Throw` response produced on the client side and
-    // we want to ensure that we can translate it to a `Success`.
-    intercept[RequestTimeoutException] {
+    assert(sr.counters(Seq("thrift", "requests")) == 3)
+    assert(thriftSuccess == 1)
+
+    // this query produces a Timeout exception in server side and it should be
+    // translated to `Success`
+    intercept[TApplicationException] {
       await(client.query(TestService.Query.Args("slow")))
     }
-    assert(sr.counters(Seq("client", "requests")) == 4)
-    assert(sr.counters(Seq("client", "success")) == 2)
-    assert(sr.counters(Seq("client", "TestService", "query", "requests")) == 4)
-    eventually {
-      assert(sr.counters(Seq("client", "TestService", "query", "success")) == 2)
-      assert(sr.counters(Seq("client", "TestService", "query", "failures")) == 2)
-    }
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 4)
+    assert(thriftQuerySuccess == 2)
 
+    assert(sr.counters(Seq("thrift", "requests")) == 4)
+    assert(thriftSuccess == 2)
+    server.close()
+  }
+
+  test("scala thriftmux stack server deserialized response classification with " +
+    "`servicePerEndpoint[ReqRepServicePerEndpoint]`") {
+    val sr = new InMemoryStatsReceiver()
+
+    val svc = new TestService.FinagledService(iface, RichServerParam(
+      serverStats = sr,
+      responseClassifier = scalaClassifier,
+      perEndpointStats = true
+    ))
+
+    val server = ThriftMux.server
+      .withStatsReceiver(sr)
+      .withResponseClassifier(scalaClassifier)
+      .withRequestTimeout(100.milliseconds)
+      .withPerEndpointStats
+      .serve(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), svc)
+
+    val client = ThriftMux.client.servicePerEndpoint[TestService.ReqRepServicePerEndpoint](
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
+
+    val ex = intercept[InvalidQueryException] {
+      await(client.query(scrooge.Request(TestService.Query.Args("hi"))))
+    }
+    assert("hi".length == ex.errorCode)
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 1)
+    assert(sr.counters.get(Seq("thrift", "query", "success")) == Some(0))
+
+    assert(sr.counters(Seq("thrift", "requests")) == 1)
+    assert(sr.counters.get(Seq("thrift", "success")) == Some(0))
+
+    // test that we can examine the request as well.
+    intercept[InvalidQueryException] {
+      await(client.query(scrooge.Request(TestService.Query.Args("ok"))))
+    }
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 2)
+    assert(sr.counters(Seq("thrift", "query", "success")) == 1)
+
+    assert(sr.counters(Seq("thrift", "requests")) == 2)
+    assert(sr.counters(Seq("thrift", "success")) == 1)
+
+    // test that we can mark a successfully deserialized result as a failure
+    assert("safe" == await(client.query(scrooge.Request(TestService.Query.Args("safe")))).value)
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 3)
+    assert(sr.counters(Seq("thrift", "query", "success")) == 1)
+
+    assert(sr.counters(Seq("thrift", "requests")) == 3)
+    assert(sr.counters(Seq("thrift", "success")) == 1)
+
+    // this query produces a Timeout exception in server side and it should be
+    // translated to `Success`
+    intercept[TApplicationException] {
+      await(client.query(scrooge.Request(TestService.Query.Args("slow"))))
+    }
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 4)
+    assert(sr.counters(Seq("thrift", "query", "success")) == 2)
+
+    assert(sr.counters(Seq("thrift", "requests")) == 4)
+    assert(sr.counters(Seq("thrift", "success")) == 2)
     server.close()
   }
 
@@ -804,7 +1003,25 @@ abstract class AbstractEndToEndTest
         "client"
       )
 
-    testJavaFailureClassification(sr, client)
+    testJavaClientFailureClassification(sr, client)
+    server.close()
+  }
+
+  test("java thriftmux stack server deserialized response classification") {
+    val sr = new InMemoryStatsReceiver()
+
+    val server = ThriftMux.server
+      .withStatsReceiver(sr)
+      .withResponseClassifier(javaClassifier)
+      .withRequestTimeout(100.milliseconds)
+      .serveIface(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), new TestServiceImpl)
+
+    val client = ThriftMux.client.build[thriftjava.TestService.ServiceIface](
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
+
+    testJavaServerFailureClassification(sr, client)
     server.close()
   }
 
@@ -826,7 +1043,33 @@ abstract class AbstractEndToEndTest
       responseClassifier = scalaClassifier
     )
 
-    testScalaFailureClassification(sr, client)
+    testScalaClientFailureClassification(sr, client)
+    server.close()
+  }
+
+  test("scala thriftmux ServerBuilder deserialized response classification") {
+    val sr = new InMemoryStatsReceiver()
+
+    val svc = new TestService.FinagledService(iface, RichServerParam(
+      serverStats = sr,
+      responseClassifier = scalaClassifier,
+      perEndpointStats = true))
+
+    val server = ServerBuilder()
+      .stack(ThriftMux.server)
+      .responseClassifier(scalaClassifier)
+      .requestTimeout(100.milliseconds)
+      .name("thrift")
+      .reportTo(sr)
+      .bindTo(new InetSocketAddress(0))
+      .build(svc)
+
+    val client = ThriftMux.client.build[TestService.MethodPerEndpoint](
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
+
+    testScalaServerResponseClassification(sr, client)
     server.close()
   }
 
@@ -846,11 +1089,33 @@ abstract class AbstractEndToEndTest
       javaClassifier
     )
 
-    testJavaFailureClassification(sr, client)
+    testJavaClientFailureClassification(sr, client)
     server.close()
   }
 
-  test("scala thriftmux response classification using ThriftExceptionsAsFailures") {
+  test("java thriftmux ServerBuilder deserialized response classification") {
+    val sr = new InMemoryStatsReceiver()
+    val svc = new thriftjava.TestService.Service(new TestServiceImpl, RichServerParam())
+
+    val server = ServerBuilder()
+      .stack(ThriftMux.server)
+      .responseClassifier(javaClassifier)
+      .requestTimeout(100.milliseconds)
+      .name("thrift")
+      .reportTo(sr)
+      .bindTo(new InetSocketAddress(0))
+      .build(svc)
+
+    val client = ThriftMux.client.build[thriftjava.TestService.ServiceIface](
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
+
+    testJavaServerFailureClassification(sr, client)
+    server.close()
+  }
+
+  test("scala thriftmux client response classification using ThriftExceptionsAsFailures") {
     val server = serverForClassifier()
     val sr = new InMemoryStatsReceiver()
     val client = clientImpl
@@ -866,7 +1131,7 @@ abstract class AbstractEndToEndTest
     }
     assert("hi".length == ex.errorCode)
     assert(sr.counters(Seq("client", "requests")) == 1)
-    assert(sr.counters.get(Seq("client", "success")) == None)
+    assert(sr.counters(Seq("client", "success")) == 0)
 
     // test that we can mark a successfully deserialized result as a failure
     assert("safe" == await(client.query("safe")))
@@ -875,7 +1140,40 @@ abstract class AbstractEndToEndTest
     await(server.close())
   }
 
-  test("java thriftmux response classification using ThriftExceptionsAsFailures") {
+  test("scala thriftmux server response classification using ThriftExceptionAsFailures") {
+    val sr = new InMemoryStatsReceiver()
+
+    val server = ThriftMux.server
+      .withStatsReceiver(sr)
+      .withResponseClassifier(ThriftMuxResponseClassifier.ThriftExceptionsAsFailures)
+      .withRequestTimeout(100.milliseconds)
+      .withPerEndpointStats
+      .serveIface(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), iface)
+
+    val client = ThriftMux.client.build[TestService.MethodPerEndpoint](
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
+
+    val ex = intercept[InvalidQueryException] {
+      Await.result(client.query("hi"), 5.seconds)
+    }
+    assert("hi".length == ex.errorCode)
+    assert(sr.counters(Seq("thrift", "requests")) == 1)
+    assert(sr.counters.get(Seq("thrift", "success")) == Some(0))
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 1)
+    assert(sr.counters.get(Seq("thrift", "query", "success")) == Some(0))
+
+    // test that we can mark a successfully deserialized result as a failure
+    assert("safe" == Await.result(client.query("safe"), 10.seconds))
+    assert(sr.counters(Seq("thrift", "requests")) == 2)
+    assert(sr.counters(Seq("thrift", "success")) == 1)
+    assert(sr.counters(Seq("thrift", "query", "requests")) == 2)
+    assert(sr.counters(Seq("thrift", "query", "success")) == 1)
+    server.close()
+  }
+
+  test("java thriftmux client response classification using ThriftExceptionsAsFailures") {
     val server = serverForClassifier()
     val sr = new InMemoryStatsReceiver()
     val client = clientImpl
@@ -891,13 +1189,41 @@ abstract class AbstractEndToEndTest
     }
     assert("hi".length == ex.errorCode)
     assert(sr.counters(Seq("client", "requests")) == 1)
-    assert(sr.counters.get(Seq("client", "success")) == None)
+    assert(sr.counters(Seq("client", "success")) == 0)
 
     // test that we can mark a successfully deserialized result as a failure
     assert("safe" == Await.result(client.query("safe")))
     assert(sr.counters(Seq("client", "requests")) == 2)
     assert(sr.counters(Seq("client", "success")) == 1)
     assert(sr.counters(Seq("client", "failures")) == 1)
+    server.close()
+  }
+
+  test("java thrift server response classification using ThriftExceptionsAsFailures") {
+    val sr = new InMemoryStatsReceiver()
+
+    val server = ThriftMux.server
+      .withStatsReceiver(sr)
+      .withResponseClassifier(ThriftMuxResponseClassifier.ThriftExceptionsAsFailures)
+      .withRequestTimeout(100.milliseconds)
+      .serveIface(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), new TestServiceImpl)
+
+    val client = ThriftMux.client.build[thriftjava.TestService.ServiceIface](
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
+
+    val ex = intercept[thriftjava.InvalidQueryException] {
+      Await.result(client.query("hi"), 5.seconds)
+    }
+    assert("hi".length == ex.errorCode)
+    assert(sr.counters(Seq("thrift", "requests")) == 1)
+    assert(sr.counters.get(Seq("thrift", "success")) == Some(0))
+
+    // test that we can mark a successfully deserialized result as a failure
+    assert("safe" == Await.result(client.query("safe"), 10.seconds))
+    assert(sr.counters(Seq("thrift", "requests")) == 2)
+    assert(sr.counters(Seq("thrift", "success")) == 1)
     server.close()
   }
 
@@ -1301,8 +1627,8 @@ abstract class AbstractEndToEndTest
       await(client.query("ok"))
     }
 
-    // Failure.Restartable is stripped.
-    assert(!failure.isFlagged(Failure.Restartable))
+    // FailureFlags.Retryable is stripped.
+    assert(!failure.isFlagged(FailureFlags.Retryable))
 
     // Tried multiple times.
     assert(n > 1)
@@ -1431,7 +1757,7 @@ abstract class AbstractEndToEndTest
       assert(sr.counters(Seq("client", "requests")) == 1)
       assert(sr.counters(Seq("client", "failures")) == 1)
       assert(sr.stats(Seq("client", "connection_duration")).size == 1)
-      assert(sr.counters.get(Seq("client", "retries", "requeues")) == None)
+      assert(sr.counters(Seq("client", "retries", "requeues")) == 0)
 
       intercept[ChannelClosedException](await(client.query("ok")))
       // reconnects on the second request
@@ -1488,14 +1814,21 @@ abstract class AbstractEndToEndTest
           )
 
       val failure = intercept[Exception](await(client.query("ok")))
-      assert(failure.getMessage == "The request was Nacked by the server")
+      assert(
+          // The server hadn't yet issued the drain command
+        failure.getMessage == "The request was Nacked by the server" ||
+          // the service was already closed due to draining when it got to the pool
+        failure.getMessage == "Returned unavailable service")
 
-      assert(serverSr.counters(Seq("thrift", "mux", "draining")) >= 1)
 
+      // Note: we don't check 'client/[requests|failures]' since the value is racy:
+      // the server asks the client to drain immediately so we may never get a live
+      // session out of the singleton pool.
+
+      // We requeue once since the first try will fail so it will try another server
       assert(sr.counters(Seq("client", "retries", "requeues")) == 2 - 1)
-      assert(sr.counters(Seq("client", "requests")) == 2)
-      assert(sr.counters(Seq("client", "failures")) == 2)
-
+      assert(sr.counters(Seq("client", "connects")) == 2)
+      assert(sr.counters(Seq("client", "mux", "drained")) == 2)
       await(closeServers())
     }
   }
@@ -1512,9 +1845,12 @@ abstract class AbstractEndToEndTest
           )
 
       intercept[ChannelClosedException](await(client.query("ok")))
-      assert(sr.counters.get(Seq("client", "retries", "requeues")) == None)
-      assert(sr.counters(Seq("client", "requests")) == 1)
-      assert(sr.counters(Seq("client", "failures")) == 1)
+      // We may have had some retries because the connection get's closed eagerly
+      // so there is some racing between a dispatch writing it's message and being
+      // hung up on.
+      assert(sr.counters(Seq("client", "connects")) >= 1)
+      assert(sr.counters(Seq("client", "failures")) >= 1)
+      assert(sr.counters(Seq("client", "success")) == 0)
 
       await(closeServers())
     }
@@ -1646,10 +1982,11 @@ abstract class AbstractEndToEndTest
   }
 
   test("methodBuilder timeouts from configured ClientBuilder") {
-    implicit val timer: Timer = DefaultTimer
+    implicit val timer = new MockTimer
+    val sleepTime = new AtomicReference[Duration](Duration.Bottom)
     val service = new TestService.MethodPerEndpoint {
       def query(x: String): Future[String] = {
-        Future.sleep(50.millis).before { Future.value(x) }
+        Future.sleep(sleepTime.get)(DefaultTimer).before { Future.value(x) }
       }
     }
     val server =
@@ -1662,8 +1999,8 @@ abstract class AbstractEndToEndTest
     val clientBuilder = ClientBuilder()
     // set tight "default" timeouts that MB must override in
     // order to get successful responses.
-      .requestTimeout(5.milliseconds)
-      .timeout(10.milliseconds)
+      .requestTimeout(1.milliseconds)
+      .timeout(2.milliseconds)
       .reportTo(stats)
       .name("a_label")
       .stack(client)
@@ -1674,69 +2011,92 @@ abstract class AbstractEndToEndTest
     // ServicePerEndpoint
     val asIs: Service[TestService.Query.Args, TestService.Query.SuccessType] =
       mb.servicePerEndpoint[TestService.ServicePerEndpoint]("as_is").query
-    intercept[RequestTimeoutException] {
-      await(asIs(TestService.Query.Args("nope")))
+
+    Time.withCurrentTimeFrozen { control =>
+      // Send a priming request to get a connection established so we don't timeout service acquisition
+      assert("prime" == await(asIs(TestService.Query.Args("prime"))))
+      sleepTime.set(Duration.Top)
+      val req1 = asIs(TestService.Query.Args("nope"))
+      control.advance(10.milliseconds)
+      timer.tick()
+      intercept[RequestTimeoutException] { await(req1) }
+      eventually {
+        assert(stats.counter("a_label", "as_is", "logical", "requests")() == 2)
+        assert(stats.counter("a_label", "as_is", "logical", "success")() == 1)
+      }
+
+      // ServicePerEndpoint
+      val asIsSvcPerEndpoint: Service[TestService.Query.Args, TestService.Query.SuccessType] =
+        mb.servicePerEndpoint[TestService.ServicePerEndpoint]("as_is").query
+      val req2 = asIsSvcPerEndpoint(TestService.Query.Args("nope"))
+      control.advance(10.milliseconds)
+      timer.tick()
+      intercept[RequestTimeoutException] { await(req2) }
+
+      // ReqRepServicePerEndpoint
+      val asIsReqRepSvcPerEndpoint: Service[scrooge.Request[TestService.Query.Args], scrooge.Response[TestService.Query.SuccessType]] =
+        mb.servicePerEndpoint[TestService.ReqRepServicePerEndpoint]("as_is").query
+      val req3 = asIsReqRepSvcPerEndpoint(scrooge.Request(TestService.Query.Args("nope")))
+      control.advance(10.milliseconds)
+      timer.tick()
+      intercept[RequestTimeoutException] { await(req3) }
+
+      // increase the timeouts via MB and now the request should succeed
+      // ServicePerEndpoint
+      val longTimeout: Service[TestService.Query.Args, TestService.Query.SuccessType] =
+        mb.withTimeoutPerRequest(5.seconds)
+          .withTimeoutTotal(5.seconds)
+          .servicePerEndpoint[TestService.ServicePerEndpoint]("good")
+          .query
+
+      // An actual sleep
+      sleepTime.set(50.milliseconds)
+
+      val req4 = longTimeout(TestService.Query.Args("yep"))
+      control.advance(1.second)
+      timer.tick()
+      val result1 = await(req4)
+      assert("yep" == result1)
+      eventually {
+        assert(stats.counter("a_label", "good", "logical", "requests")() == 1)
+        assert(stats.counter("a_label", "good", "logical", "success")() == 1)
+      }
+
+
+      // ServicePerEndpoint
+      val longTimeoutSvcPerEndpoint: Service[TestService.Query.Args, TestService.Query.SuccessType] =
+        mb.withTimeoutPerRequest(5.seconds)
+          .withTimeoutTotal(5.seconds)
+          .servicePerEndpoint[TestService.ServicePerEndpoint]("good")
+          .query
+
+      val req5 = longTimeoutSvcPerEndpoint(TestService.Query.Args("yep"))
+      control.advance(1.second)
+      timer.tick()
+
+      val result2 = await(req5)
+      assert("yep" == result2)
+      // ReqRepServicePerEndpoint
+      val longTimeoutReqRepSvcPerEndpoint: Service[scrooge.Request[TestService.Query.Args], scrooge.Response[TestService.Query.SuccessType]] =
+        mb.withTimeoutPerRequest(5.seconds)
+          .withTimeoutTotal(5.seconds)
+          .servicePerEndpoint[TestService.ReqRepServicePerEndpoint]("good")
+          .query
+
+      val req6 = longTimeoutReqRepSvcPerEndpoint(scrooge.Request(TestService.Query.Args("yep")))
+      control.advance(1.second)
+      timer.tick()
+      val response = await(req6)
+      assert("yep" == response.value)
+
+      await(server.close())
     }
-    eventually {
-      assert(stats.counter("a_label", "as_is", "logical", "requests")() == 1)
-      assert(stats.counter("a_label", "as_is", "logical", "success")() == 0)
-    }
-
-    // ServicePerEndpoint
-    val asIsSvcPerEndpoint: Service[TestService.Query.Args, TestService.Query.SuccessType] =
-      mb.servicePerEndpoint[TestService.ServicePerEndpoint]("as_is").query
-    intercept[RequestTimeoutException] {
-      await(asIsSvcPerEndpoint(TestService.Query.Args("nope")))
-    }
-    // ReqRepServicePerEndpoint
-    val asIsReqRepSvcPerEndpoint: Service[scrooge.Request[TestService.Query.Args], scrooge.Response[TestService.Query.SuccessType]] =
-      mb.servicePerEndpoint[TestService.ReqRepServicePerEndpoint]("as_is").query
-    intercept[RequestTimeoutException] {
-      await(asIsReqRepSvcPerEndpoint(scrooge.Request(TestService.Query.Args("nope"))))
-    }
-
-    // increase the timeouts via MB and now the request should succeed
-    // ServicePerEndpoint
-    val longTimeout: Service[TestService.Query.Args, TestService.Query.SuccessType] =
-      mb.withTimeoutPerRequest(5.seconds)
-        .withTimeoutTotal(5.seconds)
-        .servicePerEndpoint[TestService.ServicePerEndpoint]("good")
-        .query
-
-    var result = await(longTimeout(TestService.Query.Args("yep")))
-    assert("yep" == result)
-    eventually {
-      assert(stats.counter("a_label", "good", "logical", "requests")() == 1)
-      assert(stats.counter("a_label", "good", "logical", "success")() == 1)
-    }
-
-    // ServicePerEndpoint
-    val longTimeoutSvcPerEndpoint: Service[TestService.Query.Args, TestService.Query.SuccessType] =
-      mb.withTimeoutPerRequest(5.seconds)
-        .withTimeoutTotal(5.seconds)
-        .servicePerEndpoint[TestService.ServicePerEndpoint]("good")
-        .query
-
-    result = await(longTimeoutSvcPerEndpoint(TestService.Query.Args("yep")))
-    assert("yep" == result)
-    // ReqRepServicePerEndpoint
-    val longTimeoutReqRepSvcPerEndpoint: Service[scrooge.Request[TestService.Query.Args], scrooge.Response[TestService.Query.SuccessType]] =
-      mb.withTimeoutPerRequest(5.seconds)
-        .withTimeoutTotal(5.seconds)
-        .servicePerEndpoint[TestService.ReqRepServicePerEndpoint]("good")
-        .query
-
-    val response = await(longTimeoutReqRepSvcPerEndpoint(scrooge.Request(TestService.Query.Args("yep"))))
-    assert("yep" == response.value)
-
-    await(server.close())
   }
 
   test("methodBuilder tunable timeouts from configured ClientBuilder") {
     val timer: MockTimer = new MockTimer()
     val service = new TestService.MethodPerEndpoint {
       private val methodCalled = new AtomicBoolean(false)
-
       def query(x: String): Future[String] = {
         if (methodCalled.compareAndSet(false, true)) {
           Future.value(x)
@@ -1755,8 +2115,8 @@ abstract class AbstractEndToEndTest
     val clientBuilder = ClientBuilder()
       // set tight "default" timeouts that MB must override in
       // order to get successful responses.
-      .requestTimeout(5.milliseconds)
-      .timeout(10.milliseconds)
+      .requestTimeout(1.milliseconds)
+      .timeout(2.milliseconds)
       .reportTo(stats)
       .name("a_label")
       .stack(client)
@@ -1771,43 +2131,35 @@ abstract class AbstractEndToEndTest
         .servicePerEndpoint[TestService.ServicePerEndpoint]("good")
         .query
 
-    // send a good response to ensure the stack has a chance to initialized
-    await(tunableTimeoutSvc(TestService.Query.Args("first")))
+    Time.withCurrentTimeFrozen { _ =>
+      // send a good response to ensure the stack has a chance to initialized
+      await(tunableTimeoutSvc(TestService.Query.Args("first")))
+    }
 
     // increase the timeouts via MB and tests should fail after tunable timeouts
     Time.withCurrentTimeFrozen { currentTime =>
       // ------------------ test total timeouts ------------------
       perRequestTimeoutTunable.set(100.seconds)  // long timeout that does not trigger
       totalTimeoutTunable.set(5.seconds)
-      val result = tunableTimeoutSvc(TestService.Query.Args("yep"))
-      assert(!result.isDefined)
+      val result1 = tunableTimeoutSvc(TestService.Query.Args("yep"))
+      assert(!result1.isDefined)
 
       // go past the total timeout
       currentTime.advance(6.seconds)
       timer.tick()
-      try await(result)
-      catch {
-        case ex: RequestTimeoutException =>
-          assert(classOf[GlobalRequestTimeoutException] == ex.getClass)
-          ex.getMessage().contains(totalTimeoutTunable().get.toString)
-        case t: Throwable => fail(t)
-      }
+      val ex1 = intercept[GlobalRequestTimeoutException] { await(result1) }
+      assert(ex1.getMessage().contains(totalTimeoutTunable().get.toString))
 
       // change the timeout
       totalTimeoutTunable.set(3.seconds)
       val result2 = tunableTimeoutSvc(TestService.Query.Args("nope"))
-      assert(!result2.isDefined)
+      assert(result2.poll == None)
 
       // this time, 4 seconds pushes us past
       currentTime.advance(4.seconds)
       timer.tick()
-      try await(result2)
-      catch {
-        case ex: RequestTimeoutException =>
-          assert(classOf[GlobalRequestTimeoutException] == ex.getClass)
-          ex.getMessage().contains(totalTimeoutTunable().get.toString)
-        case t: Throwable => fail(t)
-      }
+      val ex2 = intercept[GlobalRequestTimeoutException] { await(result2) }
+      assert(ex2.getMessage().contains(totalTimeoutTunable().get.toString))
 
     }
 
@@ -1815,35 +2167,25 @@ abstract class AbstractEndToEndTest
       // ------------------ test per request timeouts ------------------
       totalTimeoutTunable.set(100.seconds) // long timeout that does not trigger
       perRequestTimeoutTunable.set(2.seconds)
-      val result = tunableTimeoutSvc(TestService.Query.Args("huh"))
-      assert(!result.isDefined)
+      val result1 = tunableTimeoutSvc(TestService.Query.Args("huh"))
+      assert(result1.poll == None)
 
       // go past the per request timeout
       currentTime.advance(5.seconds)
       timer.tick()
-      try await(result)
-      catch {
-        case ex: RequestTimeoutException =>
-          assert(classOf[IndividualRequestTimeoutException] == ex.getClass)
-          ex.getMessage().contains(totalTimeoutTunable().get.toString)
-        case t: Throwable => fail(t)
-      }
+      val ex1 = intercept[IndividualRequestTimeoutException] { await(result1) }
+      assert(ex1.getMessage().contains(perRequestTimeoutTunable().get.toString))
 
       // change the timeout
       perRequestTimeoutTunable.set(1.seconds)
       val result2 = tunableTimeoutSvc(TestService.Query.Args("what"))
-      assert(!result2.isDefined)
+      assert(result2.poll == None)
 
       // this time, 4 seconds pushes us past
       currentTime.advance(4.seconds)
       timer.tick()
-      try await(result2)
-      catch {
-        case ex: RequestTimeoutException =>
-          assert(classOf[IndividualRequestTimeoutException] == ex.getClass)
-          ex.getMessage().contains(totalTimeoutTunable().get.toString)
-        case t: Throwable => fail(t)
-      }
+      val ex2 = intercept[IndividualRequestTimeoutException] { await(result2) }
+      assert(ex2.getMessage().contains(perRequestTimeoutTunable().get.toString))
     }
 
     await(server.close())
@@ -2059,4 +2401,66 @@ abstract class AbstractEndToEndTest
 
     testMethodBuilderRetries(stats, server, builder)
   }
+
+  test("methodBuilder stats are not eager for all methods") {
+    // note that this CaptureStatsReceiver could be avoided if `InMemoryStatsReceiver`
+    // was eager about creating counters and stats that have not been used.
+    // see CSL-6751
+    val metrics = new ConcurrentHashMap[String, Unit]()
+    class CaptureStatsReceiver(
+      protected val self: StatsReceiver
+    ) extends StatsReceiverProxy {
+      override def counter(verbosity: Verbosity, names: String*): Counter = {
+        metrics.put(names.mkString("/"), ())
+        super.counter(verbosity, names: _*)
+      }
+
+      override def stat(verbosity: Verbosity, names: String*): Stat = {
+        metrics.put(names.mkString("/"), ())
+        super.stat(verbosity, names: _*)
+      }
+
+      override def addGauge(verbosity: Verbosity, names: String*)(f: => Float): Gauge = {
+        metrics.put(names.mkString("/"), ())
+        super.addGauge(verbosity, names: _*)(f)
+      }
+    }
+    val stats = new InMemoryStatsReceiver
+
+    val service = new TestService.MethodPerEndpoint {
+      def query(x: String): Future[String] = Future.value(x)
+    }
+
+    val server =
+      serverImpl.serveIface(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), service)
+
+    val client = clientImpl
+      .withStatsReceiver(new CaptureStatsReceiver(stats))
+      .withLabel("a_service")
+    val name = Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress]))
+    val builder: MethodBuilder = client.methodBuilder(name)
+
+    // ensure there are no metrics to start with. e.g. "logical", "query"
+    assert(!metrics.keys.asScala.exists(key => key.contains("logical/requests")))
+
+    // ensure that materializing into a ServicePerEndpoint doesn't create the metrics
+    val spe = builder.servicePerEndpoint[TestService.ServicePerEndpoint]("a_method")
+    assert(!metrics.keys.asScala.exists(key => key.contains("a_service/a_method")))
+
+    // ensure that changing configuration doesn't either.
+    val configured = builder
+      .idempotent(0.1)
+      .servicePerEndpoint[TestService.ServicePerEndpoint]("a_method")
+      .query
+    assert(!metrics.keys.asScala.exists(key => key.contains("a_service/a_method")))
+
+    // use it to confirm metrics appear
+    assert("hello" == await(configured(TestService.Query.Args("hello"))))
+    eventually {
+      assert(stats.counter("a_service", "a_method", "logical", "requests")() == 1)
+    }
+
+    server.close()
+  }
+
 }

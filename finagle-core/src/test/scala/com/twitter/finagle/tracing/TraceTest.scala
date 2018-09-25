@@ -20,7 +20,7 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
 
   test("have a default id without parents, etc.") {
     assert(Trace.id match {
-      case TraceId(None, None, _, None, Flags(0), None) => true
+      case TraceId(None, None, _, None, Flags(0), None, _) => true
       case _ => false
     })
   }
@@ -56,7 +56,7 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
     Trace.letId(Trace.nextId) {
       assert(Trace.id != defaultId)
       assert(Trace.id match {
-        case TraceId(None, None, _, None, Flags(0), None) => true
+        case TraceId(None, None, _, None, Flags(0), None, _) => true
         case _ => false
       })
     }
@@ -67,7 +67,7 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
       val topId = Trace.id
       Trace.letId(Trace.nextId) {
         assert(Trace.id match {
-          case TraceId(Some(traceId), Some(parentId), _, None, Flags(0), _)
+          case TraceId(Some(traceId), Some(parentId), _, None, Flags(0), _, _)
               if traceId == topId.traceId && parentId == topId.spanId =>
             true
           case _ => false
@@ -169,29 +169,6 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
     }
   }
 
-  test("Trace.record: not report when tracing turned off") {
-    try {
-      Trace.disable()
-      Trace.letTracer(tracer2) {
-        Trace.letTracerAndId(tracer1, id0) {
-          Trace.letTracer(tracer1) {
-            Trace.letTracer(tracer2) {
-              Trace.letId(id0) {
-                verify(tracer1, never()).record(any[Record])
-                verify(tracer2, never()).record(any[Record])
-                Trace.record("oh hey")
-                verify(tracer1, never()).record(any[Record])
-                verify(tracer2, never()).record(any[Record])
-              }
-            }
-          }
-        }
-      }
-    } finally {
-      Trace.enable()
-    }
-  }
-
   /* TODO temporarily disabled until we can mock stopwatches
       "Trace.time" in Time.withCurrentTimeFrozen { tc =>
         val tracer = new BufferingTracer()
@@ -235,7 +212,7 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
       Trace.letTracerAndNextId(tracer) {
         val currentId = Trace.id
         assert(currentId match {
-          case TraceId(None, None, _, None, Flags(0), None) => true
+          case TraceId(None, None, _, None, Flags(0), None, _) => true
           case _ => false
         })
         assert(Trace.isTerminal == false)
@@ -259,7 +236,7 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
         Trace.letTracerAndNextId(tracer) {
           val currentId = Trace.id
           assert(currentId match {
-            case TraceId(Some(_traceId), Some(_parentId), _, Some(_sampled), Flags(0), _)
+            case TraceId(Some(_traceId), Some(_parentId), _, Some(_sampled), Flags(0), _, _)
                 if (_traceId == parentId.traceId) && (_parentId == parentId.spanId) &&
                   (_sampled == parentId.sampled.get) =>
               true
@@ -270,8 +247,6 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
           assert(Trace.isTerminal == false)
           assert(Trace.tracers == List(tracer))
           verify(tracer, never()).sampleTrace(currentId)
-          Trace.record("Hello world")
-          verify(tracer, never()).record(any[Record])
         }
       }
     }
@@ -286,7 +261,7 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
       Trace.letTracerAndNextId(tracer, true) {
         val currentId = Trace.id
         assert(currentId match {
-          case TraceId(None, None, _, None, Flags(0), None) => true
+          case TraceId(None, None, _, None, Flags(0), None, _) => true
           case _ => false
         })
         assert(Trace.isTerminal == true)
@@ -396,8 +371,8 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
   // example from X-Amzn-Trace-Id: Root=1-5759e988-bd862e3fe1be46a994272793;Sampled=1
   test("Trace.nextTraceIdHigh: encodes epoch seconds") {
     Time.withTimeAt(Time.fromSeconds(1465510280)) { tc => // Thursday, June 9, 2016 10:11:20 PM
-      val traceIdHigh = Trace.nextTraceIdHigh()
-      assert(traceIdHigh.toString.startsWith("5759e988")) == true
+      val traceIdHigh = Tracing.nextTraceIdHigh()
+      assert(traceIdHigh.toString.startsWith("5759e988"))
     }
   }
 

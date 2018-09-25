@@ -1,7 +1,7 @@
 package com.twitter.finagle.http
 
 import com.twitter.collection.RecordSchema
-import com.twitter.io.{Buf, Reader, Writer}
+import com.twitter.io.{Buf, Pipe, Reader, Writer}
 import com.twitter.util.Closable
 
 /**
@@ -100,10 +100,10 @@ object Response {
 
   /** Create Response from version and status. */
   def apply(version: Version, status: Status): Response = {
-    // Since this is a user made `Response` we use the joined Reader.writable so they
+    // Since this is a user made `Response` we use a Pipe so they
     // can keep a handle to the writer half and the server implementation can use
     // the reader half.
-    val rw = Reader.writable()
+    val rw = new Pipe[Buf]()
     val resp = new Impl(rw, rw)
     resp.version = version
     resp.status = status
@@ -113,11 +113,11 @@ object Response {
   /**
    * Create a Response from version, status, and Reader.
    */
-  def apply(version: Version, status: Status, reader: Reader): Response = {
+  def apply(version: Version, status: Status, reader: Reader[Buf]): Response = {
     chunked(version, status, reader)
   }
 
-  private[finagle] def chunked(version: Version, status: Status, reader: Reader): Response = {
+  private[finagle] def chunked(version: Version, status: Status, reader: Reader[Buf]): Response = {
     val resp = new Impl(reader, Writer.FailingWriter)
     resp.version = version
     resp.status = status
@@ -128,7 +128,7 @@ object Response {
   /** Create 200 Response with the same HTTP version as the provided Request */
   def apply(request: Request): Response = apply(request.version, Status.Ok)
 
-  final private class Impl(val reader: Reader, val writer: Writer with Closable)
+  final private class Impl(val reader: Reader[Buf], val writer: Writer[Buf] with Closable)
       extends Response {
     private[this] var _status: Status = Status.Ok
     val headerMap: HeaderMap = HeaderMap()
@@ -147,8 +147,8 @@ object Response {
      */
     def response: Response
 
-    def reader: Reader = response.reader
-    def writer: Writer with Closable = response.writer
+    def reader: Reader[Buf] = response.reader
+    def writer: Writer[Buf] with Closable = response.writer
     def ctx: Response.Schema.Record = response.ctx
     override lazy val cookies: CookieMap = response.cookies
     def headerMap: HeaderMap = response.headerMap

@@ -132,7 +132,7 @@ Backup Requests
 
 .. _backup_requests:
 
-These stats provide information on the state and behavior of 
+These stats provide information on the state and behavior of
 `com.twitter.finagle.client.BackupRequestFilter`.
 
 **backups/send_backup_after_ms**
@@ -223,6 +223,13 @@ out-of-band RTT-based failure detection. They only apply to the mux
 protocol.
 
 .. include:: metrics/FailureDetector.rst
+
+Method Builder
+--------------
+
+Client metrics that are created when using :ref:`MethodBuilder <methodbuilder>`.
+
+.. include:: metrics/MethodBuilder.rst
 
 Transport
 ---------
@@ -333,6 +340,15 @@ Mux
 These stats pertain to the :ref:`Mux <mux>` protocol.
 
 .. include:: metrics/Mux.rst
+
+Mysql
+-----
+
+.. _mysql_stats
+
+These stats pertain to the finagle-mysql implementation.
+
+.. include:: metrics/Mysql.rst
 
 ThriftMux
 ---------

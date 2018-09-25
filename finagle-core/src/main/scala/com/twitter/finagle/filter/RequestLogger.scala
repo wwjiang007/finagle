@@ -8,6 +8,27 @@ import java.util.concurrent.TimeUnit
 
 object RequestLogger {
 
+  sealed trait Param {
+    def mk(): (Param, Stack.Param[Param]) = (this, Param.param)
+  }
+
+  private[finagle] object Param {
+    case object Disabled extends Param
+    case object Enabled extends Param
+
+    implicit val param: Stack.Param[Param] = Stack.Param(Param.Enabled)
+  }
+
+  /**
+   * Enables the [[RequestLogger]] (enabled by default).
+   */
+  val Enabled: Param = Param.Enabled
+
+  /**
+   * Disables the [[RequestLogger]].
+   */
+  val Disabled: Param = Param.Disabled
+
   /**
    * The name of the logger used.
    */
@@ -53,21 +74,8 @@ object RequestLogger {
     new Stack.Transformer {
       def apply[Req, Rep](
         stack: Stack[ServiceFactory[Req, Rep]]
-      ): Stack[ServiceFactory[Req, Rep]] = {
-        stack.transform {
-          case Stack.Leaf(hd, svcFac) =>
-            Stack.Leaf(hd, withLogging(label, nowNanos, hd.role, svcFac))
-          case Stack.Node(hd, mk, next) =>
-            val mkWithLogging =
-              (ps: Stack.Params, stack: Stack[ServiceFactory[Req, Rep]]) => {
-                val mkStack = mk(ps, stack)
-                val mkSvcFac = mkStack.make(ps)
-                val svcFac = withLogging(label, nowNanos, hd.role, mkSvcFac)
-                Stack.Leaf(stack.head, svcFac)
-              }
-            Stack.Node(hd, mkWithLogging, next)
-        }
-      }
+      ): Stack[ServiceFactory[Req, Rep]] =
+        stack.map((hd, sf) => withLogging(label, nowNanos, hd.role, sf))
     }
 
 }

@@ -11,7 +11,8 @@ import com.twitter.logging.Logger
 import com.twitter.util.{CloseAwaitably, Future, Promise, Time}
 import io.netty.bootstrap.ServerBootstrap
 import io.netty.channel._
-import io.netty.channel.epoll.{EpollEventLoopGroup, EpollServerSocketChannel}
+import io.netty.channel.unix.UnixChannelOption
+import io.netty.channel.epoll.{Epoll, EpollEventLoopGroup, EpollServerSocketChannel}
 import io.netty.channel.nio.NioEventLoopGroup
 import io.netty.channel.socket.nio.NioServerSocketChannel
 import io.netty.util.concurrent.{FutureListener, Future => NettyFuture}
@@ -38,7 +39,7 @@ private class ListeningServerBuilder(
   // transport params
   private[this] val Transport.Liveness(_, _, keepAlive) = params[Transport.Liveness]
   private[this] val Transport.BufferSizes(sendBufSize, recvBufSize) = params[Transport.BufferSizes]
-  private[this] val Transport.Options(noDelay, reuseAddr) = params[Transport.Options]
+  private[this] val Transport.Options(noDelay, reuseAddr, reusePort) = params[Transport.Options]
 
   // listener params
   private[this] val Listener.Backlog(backlog) = params[Listener.Backlog]
@@ -71,20 +72,19 @@ private class ListeningServerBuilder(
   def bindWithBridge(bridge: ChannelInboundHandler, addr: SocketAddress): ListeningServer =
     new ListeningServer with CloseAwaitably {
       private[this] val bossLoop: EventLoopGroup =
-        if (nativeEpoll.enabled)
-          mkEpollEventLoopGroup()
-        else
-          mkNioEventLoopGroup()
+        if (useNativeEpoll() && Epoll.isAvailable) mkEpollEventLoopGroup()
+        else mkNioEventLoopGroup()
 
       private[this] val bootstrap = new ServerBootstrap()
-      if (nativeEpoll.enabled)
+
+      if (useNativeEpoll() && Epoll.isAvailable) {
         bootstrap.channel(classOf[EpollServerSocketChannel])
-      else
+        bootstrap.option[JBool](UnixChannelOption.SO_REUSEPORT, reusePort)
+      } else
         bootstrap.channel(classOf[NioServerSocketChannel])
 
       bootstrap.group(bossLoop, params[param.WorkerPool].eventLoopGroup)
       bootstrap.childOption[JBool](ChannelOption.TCP_NODELAY, noDelay)
-
       bootstrap.option(ChannelOption.ALLOCATOR, allocator)
       bootstrap.childOption(ChannelOption.ALLOCATOR, allocator)
 

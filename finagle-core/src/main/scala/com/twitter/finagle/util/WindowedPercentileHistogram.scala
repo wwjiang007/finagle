@@ -11,24 +11,18 @@ object WindowedPercentileHistogram {
   // buckets.
   private[finagle] val DefaultNumBuckets: Int = 3
   private[finagle] val DefaultBucketSize: Duration = 10.seconds
+  private[finagle] val DefaultLowestDiscernibleValue: Int = 1
+  private[finagle] val DefaultHighestTrackableValue: Int = 2.seconds.inMillis.toInt
 
   // Number of significant decimal digits to which the histogram will maintain value resolution
   // and separation. A value of 3 means +/- 1 unit at 1000.
   private val HdrPrecision = 3
 
-  // The initial highest trackable value stored by a histogram.
-  // We make sure to call `setAutoResize(true)` below to avoid the
-  // `java.lang.ArrayIndexOutOfBoundsException`s that result if a value larger than
-  // the highest trackable value is added.
-  // If a value larger than [[MaxHighestTrackableValue]] is added, it is capped at
-  // [[MaxHighestTrackableValue]].
-  private val InitialHighestTrackableValue: Int = 500.millis.inMillis.toInt
-  private[util] val MaxHighestTrackableValue: Int = 2.seconds.inMillis.toInt
-
-  private def newEmptyHistogram: Histogram = {
-    val h = new Histogram(InitialHighestTrackableValue, HdrPrecision)
-    h.setAutoResize(true)
-    h
+  private def newEmptyHistogram(
+    lowestDiscernibleValue: Int,
+    highestTrackableValue: Int
+  ): Histogram = {
+    new Histogram(lowestDiscernibleValue, highestTrackableValue, HdrPrecision)
   }
 
   private val addHistograms: (Histogram, Histogram) => Histogram =
@@ -45,11 +39,25 @@ object WindowedPercentileHistogram {
 class WindowedPercentileHistogram(
     numBuckets: Int,
     bucketSize: Duration,
+    lowestDiscernibleValue: Int,
+    highestTrackableValue: Int,
     timer: Timer)
   extends Closable {
   import WindowedPercentileHistogram._
 
-  def this(timer: Timer) = this(WindowedPercentileHistogram.DefaultNumBuckets, WindowedPercentileHistogram.DefaultBucketSize, timer)
+  def this(numBuckets: Int, bucketSize: Duration, timer: Timer) = this(
+    numBuckets,
+    bucketSize,
+    WindowedPercentileHistogram.DefaultLowestDiscernibleValue,
+    WindowedPercentileHistogram.DefaultHighestTrackableValue,
+    timer)
+
+  def this(timer: Timer) = this(
+    WindowedPercentileHistogram.DefaultNumBuckets,
+    WindowedPercentileHistogram.DefaultBucketSize,
+    WindowedPercentileHistogram.DefaultLowestDiscernibleValue,
+    WindowedPercentileHistogram.DefaultHighestTrackableValue,
+    timer)
 
   // Provides stable interval Histogram samples from recorded values without
   // stalling recording. `recordValue` can be called concurrently.
@@ -71,7 +79,7 @@ class WindowedPercentileHistogram(
   // exposed for testing.
   private[util] def flushCurrentBucket(): Unit = synchronized {
     histograms(pos) = recorder.getIntervalHistogram(histograms(pos))
-    currentSnapshot = histograms.fold(newEmptyHistogram)(addHistograms)
+    currentSnapshot = histograms.fold(newEmptyHistogram(lowestDiscernibleValue, highestTrackableValue))(addHistograms)
     pos = (pos + 1) % numBuckets
   }
 
@@ -79,24 +87,24 @@ class WindowedPercentileHistogram(
 
   /**
    * Add a value to the histogram.
-   * @param value Value to add. Values larger than [[MaxHighestTrackableValue]] will be added
-   *              as [[MaxHighestTrackableValue]].
+   * @param value Value to add. Values larger than [[highestTrackableValue]] will be added
+   *              as [[highestTrackableValue]].
    */
   def add(value: Int): Unit = {
-    recorder.recordValue(Math.min(value, MaxHighestTrackableValue))
+    recorder.recordValue(Math.min(value, highestTrackableValue))
   }
 
   /**
    * Retrieve a percentile from the histogram.
-   * @param percentile Percentile to retrieve. Must be be [0, 100]
+   * @param percentile Percentile to retrieve. Must be be [0.0, 1.0]
    */
   def percentile(percentile: Double): Int = {
-    if (percentile < 0 || percentile > 100) {
-      throw new IllegalArgumentException(s"Percentile must be [0, 100]. Was: $percentile")
+    if (percentile < 0 || percentile > 1) {
+      throw new IllegalArgumentException(s"Percentile must be [0.0, 1.0]. Was: $percentile")
     }
 
     if (currentSnapshot != null)
-      currentSnapshot.getValueAtPercentile(percentile).toInt
+      currentSnapshot.getValueAtPercentile(percentile * 100).toInt
     else
       0
   }
@@ -111,7 +119,7 @@ class WindowedPercentileHistogram(
  * Just for testing.  Stores only the last added value
  */
 private[finagle] class MockWindowedPercentileHistogram(timer: MockTimer)
-  extends WindowedPercentileHistogram(0, Duration.Top, timer) {
+  extends WindowedPercentileHistogram(0, Duration.Top, 1, 2000, timer) {
 
   def this() = this(new MockTimer())
 

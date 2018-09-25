@@ -16,6 +16,8 @@ URLs if possible) and [submit a pull request][1]!
 * [Despegar](http://www.despegar.com/)
 * [DICE](http://dice.se/)
 * [Dwango](http://dwango.co.jp/)
+* [Etsy](https://www.etsy.com/)
+  * ["Your Search Service as a Composable Function"][14]
 * [EnerNOC](https://www.enernoc.com/)
 * [Fitbit](https://www.fitbit.com/)
 * [Foursquare](https://foursquare.com/)
@@ -76,6 +78,7 @@ URLs if possible) and [submit a pull request][1]!
 * [Twitter](https://twitter.com/)
   * ["Finagle: A Protocol-Agnostic RPC System"][11]
 * [wasted.io](http://wasted.io/)
+* [Whisk](https://whisk.com/)
 * [XiaoMi](https://www.mi.com/)
   * ["Linden: A distributed and real-time search engine built on top of
     Lucene"][13]
@@ -94,4 +97,5 @@ URLs if possible) and [submit a pull request][1]!
 [11]: https://blog.twitter.com/2011/finagle-a-protocol-agnostic-rpc-system
 [12]: https://www.slideshare.net/ShigekazuTakei/scalafinaglesmartnewsenglish
 [13]: https://github.com/XiaoMi/linden
+[14]: https://youtu.be/4Yag3SrAMnI
 

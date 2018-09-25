@@ -2,8 +2,7 @@ package com.twitter.finagle.http2.transport
 
 import com.twitter.concurrent.AsyncQueue
 import com.twitter.finagle.http.TooLongMessageException
-import com.twitter.finagle.http2.{GoAwayException, RstException}
-import com.twitter.finagle.http2.param.PriorKnowledge
+import com.twitter.finagle.http2.{DeadConnectionException, GoAwayException, RstException}
 import com.twitter.finagle.http2.transport.Http2ClientDowngrader._
 import com.twitter.finagle.liveness.FailureDetector
 import com.twitter.finagle.netty4.transport.HasExecutor
@@ -13,7 +12,7 @@ import com.twitter.finagle.transport.{LegacyContext, Transport, TransportContext
 import com.twitter.finagle.util.DefaultTimer
 import com.twitter.finagle.{Failure, FailureFlags, Stack, Status, StreamClosedException}
 import com.twitter.logging.{HasLogLevel, Level, Logger}
-import com.twitter.util.{Closable, Future, Promise, Return, Throw, Time, Try}
+import com.twitter.util.{Future, Promise, Return, Throw, Time, Try}
 import io.netty.handler.codec.http.{HttpObject, HttpRequest, LastHttpContent}
 import io.netty.handler.codec.http2.Http2Error
 import java.net.SocketAddress
@@ -51,8 +50,7 @@ final private[http2] class StreamTransportFactory(
   },
   addr: SocketAddress,
   params: Stack.Params
-) extends (() => Future[Transport[HttpObject, HttpObject]])
-    with Closable { parent =>
+) extends ClientSession { parent =>
   import StreamTransportFactory._
 
   private[this] val exec = underlying.context.executor
@@ -62,13 +60,7 @@ final private[http2] class StreamTransportFactory(
   // executor.
   private[this] val activeStreams = new MutableHashMap[Int, StreamTransport]()
 
-  // If it's not priorknowledge or tls/alpn, then it must be h2c
-  private[this] val isH2c =
-    !(params[PriorKnowledge].enabled || params[Transport.ClientSsl].sslClientConfiguration.isDefined)
-
-  // For non-H2C sessions we pick a higher initial id to avoid an NPE which can
-  // happen when the first stream is deregistered. see: https://github.com/netty/netty/issues/7898
-  private[this] val id = if (isH2c) new AtomicInteger(1) else new AtomicInteger(3)
+  private[this] val id = new AtomicInteger(1)
 
   // This state as well as operations that start or stop streams and goaways are serialized via `exec`
   @volatile private[this] var dead = false
@@ -256,7 +248,13 @@ final private[http2] class StreamTransportFactory(
    *       [[StreamTransportFactory]] state concurrently to any instances produced via
    *       `apply`.
    */
-  def first(): Transport[HttpObject, HttpObject] = {
+  def first(): Transport[Any, Any] = unsafeCast(firstStreamTransport())
+
+  def newChildTransport(): Future[Transport[Any, Any]] =
+    childStreamTransport().map(unsafeCast)
+
+  // Exposed for testing
+  private[transport] def firstStreamTransport(): StreamTransport = {
     if (firstOnce.compareAndSet(false, true)) {
       val st = new StreamTransport()
       st.handleNewStream()
@@ -267,8 +265,9 @@ final private[http2] class StreamTransportFactory(
     }
   }
 
-  def apply(): Future[Transport[HttpObject, HttpObject]] = {
-    val p = new Promise[Transport[HttpObject, HttpObject]]
+  // Exposed for testing
+  private[transport] def childStreamTransport(): Future[StreamTransport] = {
+    val p = new Promise[StreamTransport]
     exec.execute(new Runnable {
       def run(): Unit = {
         if (dead) p.setException(new DeadConnectionException(addr, FailureFlags.Retryable))
@@ -284,9 +283,9 @@ final private[http2] class StreamTransportFactory(
   def onClose: Future[Throwable] = underlying.context.onClose
 
   private[this] def handleClose(
-      deadline: Time,
-      streamExn: Option[Throwable] = None
-    ): Unit = {
+    deadline: Time,
+    streamExn: Option[Throwable] = None
+  ): Unit = {
     dead = true
     activeStreams.values.foreach { stream =>
       streamExn match {
@@ -333,6 +332,10 @@ final private[http2] class StreamTransportFactory(
     private[this] val queue: AsyncQueue[HttpObject] = new AsyncQueue[HttpObject]
 
     @volatile private[StreamTransportFactory] var _state: StreamState = Idle
+
+    // Helps avoid a race condition induced between a stream being interrupted or closed
+    // and another request being enqueued
+    @volatile private[this] var wasClosed = false
 
     private[StreamTransportFactory] def handleState(newState: StreamState): Unit = {
       if (log.isLoggable(Level.DEBUG)) {
@@ -417,6 +420,13 @@ final private[http2] class StreamTransportFactory(
         exec.execute(new Runnable { def run(): Unit = handleCloseWith(e) })
     }
 
+    private[this] val failureResponseFn: Try[Unit] => Unit = {
+      case Throw(t) =>
+        exec.execute(new Runnable { def run(): Unit = handleCloseWith(t) })
+      case _ =>
+        ()
+    }
+
     private[this] def handleWriteAndCheck(obj: HttpObject): Future[Unit] = state match {
       case a: Active =>
         if (obj.isInstanceOf[LastHttpContent]) {
@@ -426,9 +436,7 @@ final private[http2] class StreamTransportFactory(
 
         underlying
           .write(Message(obj, curId))
-          .onFailure { e: Throwable =>
-            exec.execute(new Runnable { def run(): Unit = handleCloseWith(e) })
-          }
+          .respond(failureResponseFn)
 
       case _ =>
         _onClose.unit
@@ -470,6 +478,7 @@ final private[http2] class StreamTransportFactory(
 
     private[this] val closeOnInterrupt: PartialFunction[Throwable, Unit] = {
       case t: Throwable =>
+        wasClosed = true
         exec.execute(new Runnable { def run(): Unit = handleCloseWith(t) })
     }
 
@@ -532,6 +541,7 @@ final private[http2] class StreamTransportFactory(
     }
 
     def status: Status = state match {
+      case _ if wasClosed => Status.Closed
       case _: Active => Status.Open
       case Dead => Status.Closed
       case Idle => parent.status
@@ -546,6 +556,7 @@ final private[http2] class StreamTransportFactory(
     def peerCertificate: Option[Certificate] = underlying.context.peerCertificate
 
     def close(deadline: Time): Future[Unit] = {
+      wasClosed = true
       exec.execute(new Runnable {
         def run(): Unit = handleCloseStream("close called on stream transport", deadline)
       })
@@ -657,28 +668,20 @@ private[http2] object StreamTransportFactory {
   class BadStreamStateException(
     msg: String,
     id: Int,
-    private[finagle] val flags: Long = FailureFlags.NonRetryable
+    val flags: Long = FailureFlags.NonRetryable
   ) extends Exception(s"Stream $id in bad state: $msg")
-      with FailureFlags[BadStreamStateException] {
+    with FailureFlags[BadStreamStateException] {
 
     protected def copyWithFlags(newFlags: Long): BadStreamStateException =
       new BadStreamStateException(msg, id, newFlags)
   }
 
-  class DeadConnectionException(addr: SocketAddress, private[finagle] val flags: Long)
-      extends Exception(s"assigned an already dead connection to address $addr")
-      with FailureFlags[DeadConnectionException] {
-
-    protected def copyWithFlags(newFlags: Long): DeadConnectionException =
-      new DeadConnectionException(addr, newFlags)
-  }
-
   class StreamIdOverflowException(
     addr: SocketAddress,
-    private[finagle] val flags: Long = FailureFlags.Retryable
+    val flags: Long = FailureFlags.Retryable
   ) extends Exception(s"ran out of stream ids for address $addr")
-      with FailureFlags[StreamIdOverflowException]
-      with HasLogLevel {
+    with FailureFlags[StreamIdOverflowException]
+    with HasLogLevel {
     def logLevel: Level = Level.INFO // this is normal behavior, so we should log gently
     protected def copyWithFlags(flags: Long): StreamIdOverflowException =
       new StreamIdOverflowException(addr, flags)
@@ -687,15 +690,18 @@ private[http2] object StreamTransportFactory {
   class IllegalStreamIdException(
     addr: SocketAddress,
     id: Int,
-    private[finagle] val flags: Long = FailureFlags.Retryable
+    val flags: Long = FailureFlags.Retryable
   ) extends Exception(
-        s"Found an invalid stream id $id on address $addr. "
-          + "The id was even, but client initiated stream ids must be odd."
-      )
-      with FailureFlags[IllegalStreamIdException]
-      with HasLogLevel {
+    s"Found an invalid stream id $id on address $addr. "
+      + "The id was even, but client initiated stream ids must be odd."
+  )
+    with FailureFlags[IllegalStreamIdException]
+    with HasLogLevel {
     def logLevel: Level = Level.ERROR
     protected def copyWithFlags(flags: Long): IllegalStreamIdException =
       new IllegalStreamIdException(addr, id, flags)
   }
+
+  private def unsafeCast(t: Transport[HttpObject, HttpObject]): Transport[Any, Any] =
+    t.map(_.asInstanceOf[HttpObject], _.asInstanceOf[Any])
 }

@@ -3,14 +3,12 @@ package com.twitter.finagle.mux
 import com.twitter.conversions.time._
 import com.twitter.finagle._
 import com.twitter.finagle.client.EndpointerStackClient
-import com.twitter.finagle.mux.exp.pushsession.MuxPush
 import com.twitter.finagle.mux.transport.{IncompatibleNegotiationException, OpportunisticTls}
 import com.twitter.finagle.netty4.channel.ChannelSnooper
 import com.twitter.finagle.server.ListeningStackServer
 import com.twitter.finagle.ssl.{KeyCredentials, TrustCredentials}
 import com.twitter.finagle.ssl.server.SslServerConfiguration
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver, StatsReceiver}
-import com.twitter.finagle.toggle.flag
 import com.twitter.io.{Buf, TempFile}
 import com.twitter.util.{Await, Closable, Future, Try}
 import io.netty.channel.ChannelPipeline
@@ -75,17 +73,14 @@ abstract class AbstractSmuxTest extends FunSuite {
     } {
       val buffer = new StringBuffer()
       val stats = new InMemoryStatsReceiver
+      val server = serve(serverLevel)
+      val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
 
-      flag.overrides.let(Mux.param.MuxImpl.TlsHeadersToggleId, 1.0) {
-        val server = serve(serverLevel)
-        val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
+      val client = newService(clientLevel, record(buffer), stats, addr)
+      val results = await(client(request).liftToTry)
+      testFn(results, buffer.toString, stats)
 
-        val client = newService(clientLevel, record(buffer), stats, addr)
-        val results = await(client(request).liftToTry)
-        testFn(results, buffer.toString, stats)
-
-        Await.ready(Closable.all(server, client).close(), 5.seconds)
-      }
+      Await.ready(Closable.all(server, client).close(), 5.seconds)
     }
   }
 
@@ -144,59 +139,44 @@ abstract class AbstractSmuxTest extends FunSuite {
       }
       assert(string.isEmpty)
 
-      // TODO: remove the special casing once we get rid of the standard mux client
-      // The standard client doesn't have a mechanism for failing service acquisition
-      // based on the result of the handshake and adding that would be pretty invasive
-      // so we are going to punt on that for now and just wait for the push-based
-      // client to become the primary implementation since it does have that ability.
-      if (clientImpl().isInstanceOf[MuxPush.Client]) {
-        assert(stats.counters.get(Seq("client", "failures")) == None)
-        assert(stats.counters.get(Seq("client", "service_creation", "failures")) == Some(1))
-        assert(stats.counters.get(Seq("client", "service_creation", "failures",
-          "com.twitter.finagle.mux.transport.IncompatibleNegotiationException")) == Some(1))
-      } else if (clientImpl().isInstanceOf[Mux.Client]) {
-        assert(stats.counters.get(Seq("client", "failures")) == Some(1))
-        assert(stats.counters.get(Seq("client", "service_creation", "failures")) == None)
-      } else {
-        fail(s"Unexpected client (${clientImpl()}): update this test")
-      }
+      assert(stats.counters.get(Seq("client", "failures")) == None)
+      assert(stats.counters.get(Seq("client", "service_creation", "failures")) == Some(1))
+      assert(stats.counters.get(Seq("client", "service_creation", "failures",
+        "com.twitter.finagle.mux.transport.IncompatibleNegotiationException")) == Some(1))
+
     })
   }
 
   test("smux: server which requires TLS will reject connections if negotiation doesn't happen") {
-    flag.overrides.let(Mux.param.MuxImpl.TlsHeadersToggleId, 1.0) {
-      val server = serve(Some(OpportunisticTls.Required))
-      val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
+    val server = serve(Some(OpportunisticTls.Required))
+    val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
 
-      val client = new NonNegotiatingClient().newService(Name.bound(Address(addr)), "client")
-      val results = await(client(request).liftToTry)
+    val client = new NonNegotiatingClient().newService(Name.bound(Address(addr)), "client")
+    val results = await(client(request).liftToTry)
 
-      // TODO: this is not a very helpful exception for diagnosing negotiation failure.
-      // A better course of action would be to act as if the service didn't resolve and go into
-      // drain mode. Unfortunately, the mux server doesn't implement handshaking at the right
-      // level so doing so would be a real pain. This should be much simpler to do in push-mux.
-      intercept[ChannelClosedException] {
-        results.get
-      }
-
-      Await.ready(Closable.all(server, client).close(), 5.seconds)
+    // TODO: this is not a very helpful exception for diagnosing negotiation failure.
+    // A better course of action would be to act as if the service didn't resolve and go into
+    // drain mode. Unfortunately, the mux server doesn't implement handshaking at the right
+    // level so doing so would be a real pain. This should be much simpler to do in push-mux.
+    intercept[ChannelClosedException] {
+      results.get
     }
+
+    Await.ready(Closable.all(server, client).close(), 5.seconds)
   }
 
   test("smux: client which requires TLS will reject connections if negotiation doesn't happen") {
-    flag.overrides.let(Mux.param.MuxImpl.TlsHeadersToggleId, 1.0) {
-      val server = new NonNegotiatingServer().serve("localhost:*", concatService)
-      val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
+    val server = NonNegotiatingServer().serve("localhost:*", concatService)
+    val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
 
-      val client = newService(Some(OpportunisticTls.Required), identity, NullStatsReceiver, addr)
-      val results = await(client(request).liftToTry)
+    val client = newService(Some(OpportunisticTls.Required), identity, NullStatsReceiver, addr)
+    val results = await(client(request).liftToTry)
 
-      intercept[IncompatibleNegotiationException] {
-        results.get
-      }
-
-      Await.ready(Closable.all(server, client).close(), 5.seconds)
+    intercept[IncompatibleNegotiationException] {
+      results.get
     }
+
+    Await.ready(Closable.all(server, client).close(), 5.seconds)
   }
 }
 

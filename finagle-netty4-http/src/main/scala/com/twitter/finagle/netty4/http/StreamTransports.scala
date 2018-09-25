@@ -5,7 +5,7 @@ import com.twitter.finagle.http._
 import com.twitter.finagle.http.exp.{Multi, StreamTransportProxy}
 import com.twitter.finagle.netty4.ByteBufConversion
 import com.twitter.finagle.transport.Transport
-import com.twitter.io.{Buf, Reader, Writer}
+import com.twitter.io.{Buf, Pipe, Reader, Writer}
 import com.twitter.logging.Logger
 import com.twitter.util._
 import io.netty.handler.codec.{http => NettyHttp}
@@ -24,7 +24,7 @@ private[http] object StreamTransports {
    */
   def copyToWriter[A](
     trans: Transport[_, A],
-    writer: Writer
+    writer: Writer[Buf]
   )(eos: A => Boolean)(chunkOfA: A => Buf): Future[Unit] =
     trans.read().flatMap { a: A =>
       val chunk = chunkOfA(a)
@@ -47,8 +47,8 @@ private[http] object StreamTransports {
   def collate[A](
     trans: Transport[_, A],
     chunkOfA: A => Buf
-  )(eos: A => Boolean): Reader with Future[Unit] = new Promise[Unit] with Reader {
-    private[this] val rw = Reader.writable()
+  )(eos: A => Boolean): Reader[Buf] with Future[Unit] = new Promise[Unit] with Reader[Buf] {
+    private[this] val rw = new Pipe[Buf]()
 
     // Ensure that collate's future is satisfied _before_ its reader
     // is closed. This allows callers to observe the stream completion
@@ -91,7 +91,7 @@ private[http] object StreamTransports {
    */
   def streamChunks(
     trans: Transport[Any, Any],
-    r: Reader,
+    r: Reader[Buf],
     // TODO Find a better number for bufSize, e.g. 32KiB - Buf overhead
     bufSize: Int = Int.MaxValue
   ): Future[Unit] = {
@@ -126,9 +126,12 @@ private[finagle] class Netty4ServerStreamTransport(rawTransport: Transport[Any, 
       else
         Bijections.finagle.fullResponseToNetty(in)
 
-    transport.write(nettyRep).rescue(wrapWriteException).before {
-      if (in.isChunked) streamChunks(rawTransport, in.reader)
-      else Future.Done
+    transport.write(nettyRep).transform {
+      case Throw(exc) =>
+        wrapWriteException(exc)
+      case Return(_) =>
+        if (in.isChunked) streamChunks(rawTransport, in.reader)
+        else Future.Done
     }
   }
 
@@ -168,9 +171,12 @@ private[finagle] class Netty4ClientStreamTransport(rawTransport: Transport[Any, 
 
   def write(in: Request): Future[Unit] = {
     val nettyReq = Bijections.finagle.requestToNetty(in)
-    rawTransport.write(nettyReq).rescue(wrapWriteException).before {
-      if (in.isChunked) streamChunks(rawTransport, in.reader)
-      else Future.Done
+    rawTransport.write(nettyReq).transform {
+      case Throw(exc) =>
+        wrapWriteException(exc)
+      case Return(_) =>
+        if (in.isChunked) streamChunks(rawTransport, in.reader)
+        else Future.Done
     }
   }
 

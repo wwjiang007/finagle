@@ -24,7 +24,7 @@ junit_tests(
         "*.scala",
         exclude = [EXTERNAL_SOURCES],
     ),
-    fatal_warnings = True,
+    compiler_option_sets = {"fatal_warnings"},
     dependencies = [
         ":external",
         "3rdparty/jvm/com/fasterxml/jackson/core:jackson-databind",
@@ -36,7 +36,7 @@ junit_tests(
         "3rdparty/jvm/org/scalacheck",
         "3rdparty/jvm/org/scalatest",
         "finagle/finagle-core/src/main/scala",
-        "finagle/finagle-core/src/test/scala",
+        "finagle/finagle-core/src/test/scala:stringprotocol",
         "finagle/finagle-memcached/src/main/scala",
         "finagle/finagle-memcached/src/test/resources",
         "finagle/finagle-serversets",

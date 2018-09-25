@@ -24,7 +24,7 @@ class DefaultHeaderMapTest extends AbstractHeaderMapTest with GeneratorDrivenPro
 
   def genNonAsciiHeaderName: Gen[(String, String)] = for {
     (k, v) <- genValidHeader
-    c <- Gen.choose[Char](127, Char.MaxValue)
+    c <- Gen.choose[Char](128, Char.MaxValue)
   } yield (k + c, v)
 
   def genInvalidHeaderValue: Gen[(String, String)] = for {
@@ -67,6 +67,30 @@ class DefaultHeaderMapTest extends AbstractHeaderMapTest with GeneratorDrivenPro
 
     forAll(genInvalidClrfHeaderValue) { h =>
       intercept[IllegalArgumentException](DefaultHeaderMap(h))
+    }
+  }
+
+  test("does not validate header names or values with addUnsafe") {
+    val headerMap = newHeaderMap()
+
+    forAll(genInvalidHeaderName) { h =>
+      headerMap.addUnsafe(h._1, h._2)
+    }
+
+    forAll(genInvalidHeaderValue) { h =>
+      headerMap.addUnsafe(h._1, h._2)
+    }
+  }
+
+  test("does not validate header names or values with setUnsafe") {
+    val headerMap = newHeaderMap()
+
+    forAll(genInvalidHeaderName) { h =>
+      headerMap.setUnsafe(h._1, h._2)
+    }
+
+    forAll(genInvalidHeaderValue) { h =>
+      headerMap.setUnsafe(h._1, h._2)
     }
   }
 }

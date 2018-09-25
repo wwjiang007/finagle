@@ -4,7 +4,7 @@ import com.twitter.conversions.time._
 import com.twitter.finagle.client.MethodBuilderTest.TestStackClient
 import com.twitter.finagle.service.{ReqRep, ResponseClass, _}
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, StatsReceiver}
-import com.twitter.finagle.{Failure, Service, ServiceFactory, Stack, param}
+import com.twitter.finagle.{Failure, FailureFlags, Service, ServiceFactory, Stack, param}
 import com.twitter.util.{Await, Future, Throw}
 import org.junit.runner.RunWith
 import org.scalatest.FunSuite
@@ -35,7 +35,7 @@ class MethodBuilderRetryTest extends FunSuite {
     params: Stack.Params = Stack.Params.empty
   ): MethodBuilder[Int, Int] = {
     val svcFactory = ServiceFactory.const(svc)
-    val stack = Stack.Leaf(Stack.Role("test"), svcFactory)
+    val stack = Stack.leaf(Stack.Role("test"), svcFactory)
     val ps =
       Stack.Params.empty +
         param.Label(clientName) +
@@ -129,7 +129,7 @@ class MethodBuilderRetryTest extends FunSuite {
     val methodBuilder = retryMethodBuilder(svc, stats)
     val client = methodBuilder.withRetry
       .forClassifier {
-        case ReqRep(_, Throw(f: Failure)) if f.isFlagged(Failure.Restartable) =>
+        case ReqRep(_, Throw(f: Failure)) if f.isFlagged(FailureFlags.Retryable) =>
           ResponseClass.RetryableFailure
       }
       .newService("client")
@@ -137,7 +137,7 @@ class MethodBuilderRetryTest extends FunSuite {
     val ex = intercept[Failure] {
       Await.result(client(1), 5.seconds)
     }
-    assert(ex.isFlagged(Failure.Restartable))
+    assert(ex.isFlagged(FailureFlags.Retryable))
     assert(stats.stat(clientName, "client", "retries")() == Seq(0))
   }
 }

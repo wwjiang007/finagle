@@ -5,7 +5,7 @@ import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.{Stack, Status}
 import com.twitter.finagle.ssl.client.SslClientConfiguration
 import com.twitter.finagle.ssl.server.SslServerConfiguration
-import com.twitter.io.{Buf, Reader, Writer}
+import com.twitter.io.{Buf, Pipe, Reader, Writer}
 import com.twitter.util._
 import java.net.SocketAddress
 import java.security.cert.Certificate
@@ -217,14 +217,24 @@ object Transport {
    *
    * @param reuseAddr enables or disables `SO_REUSEADDR` option on a
    *                  transport socket. Default is `true`.
+   *
+   * @param reusePort enables or disables `SO_REUSEPORT` option on a
+   *                  transport socket (Linux 3.9+ only). This option is only
+   *                  available when using finagle-netty4 and native epoll support
+   *                  is enabled. Default is `false`.
    */
-  case class Options(noDelay: Boolean, reuseAddr: Boolean) {
+  case class Options(noDelay: Boolean, reuseAddr: Boolean, reusePort: Boolean) {
+    def this(noDelay: Boolean, reuseAddr: Boolean) = this(noDelay, reuseAddr, reusePort = false)
+
     def mk(): (Options, Stack.Param[Options]) = (this, Options.param)
   }
 
   object Options {
     implicit val param: Stack.Param[Options] =
-      Stack.Param(Options(noDelay = true, reuseAddr = true))
+      Stack.Param(Options(noDelay = true, reuseAddr = true, reusePort = false))
+
+    def apply(noDelay: Boolean, reuseAddr: Boolean): Options =
+      this.apply(noDelay = noDelay, reuseAddr = reuseAddr, reusePort = false)
   }
 
   /**
@@ -253,7 +263,7 @@ object Transport {
    */
   private[finagle] def copyToWriter[A](
     trans: Transport[_, A],
-    w: Writer
+    w: Writer[Buf]
   )(
     f: A => Future[Option[Buf]]
   ): Future[Unit] = {
@@ -280,8 +290,8 @@ object Transport {
   private[finagle] def collate[A](
     trans: Transport[_, A],
     chunkOfA: A => Future[Option[Buf]]
-  ): Reader with Future[Unit] = new Promise[Unit] with Reader {
-    private[this] val rw = Reader.writable()
+  ): Reader[Buf] with Future[Unit] = new Promise[Unit] with Reader[Buf] {
+    private[this] val rw = new Pipe[Buf]()
 
     // Ensure that collate's future is satisfied _before_ its reader
     // is closed. This allows callers to observe the stream completion

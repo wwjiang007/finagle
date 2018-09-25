@@ -3,12 +3,16 @@ package com.twitter.finagle
 import com.twitter.finagle.client.{ClientRegistry, ExceptionRemoteInfoFactory, StackBasedClient, StackClient}
 import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.context.RemoteInfo.Upstream
-import com.twitter.finagle.mux.{OpportunisticTlsParams, Request, Response}
-import com.twitter.finagle.mux.exp.pushsession.MuxPush
-import com.twitter.finagle.mux.lease.exp.Lessor
-import com.twitter.finagle.mux.transport.{MuxContext, OpportunisticTls, MuxFailure}
-import com.twitter.finagle.param.{ExceptionStatsHandler => _, Monitor => _, ResponseClassifier => _, Tracer => _, _}
-import com.twitter.finagle.server.{Listener, ServerInfo, StackBasedServer, StackServer, StdStackServer}
+import com.twitter.finagle.mux.OpportunisticTlsParams
+import com.twitter.finagle.mux.transport.MuxFailure
+import com.twitter.finagle.param.{
+  ExceptionStatsHandler => _,
+  Monitor => _,
+  ResponseClassifier => _,
+  Tracer => _,
+  _
+}
+import com.twitter.finagle.server.{StackBasedServer, StackServer}
 import com.twitter.finagle.service._
 import com.twitter.finagle.stats.{
   ClientStatsReceiver,
@@ -17,11 +21,9 @@ import com.twitter.finagle.stats.{
   StatsReceiver
 }
 import com.twitter.finagle.thrift._
-import com.twitter.finagle.thriftmux.Toggles
 import com.twitter.finagle.thriftmux.pushsession.MuxDowngradingNegotiator
 import com.twitter.finagle.thriftmux.service.ThriftMuxResponseClassifier
 import com.twitter.finagle.tracing.Tracer
-import com.twitter.finagle.transport.{StatsTransport, Transport}
 import com.twitter.io.Buf
 import com.twitter.util._
 import java.net.SocketAddress
@@ -113,7 +115,9 @@ object ThriftMux
   // and failure can be measured properly before converting the exceptions into
   // byte arrays. see CSL-1351
     ThriftMuxUtil.protocolRecorder +:
-      Mux.server.stack.replace(StackServer.Role.preparer, Server.ExnHandler)
+      Mux.server.stack
+        .insertBefore(StackServer.Role.preparer, Server.ServerToReqRepPreparer)
+        .replace(StackServer.Role.preparer, Server.ExnHandler)
 
   /**
    * Base [[com.twitter.finagle.Stack.Params]] for ThriftMux servers.
@@ -127,12 +131,12 @@ object ThriftMux
         .withLabel("thrift")
         .withStatsReceiver(ClientStatsReceiver)
 
-    private[finagle] def pushMuxer: StackClient[mux.Request, mux.Response] =
-      MuxPush.client
+    def pushMuxer: StackClient[mux.Request, mux.Response] =
+      Mux.client
         .copy(stack = BaseClientStack)
         .configured(ProtocolLibrary("thriftmux"))
 
-    private[finagle] def standardMuxer: StackClient[mux.Request, mux.Response] =
+    def standardMuxer: StackClient[mux.Request, mux.Response] =
       Mux.client
         .copy(stack = BaseClientStack)
         .configured(ProtocolLibrary("thriftmux"))
@@ -271,7 +275,7 @@ object ThriftMux
       }
     }
 
-    private[this] def deserializingClassifier: StackClient[mux.Request, mux.Response] = {
+    private[this] def withDeserializingClassifier: StackClient[mux.Request, mux.Response] = {
       // Note: what type of deserializer used is important if none is specified
       // so that we keep the prior behavior of Thrift exceptions
       // being counted as a success. Otherwise, even using the default
@@ -291,12 +295,12 @@ object ThriftMux
 
     def newService(dest: Name, label: String): Service[ThriftClientRequest, Array[Byte]] = {
       clientId.foreach(id => ClientRegistry.export(params, "ClientId", id.name))
-      ThriftMuxToMux.andThen(deserializingClassifier.newService(dest, label))
+      ThriftMuxToMux.andThen(withDeserializingClassifier.newService(dest, label))
     }
 
     def newClient(dest: Name, label: String): ServiceFactory[ThriftClientRequest, Array[Byte]] = {
       clientId.foreach(id => ClientRegistry.export(params, "ClientId", id.name))
-      ThriftMuxToMux.andThen(deserializingClassifier.newClient(dest, label))
+      ThriftMuxToMux.andThen(withDeserializingClassifier.newClient(dest, label))
     }
 
     /**
@@ -362,113 +366,22 @@ object ThriftMux
   ): Service[ThriftClientRequest, Array[Byte]] =
     client.newService(dest, label)
 
-  /**
-   * A server for the Thrift protocol served over [[com.twitter.finagle.mux]].
-   * ThriftMuxServer is backwards-compatible with Thrift clients that use the
-   * framed transport and binary protocol. It switches to the backward-compatible
-   * mode when the first request is not recognized as a valid Mux message but can
-   * be successfully handled by the underlying Thrift service. Since a Thrift
-   * message that is encoded with the binary protocol starts with a header value of
-   * 0x800100xx, Mux does not confuse it with a valid Mux message (0x80 = -128 is
-   * an invalid Mux message type) and the server can reliably detect the non-Mux
-   * Thrift client and switch to the backwards-compatible mode.
-   *
-   * Note that the server is also compatible with non-Mux finagle-thrift clients.
-   * It correctly responds to the protocol up-negotiation request and passes the
-   * tracing information embedded in the thrift requests to Mux (which has native
-   * tracing support).
-   */
-  case class ServerMuxer(
-    stack: Stack[ServiceFactory[mux.Request, mux.Response]] = BaseServerStack,
-    params: Stack.Params = BaseServerParams
-  ) extends StdStackServer[mux.Request, mux.Response, ServerMuxer] {
-
-    protected type In = Buf
-    protected type Out = Buf
-    protected type Context = MuxContext
-
-    private[this] val statsReceiver = params[Stats].statsReceiver
-
-
-    override def serve(
-      addr: SocketAddress,
-      factory: ServiceFactory[Request, Response]
-    ): ListeningServer = {
-      // // We want to fail fast if the server's OppTls configuration is invalid
-      Mux.Server.validateTlsParamConsistency(params)
-      super.serve(addr, factory)
-    }
-
-    protected def copy1(
-      stack: Stack[ServiceFactory[mux.Request, mux.Response]] = this.stack,
-      params: Stack.Params = this.params
-    ): ServerMuxer = copy(stack, params)
-
-    protected def newListener(): Listener[In, Out, Context] =
-      params[Mux.param.MuxImpl].listener(params)
-
-    // we cache tlsHeaders here because it's hard to propagate a `let` to the
-    // server's dispatcher in tests
-    private[this] val cachedTlsHeaders = Mux.param.MuxImpl.tlsHeaders
-
-    protected def newDispatcher(
-      transport: Transport[In, Out] { type Context <: ServerMuxer.this.Context },
-      service: Service[mux.Request, mux.Response]
-    ): Closable = {
-      val Lessor.Param(lessor) = params[Lessor.Param]
-      val Mux.param.MaxFrameSize(frameSize) = params[Mux.param.MaxFrameSize]
-      val muxStatsReceiver = statsReceiver.scope("mux")
-      val param.ExceptionStatsHandler(excRecorder) = params[param.ExceptionStatsHandler]
-      val param.Tracer(tracer) = params[param.Tracer]
-      val Thrift.param.ProtocolFactory(pf) = params[Thrift.param.ProtocolFactory]
-      val Mux.param.OppTls(level) = params[Mux.param.OppTls]
-      val upgrades = muxStatsReceiver.counter("tls", "upgrade", "success")
-
-      val thriftEmulator = thriftmux.ThriftEmulator(transport, pf, statsReceiver.scope("thriftmux"))
-
-      val negotiatedTrans = mux.Handshake.server(
-        trans = thriftEmulator,
-        version = Mux.LatestVersion,
-        headers = Mux.Server.headers(_, frameSize, if (cachedTlsHeaders) level else None),
-        negotiate = Mux.negotiate(
-          frameSize,
-          muxStatsReceiver,
-          level.getOrElse(OpportunisticTls.Off),
-          transport.context.turnOnTls _,
-          upgrades
-        )
-      )
-
-      val statsTrans =
-        new StatsTransport(negotiatedTrans, excRecorder, muxStatsReceiver.scope("transport"))
-
-      mux.ServerDispatcher.newRequestResponse(statsTrans, service, lessor, tracer, muxStatsReceiver)
-    }
-  }
-
   @deprecated("Use Server.defaultMuxer instead", "2018-02-01")
   def serverMuxer: StackServer[mux.Request, mux.Response] = Server.defaultMuxer
 
   object Server {
 
-    private[finagle] val UsePushMuxServerToggleName =
-      "com.twitter.finagle.thriftmux.UsePushMuxServer"
-    private[this] val usePushMuxToggle = Toggles(UsePushMuxServerToggleName)
-    private[this] def UsePushMuxServer: Boolean = usePushMuxToggle(ServerInfo().id.hashCode)
-
     /** The default underlying muxer for ThriftMux servers */
-    def defaultMuxer: StackServer[mux.Request, mux.Response] =
-      if(UsePushMuxServer) pushMuxer else standardMuxer
+    def defaultMuxer: StackServer[mux.Request, mux.Response] = pushMuxer
 
+    /** Push-based ThriftMux server implementation. */
     private[finagle] def pushMuxer: StackServer[mux.Request, mux.Response] = {
-      MuxPush.server
+      Mux.server
         .copy(
           stack = BaseServerStack,
           params = BaseServerParams,
           sessionFactory = MuxDowngradingNegotiator.build(_, _, _, _))
     }
-
-    private[finagle] def standardMuxer: StackServer[mux.Request, mux.Response] = ServerMuxer()
 
     private val MuxToArrayFilter =
       new Filter[mux.Request, mux.Response, Array[Byte], Array[Byte]] {
@@ -523,6 +436,31 @@ object ThriftMux
           exnFilter.andThen(next)
         }
       }
+
+    // Set an empty ServerToReqRep context in the stack. Scrooge generated finagle service should
+    // then set the value.
+    private[ThriftMux] val ServerToReqRepPreparer =
+      new Stack.Module0[ServiceFactory[mux.Request, mux.Response]] {
+        val role: Stack.Role = Stack.Role("ServerToReqRep Preparer")
+        val description: String = "Set an empty bytes to ReqRep context in the local contexts, " +
+          "scrooge generated service should set the value."
+        def make(
+          next: ServiceFactory[mux.Request, mux.Response]
+        ): ServiceFactory[mux.Request, mux.Response] = {
+          val svcDeserializeCtxFilter = new SimpleFilter[mux.Request, mux.Response] {
+            def apply(
+              request: mux.Request,
+              service: Service[mux.Request, mux.Response]
+            ): Future[mux.Response] = {
+              val deserCtx = new ServerToReqRep
+              Contexts.local.let(ServerToReqRep.Key, deserCtx) {
+                service(request)
+              }
+            }
+          }
+          svcDeserializeCtxFilter.andThen(next)
+        }
+      }
   }
 
   /**
@@ -552,6 +490,7 @@ object ThriftMux
       serviceName = params[Label].label,
       maxThriftBufferSize = params[Thrift.param.MaxReusableBufferSize].maxReusableBufferSize,
       serverStats = params[Stats].statsReceiver,
+      responseClassifier = params[com.twitter.finagle.param.ResponseClassifier].responseClassifier,
       perEndpointStats = params[Thrift.param.PerEndpointStats].enabled
     )
 
@@ -614,11 +553,29 @@ object ThriftMux
     def withParams(ps: Stack.Params): Server =
       copy(muxer = muxer.withParams(ps))
 
+    private[this] def withDeserializingClassifier: StackServer[mux.Request, mux.Response] = {
+      // Note: what type of deserializer used is important if none is specified
+      // so that we keep the prior behavior of Thrift exceptions
+      // being counted as a success. Otherwise, even using the default
+      // ResponseClassifier would then see that response as a `Throw` and thus
+      // a failure. So, when none is specified, a "deserializing-only"
+      // classifier is used to make when deserialization happens in the stack
+      // uniform whether or not a `ResponseClassifier` is wired up.
+      val classifier = if (params.contains[com.twitter.finagle.param.ResponseClassifier]) {
+        ThriftMuxResponseClassifier.usingReqRepCtx(
+          params[com.twitter.finagle.param.ResponseClassifier].responseClassifier
+        )
+      } else {
+        ThriftMuxResponseClassifier.ReqRepCtxOnly
+      }
+      muxer.configured(com.twitter.finagle.param.ResponseClassifier(classifier))
+    }
+
     def serve(
       addr: SocketAddress,
       factory: ServiceFactory[Array[Byte], Array[Byte]]
     ): ListeningServer = {
-      muxer.serve(addr, MuxToArrayFilter.andThen(factory))
+      withDeserializingClassifier.serve(addr, MuxToArrayFilter.andThen(factory))
     }
 
     // Java-friendly forwarders

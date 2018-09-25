@@ -62,3 +62,6 @@
 **<label>/mux/tls/upgrade/incompatible**
   A counter of the number of times a client or server failed to establish a session
   due to incompatible TLS requirements or capabilities.
+
+**<label>/mux/handshake_latency_us**
+  A histogram of the mux handshake latency.

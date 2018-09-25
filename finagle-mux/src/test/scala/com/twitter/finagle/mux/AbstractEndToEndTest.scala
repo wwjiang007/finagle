@@ -142,11 +142,11 @@ abstract class AbstractEndToEndTest
         tracer.toSeq,
         Seq(
           Annotation.ServiceName("theClient"),
-          Annotation.ClientSend(),
+          Annotation.ClientSend,
           Annotation.ServiceName("theServer"),
-          Annotation.ServerRecv(),
-          Annotation.ServerSend(),
-          Annotation.ClientRecv()
+          Annotation.ServerRecv,
+          Annotation.ServerSend,
+          Annotation.ClientRecv
         )
       )
     }
@@ -212,9 +212,9 @@ abstract class AbstractEndToEndTest
       }
     }
 
-    check(Failure("Nah", Failure.Rejected))
-    check(Failure("Nope", Failure.NonRetryable))
-    check(Failure("", Failure.Restartable))
+    check(Failure("Nah", FailureFlags.Rejected))
+    check(Failure("Nope", FailureFlags.NonRetryable))
+    check(Failure("", FailureFlags.Retryable))
 
     Await.result(server.close(), 30.seconds)
     Await.result(client.close(), 30.seconds)
@@ -237,8 +237,8 @@ abstract class AbstractEndToEndTest
     // This will try until it exhausts its budget. That's o.k.
     val failure = intercept[Failure] { Await.result(client(Request.empty), 30.seconds) }
 
-    // Failure.Restartable is stripped.
-    assert(!failure.isFlagged(Failure.Restartable))
+    // FailureFlags.Retryable is stripped.
+    assert(!failure.isFlagged(FailureFlags.Retryable))
 
     Await.result(server.close(), 30.seconds)
     Await.result(client.close(), 30.seconds)
@@ -363,10 +363,12 @@ abstract class AbstractEndToEndTest
 
     Await.ready(client(Request(Path.empty, Nil, Buf.Utf8("." * 10))), 5.seconds)
 
-    assert(sr.stat("client", "request_payload_bytes")() == Seq(10.0f))
-    assert(sr.stat("client", "response_payload_bytes")() == Seq(20.0f))
-    assert(sr.stat("server", "request_payload_bytes")() == Seq(10.0f))
-    assert(sr.stat("server", "response_payload_bytes")() == Seq(20.0f))
+    eventually {
+      assert(sr.stat("client", "request_payload_bytes")() == Seq(10.0f))
+      assert(sr.stat("client", "response_payload_bytes")() == Seq(20.0f))
+      assert(sr.stat("server", "request_payload_bytes")() == Seq(10.0f))
+      assert(sr.stat("server", "response_payload_bytes")() == Seq(20.0f))
+    }
 
     Await.ready(Closable.all(server, client).close(), 5.seconds)
   }
@@ -391,8 +393,10 @@ abstract class AbstractEndToEndTest
     Await.ready(client(Request(Path.empty, Nil, Buf.Utf8("." * 10))), 5.seconds)
 
     // Stats defined in the ChannelStatsHandler
-    assert(sr.counter("client", "connects")() > 0)
-    assert(sr.counter("server", "connects")() > 0)
+    eventually {
+      assert(sr.counter("client", "connects")() > 0)
+      assert(sr.counter("server", "connects")() > 0)
+    }
 
     Await.ready(Closable.all(server, client).close(), 5.seconds)
   }

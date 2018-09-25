@@ -36,17 +36,34 @@ sealed trait Stack[T] {
    * producing a `T`-typed value representing the current
    * configuration.
    */
-  def make(params: Params): T
+  def make(params: Params): T =
+    this match {
+      case Node(_, mk, next) => mk(params, next).make(params)
+      case Leaf(_, t) => t
+    }
 
   /**
    * Transform one stack to another by applying `fn` on each element;
    * the map traverses on the element produced by `fn`, not the
-   * original stack.
+   * original stack. Prefer using [[map]] over [[transform]].
    */
-  def transform(fn: Stack[T] => Stack[T]): Stack[T] =
+  protected def transform(fn: Stack[T] => Stack[T]): Stack[T] =
     fn(this) match {
       case Node(hd, mk, next) => Node(hd, mk, next.transform(fn))
       case leaf @ Leaf(_, _) => leaf
+    }
+
+  /**
+   * Transform one stack to another by applying `fn` on each element.
+   */
+  def map(fn: (Stack.Head, T) => T): Stack[T] =
+    this match {
+      case Node(hd, mk, next) =>
+        def mk2(p: Params, stk: Stack[T]): Stack[T] =
+          Leaf(stk.head, fn(hd, mk(p, stk).make(p)))
+        Node(hd, mk2(_, _), next.map(fn))
+      case Leaf(hd, t) =>
+        Leaf(hd, fn(hd, t))
     }
 
   /**
@@ -77,11 +94,14 @@ sealed trait Stack[T] {
    * the argument role. If no elements match the role, then an
    * unmodified stack is returned.
    */
-  def insertAfter(target: Role, insertion: Stackable[T]): Stack[T] = transform {
-    case Node(hd, mk, next) if hd.role == target =>
-      Node(hd, mk, insertion +: next)
-    case stk => stk
-  }
+  def insertAfter(target: Role, insertion: Stackable[T]): Stack[T] =
+    this match {
+      case Node(hd, mk, next) if hd.role == target =>
+        Node(hd, mk, insertion +: next.insertAfter(target, insertion))
+      case Node(hd, mk, next) =>
+        Node(hd, mk, next.insertAfter(target, insertion))
+      case leaf @ Leaf(_, _) => leaf
+    }
 
   /**
    * Insert the given [[Stackable]] after the stack elements matching
@@ -250,45 +270,38 @@ object Stack {
     def parameters: Seq[Stack.Param[_]]
   }
 
+  private case class Leaf[T](head: Stack.Head, t: T) extends Stack[T]
+  private case class Node[T](head: Stack.Head, mk: (Params, Stack[T]) => Stack[T], next: Stack[T]) extends Stack[T]
+
   /**
    * Nodes materialize by transforming the underlying stack in
    * some way.
    */
-  case class Node[T](head: Stack.Head, mk: (Params, Stack[T]) => Stack[T], next: Stack[T])
-      extends Stack[T] {
-    def make(params: Params): T = mk(params, next).make(params)
-  }
+  def node[T](head: Stack.Head, mk: (Params, Stack[T]) => Stack[T], next: Stack[T]): Stack[T] =
+    Node(head, mk, next)
 
-  object Node {
-
-    /**
-     * A constructor for a 'simple' Node.
-     */
-    def apply[T](head: Stack.Head, mk: T => T, next: Stack[T]): Node[T] =
-      Node(head, (p, stk) => Leaf(head, mk(stk.make(p))), next)
-  }
+  /**
+   * A constructor for a 'simple' Node.
+   */
+  def node[T](head: Stack.Head, mk: T => T, next: Stack[T]): Stack[T] =
+    Node(head, (p, stk) => Leaf(head, mk(stk.make(p))), next)
 
   /**
    * A static stack element; necessarily the last.
    */
-  case class Leaf[T](head: Stack.Head, t: T) extends Stack[T] {
-    def make(params: Params): T = t
-  }
+  def leaf[T](head: Stack.Head, t: T): Stack[T] = Leaf(head, t)
 
-  object Leaf {
-
-    /**
-     * If only a role is given when constructing a leaf, then the head
-     * is created automatically
-     */
-    def apply[T](_role: Stack.Role, t: T): Leaf[T] = {
-      val head = new Stack.Head {
-        val role: Stack.Role = _role
-        val description: String = _role.toString
-        val parameters: Seq[Stack.Param[_]] = Nil
-      }
-      Leaf(head, t)
+  /**
+   * If only a role is given when constructing a leaf, then the head
+   * is created automatically
+   */
+  def leaf[T](_role: Stack.Role, t: T): Stack[T] = {
+    val head = new Stack.Head {
+      val role: Stack.Role = _role
+      val description: String = _role.toString
+      val parameters: Seq[Stack.Param[_]] = Nil
     }
+    Leaf(head, t)
   }
 
   /**
@@ -487,7 +500,7 @@ object Stack {
    *   def make(params: Params, next: Stack[Int=>Int]): Stack[Int=>Int] = {
    *     val Multiplier(m) = params[Multiplier]
    *     if (m == 1) next // It's a no-op, skip it.
-   *     else Stack.Leaf("multiply", i => next.make(params)(i)*m)
+   *     else Stack.leaf("multiply", i => next.make(params)(i)*m)
    *   }
    * }
    * }}}
@@ -608,7 +621,24 @@ object Stack {
         next
       )
   }
+}
 
+/**
+ * StackTransformer is a standard mechanism for transforming the default
+ * shape of the Stack. It is a [[Stack.Transformer]] with a name.
+ * Registration and retrieval of transformers from global state is managed by
+ * [[StackServer.DefaultTransformer]]. The transformers will run at
+ * materialization time for Finagle servers, allowing users to mutate a Stack
+ * in a consistent way.
+ *
+ * Warning: While it's possible to modify params with this API, it's strongly
+ * discouraged. Modifying params via transformers creates subtle dependencies
+ * between modules and makes it difficult to reason about the value of
+ * params, as it may change depending on the module's placement in the stack.
+ */
+abstract class StackTransformer extends Stack.Transformer {
+  def name: String
+  override def toString: String = s"StackTransformer(name=$name)"
 }
 
 /**
@@ -660,7 +690,7 @@ object CanStackFrom {
  * empty stack for [[ServiceFactory]]s.
  */
 class StackBuilder[T](init: Stack[T]) {
-  def this(role: Stack.Role, end: T) = this(Stack.Leaf(role, end))
+  def this(role: Stack.Role, end: T) = this(Stack.leaf(role, end))
 
   private[this] var stack = init
 

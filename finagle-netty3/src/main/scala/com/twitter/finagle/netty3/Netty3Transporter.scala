@@ -17,7 +17,7 @@ import com.twitter.finagle.ssl.client.{SslClientEngineFactory, SslClientSessionV
 import com.twitter.finagle.stats.StatsReceiver
 import com.twitter.finagle.transport.{Transport, TransportContext}
 import com.twitter.finagle.util.HashedWheelTimer
-import com.twitter.finagle.{CancelledConnectionException, ConnectionFailedException, Failure, Stack}
+import com.twitter.finagle.{CancelledConnectionException, ConnectionFailedException, Failure, FailureFlags, Stack}
 import com.twitter.logging.Level
 import com.twitter.util.{Future, Promise, Stopwatch}
 import java.net.{InetSocketAddress, SocketAddress}
@@ -76,7 +76,7 @@ private[netty3] class ChannelConnector[In, Out](
           promise.setException(
             Failure(
               cause = new CancelledConnectionException,
-              flags = Failure.Interrupted | Failure.Restartable,
+              flags = FailureFlags.Interrupted | FailureFlags.Retryable,
               logLevel = Level.DEBUG
             )
           )
@@ -235,7 +235,7 @@ private[netty3] class Netty3Transporter[In, Out](
     val LatencyCompensation.Compensation(compensation) = params[LatencyCompensation.Compensation]
     val Transport.BufferSizes(sendBufSize, recvBufSize) = params[Transport.BufferSizes]
     val Transport.Liveness(readerTimeout, writerTimeout, keepAlive) = params[Transport.Liveness]
-    val Transport.Options(noDelay, reuseAddr) = params[Transport.Options]
+    val Transport.Options(noDelay, reuseAddr, _) = params[Transport.Options]
 
     val opts = new mutable.HashMap[String, Object]()
     opts += "connectTimeoutMillis" ->

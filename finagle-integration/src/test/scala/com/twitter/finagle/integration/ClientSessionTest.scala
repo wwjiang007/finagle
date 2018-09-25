@@ -2,15 +2,18 @@ package com.twitter.finagle.integration
 
 import com.twitter.concurrent.AsyncQueue
 import com.twitter.finagle._
-import com.twitter.finagle.exp.pushsession.utils.MockChannelHandle
-import com.twitter.finagle.exp.pushsession.{PipeliningClientPushSession, PushChannelHandle}
+import com.twitter.finagle.pushsession.utils.MockChannelHandle
+import com.twitter.finagle.pushsession.{PipeliningClientPushSession, PushChannelHandle}
 import com.twitter.finagle.http
 import com.twitter.finagle.memcached.{protocol => memcached}
 import com.twitter.finagle.http.codec.HttpClientDispatcher
 import com.twitter.finagle.http.exp.IdentityStreamTransport
-import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.liveness.FailureDetector
+import com.twitter.finagle.mux.pushsession.{MessageWriter, MuxMessageDecoder}
+import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.finagle.transport.{QueueTransport, Transport}
 import com.twitter.finagle.util.DefaultTimer
+import com.twitter.io.{Buf, ByteReader}
 import com.twitter.util._
 import com.twitter.util.TimeConversions._
 import org.mockito.Mockito.when
@@ -58,20 +61,21 @@ class ClientSessionTest extends FunSuite with MockitoSugar {
     }
   }
 
-  testSessionStatus[mux.transport.Message, mux.transport.Message](
-    "mux-transport", { tr: Transport[mux.transport.Message, mux.transport.Message] =>
-      val session: mux.ClientSession =
-        new mux.ClientSession(tr, liveness.FailureDetector.NullConfig, "test", NullStatsReceiver)
+  testPushSessionStatus(
+    "mux-dispatcher", { handle: PushChannelHandle[ByteReader, Buf] =>
+      val session = new mux.pushsession.MuxClientSession(
+        handle = handle,
+        h_decoder = mock[MuxMessageDecoder],
+        h_messageWriter = mock[MessageWriter],
+        detectorConfig = FailureDetector.NullConfig,
+        name = "test-dispatcher",
+        statsReceiver = new InMemoryStatsReceiver,
+        timer = mock[Timer]
+      )
+
+
       () =>
         session.status
-    }
-  )
-
-  testSessionStatus[mux.transport.Message, mux.transport.Message](
-    "mux-dispatcher", { tr: Transport[mux.transport.Message, mux.transport.Message] =>
-      val dispatcher = mux.ClientDispatcher.newRequestResponse(tr)
-      () =>
-        dispatcher.status
     }
   )
 
@@ -101,7 +105,7 @@ class ClientSessionTest extends FunSuite with MockitoSugar {
     }
   )
 
-  class MyPushClient extends com.twitter.finagle.Memcached.Client.PushClient {
+  class MyPushClient extends com.twitter.finagle.Memcached.Client {
     def toSvc(
       handle: PushChannelHandle[memcached.Response, memcached.Command]
     ): Service[memcached.Command, memcached.Response] = {
@@ -119,22 +123,6 @@ class ClientSessionTest extends FunSuite with MockitoSugar {
     "memcached-session", { handle: PushChannelHandle[memcached.Response, memcached.Command] =>
       val cl: MyPushClient = new MyPushClient
       val svc = cl.toSvc(handle)
-      () =>
-        svc.status
-    }
-  )
-
-  class MyNonPushClient extends com.twitter.finagle.Memcached.Client.NonPushClient {
-    def newDisp(
-      transport: Transport[memcached.Command, memcached.Response]
-    ): Service[memcached.Command, memcached.Response] =
-      super.newDispatcher(transport)
-  }
-
-  testSessionStatus(
-    "memcached-dispatcher", { tr: Transport[memcached.Command, memcached.Response] =>
-      val cl: MyNonPushClient = new MyNonPushClient
-      val svc = cl.newDisp(tr)
       () =>
         svc.status
     }

@@ -15,9 +15,9 @@ import com.twitter.util._
 import io.netty.handler.codec.http2.Http2CodecUtil
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicInteger
-import scala.collection.mutable.{ArrayBuffer, Map => MMap}
+import scala.collection.mutable.ArrayBuffer
 
-class Http2EndToEndTest extends AbstractEndToEndTest {
+class Http2EndToEndTest extends AbstractHttp2EndToEndTest {
   def implName: String = "netty4 http/2"
   def clientImpl(): finagle.Http.Client = finagle.Http.client.withHttp2.withStatsReceiver(statsRecv)
 
@@ -42,7 +42,7 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
     }
   }
 
-  override def initService: HttpService = Service.mk { req: Request =>
+  override def initService: HttpService = Service.mk { _: Request =>
     Future.value(Response())
   }
 
@@ -76,7 +76,7 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
       assert(statsRecv.counters(Seq("client", "upgrade", "ignored")) == 1)
 
       // Should still be zero since the client didn't attempt the upgrade at all
-      assert(!statsRecv.counters.contains(Seq("server", "upgrade", "ignored")))
+      assert(statsRecv.counters(Seq("server", "upgrade", "ignored")) == 0)
       await(client.close())
     }
 
@@ -155,6 +155,7 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
     assert(rh.get("TE").get == "trailers")
   }
 
+  if (!sys.props.contains("SKIP_FLAKY"))
   test("The upgrade request is ineligible for flow control") {
     val server = serverImpl()
       .withMaxHeaderSize(1.kilobyte)
@@ -215,8 +216,11 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
         val errorMsg = s"Upgraded when the client was $clientStatus, the server was " +
           s"$serverStatus, the client toggle was $clientToggleName, the server toggle was " +
           s"$serverToggleName"
-        assert(!sr.counters.contains(Seq("client", "upgrade", "success")), errorMsg)
-        assert(!sr.counters.contains(Seq("server", "upgrade", "success")), errorMsg)
+        val clientSuccess = sr.counters.get(Seq("client", "upgrade", "success"))
+        assert(clientSuccess.isEmpty || clientSuccess.contains(0), errorMsg)
+
+        val serverSuccess = sr.counters.get(Seq("server", "upgrade", "success"))
+        assert(serverSuccess.isEmpty || serverSuccess.contains(0), errorMsg)
       }
       await(Closable.all(client, server).close())
     }
@@ -249,7 +253,8 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
           "Failed to upgrade when both parties were on")
       } else {
         assert(!sr.counters.contains(Seq("client", "upgrade", "success")))
-        assert(!sr.counters.contains(Seq("server", "upgrade", "success")))
+        val serverSuccess = sr.counters.get(Seq("server", "upgrade", "success"))
+        assert(serverSuccess.isEmpty || serverSuccess.contains(0L))
       }
       await(Closable.all(client, server).close())
     }
@@ -281,7 +286,7 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
         assert(sr.counters.get(Seq("server", "upgrade", "success")) == Some(1),
           "Failed to upgrade when both parties were on")
       } else {
-        assert(!sr.counters.contains(Seq("client", "upgrade", "success")))
+        assert(sr.counters(Seq("client", "upgrade", "success")) == 0)
         assert(!sr.counters.contains(Seq("server", "upgrade", "success")))
       }
       await(Closable.all(client, server).close())
@@ -376,49 +381,16 @@ class Http2EndToEndTest extends AbstractEndToEndTest {
 
     val client = clientImpl().newService(dest, "client")
 
-
-    // we need to circumvent the validations in the DefaultHeaderMap
-    val map = new HeaderMap {
-      val underlying = MMap.empty[String, String]
-
-      def get(key: String): Option[String] = underlying.get(key)
-
-      def set(k: String, v: String): HeaderMap = {
-        underlying.update(k, v)
-        this
-      }
-
-      def add(k: String, v: String): HeaderMap = {
-        underlying.update(k, v)
-        this
-      }
-
-      def getAll(key: String): Seq[String] = underlying.get(key).map(Seq(_)).getOrElse(Nil)
-
-      def +=(kv: (String, String)): this.type = {
-        underlying += kv
-        this
-      }
-
-      def -=(key: String): this.type = {
-        underlying -= (key)
-        this
-      }
-
-      def iterator: Iterator[(String, String)] = underlying.iterator
-    }
-
     val req = new Request.Proxy {
       val underlying = Request("/")
       def request: Request = underlying
-      override def headerMap: HeaderMap = map
     }
 
     initClient(client)
 
     // this sends illegal pseudo headers to the server, it should reject them with a non-zero
     // error code.
-    req.headerMap.set(":invalid", "foo")
+    req.headerMap.setUnsafe(":invalid", "foo")
 
     val rep = client(req)
 

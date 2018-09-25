@@ -4,6 +4,7 @@ import com.twitter.conversions.time._
 import com.twitter.finagle
 import com.twitter.finagle._
 import com.twitter.finagle.client.utils.StringClient
+import com.twitter.finagle.loadbalancer.LoadBalancerFactory.ErrorLabel
 import com.twitter.finagle.param.Stats
 import com.twitter.finagle.server.utils.StringServer
 import com.twitter.finagle.stats.{InMemoryHostStatsReceiver, InMemoryStatsReceiver}
@@ -90,7 +91,7 @@ class LoadBalancerFactoryTest extends FunSuite with Eventually with IntegrationP
 
   test("throws NoBrokersAvailableException with negative addresses") {
     val next: Stack[ServiceFactory[String, String]] =
-      Stack.Leaf(
+      Stack.leaf(
         Stack.Role("mock"),
         ServiceFactory.const[String, String](Service.mk[String, String](req => Future.value(req)))
       )
@@ -100,8 +101,17 @@ class LoadBalancerFactoryTest extends FunSuite with Eventually with IntegrationP
     }.toStack(next)
 
     val dest = LoadBalancerFactory.Dest(Var(Addr.Neg))
-    val factory = stack.make(Stack.Params.empty + dest)
-    intercept[NoBrokersAvailableException](Await.result(factory()))
+    val label = "mystack"
+    val factory = stack.make(Stack.Params.empty + dest + ErrorLabel(label))
+
+    Dtab.unwind {
+      val newDtab = Dtab.read("/foo => /bar")
+      Dtab.local = newDtab
+      val noBrokers = intercept[NoBrokersAvailableException](Await.result(factory()))
+      assert(noBrokers.name == "mystack")
+      assert(noBrokers.localDtab == newDtab)
+    }
+
   }
 
   test("when no nodes are Open and configured to fail fast") {
@@ -115,7 +125,7 @@ class LoadBalancerFactoryTest extends FunSuite with Eventually with IntegrationP
       }
       def close(deadline: Time): Future[Unit] = ???
     }
-    val endpoint = Stack.Leaf(Stack.Role("endpoint"), busySvcFac)
+    val endpoint = Stack.leaf(Stack.Role("endpoint"), busySvcFac)
     val stack = LoadBalancerFactory.module.toStack(endpoint)
 
     val address = Address(InetSocketAddress.createUnresolved("inet-address", 0))
@@ -147,7 +157,7 @@ class LoadBalancerFactoryTest extends FunSuite with Eventually with IntegrationP
       }
       def close(deadline: Time): Future[Unit] = ???
     }
-    val endpoint = Stack.Leaf(Stack.Role("endpoint"), busySvcFac)
+    val endpoint = Stack.leaf(Stack.Role("endpoint"), busySvcFac)
     val stack = LoadBalancerFactory.module.toStack(endpoint)
     val address = Address(InetSocketAddress.createUnresolved("inet-address", 0))
     val factory = stack.make(
@@ -212,7 +222,7 @@ class LoadBalancerFactoryTest extends FunSuite with Eventually with IntegrationP
 
   test("Respects the AddressOrdering") {
     val endpoint: Stack[ServiceFactory[String, String]] =
-      Stack.Leaf(
+      Stack.leaf(
         Stack.Role("endpoint"),
         ServiceFactory.const[String, String](Service.mk[String, String](req => ???))
       )
@@ -259,7 +269,7 @@ class LoadBalancerFactoryTest extends FunSuite with Eventually with IntegrationP
 
   test("Respects ReplicateAddresses param") {
     val endpoint: Stack[ServiceFactory[String, String]] =
-      Stack.Leaf(
+      Stack.leaf(
         Stack.Role("endpoint"),
         ServiceFactory.const[String, String](Service.mk[String, String](req => ???))
       )

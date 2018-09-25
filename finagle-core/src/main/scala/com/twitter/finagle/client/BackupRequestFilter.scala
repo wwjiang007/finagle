@@ -19,6 +19,16 @@ object BackupRequestFilter {
    */
   private val OrigRequestTimeout = Failure("Original request did not complete in time")
 
+  /**
+   * Use a minimum non-zero delay to prevent sending unnecessary backup requests
+   * immediately for services where the latency at the percentile where a backup will be sent is
+   * ~0ms. This is preferable to not sending any backups in the aforementioned case; by sending
+   * a backup after 1ms we can still reduce the higher latencies at greater latency percentiles.
+   * For example, if p99 latency is 0 and we are configured to send backups at the p99 latency,
+   * we can a reduce p999 latency of 10 ms to close to 1ms.
+   */
+  private val MinSendBackupAfterMs: Int = 1
+
   private[finagle] val SupersededRequestFailure =
     Failure.ignorable("Request was superseded by another in BackupRequestFilter")
 
@@ -67,6 +77,23 @@ object BackupRequestFilter {
   val Disabled: Param = Param.Disabled
 
   /**
+   * Define the bounds of values tracked by the histogram.
+   *
+   * Note: this is an expert-level API; the defaults work well for the typical user.
+   *
+   * @param lowestDiscernibleMsValue The lowest value in milliseconds that can be discerned by the histogram.
+   * @param highestTrackableMsValue The highest value in milliseconds to be tracked by the histogram..
+   */
+  case class Histogram(lowestDiscernibleMsValue: Int, highestTrackableMsValue: Int) {
+    def mk(): (Histogram, Stack.Param[Histogram]) = (this, Histogram.param)
+  }
+  object Histogram {
+    implicit val param: Stack.Param[Histogram] = Stack.Param(Histogram(
+      WindowedPercentileHistogram.DefaultLowestDiscernibleValue,
+      WindowedPercentileHistogram.DefaultHighestTrackableValue))
+  }
+
+  /**
    * Configure [[BackupRequestFilter]].
    *
    * @param maxExtraLoad How much extra load, as a fraction, we are willing to send to the server.
@@ -97,6 +124,8 @@ object BackupRequestFilter {
       sendInterrupts,
       params[param.ResponseClassifier].responseClassifier,
       params[Retries.Budget].retryBudget,
+      params[Histogram].lowestDiscernibleMsValue,
+      params[Histogram].highestTrackableMsValue,
       params[param.Stats].statsReceiver.scope("backups"),
       params[param.Timer].timer
     )
@@ -227,17 +256,43 @@ private[finagle] class BackupRequestFilter[Req, Rep](
     timer,
     () => new WindowedPercentileHistogram(timer))
 
+  def this(
+    maxExtraLoadTunable: Tunable[Double],
+    sendInterrupts: Boolean,
+    responseClassifier: ResponseClassifier,
+    clientRetryBudget: RetryBudget,
+    lowestDiscernibleMsValue: Int,
+    highestTrackableMsValue: Int,
+    statsReceiver: StatsReceiver,
+    timer: Timer
+  ) = this(
+    maxExtraLoadTunable,
+    sendInterrupts,
+    responseClassifier,
+    newRetryBudget = BackupRequestFilter.newRetryBudget,
+    clientRetryBudget = clientRetryBudget,
+    Stopwatch.systemMillis,
+    statsReceiver,
+    timer,
+    () => new WindowedPercentileHistogram(
+      WindowedPercentileHistogram.DefaultNumBuckets,
+      WindowedPercentileHistogram.DefaultBucketSize,
+      lowestDiscernibleMsValue,
+      highestTrackableMsValue,
+      timer))
+
 
   @volatile private[this] var backupRequestRetryBudget: RetryBudget =
     newRetryBudget(getAndValidateMaxExtraLoad(maxExtraLoadTunable), nowMs)
 
   private[this] def percentileFromMaxExtraLoad(maxExtraLoad: Double): Double =
-    (1.0 - maxExtraLoad) * 100
+    1.0 - maxExtraLoad
 
   private[this] val windowedPercentile: WindowedPercentileHistogram =
     windowedPercentileHistogramFac()
 
-  @volatile private[this] var sendBackupAfter: Int = 0
+  // Prevent sending a backup on the first request
+  @volatile private[this] var sendBackupAfter: Int = Int.MaxValue
 
   // For testing
   private[client] def sendBackupAfterDuration: Duration =
@@ -255,7 +310,7 @@ private[finagle] class BackupRequestFilter[Req, Rep](
         percentile = percentileFromMaxExtraLoad(curMaxExtraLoad)
         backupRequestRetryBudget = newRetryBudget(curMaxExtraLoad, nowMs)
       }
-      sendBackupAfter = windowedPercentile.percentile(percentile)
+      sendBackupAfter = Math.max(MinSendBackupAfterMs, windowedPercentile.percentile(percentile))
       sendAfterStat.add(sendBackupAfter)
     }
   }
@@ -305,9 +360,6 @@ private[finagle] class BackupRequestFilter[Req, Rep](
     backupRequestRetryBudget.deposit()
     val orig = record(req, service(req))
     val howLong = sendBackupAfter
-
-    if (howLong == 0)
-      return orig
 
     orig.within(
       timer,

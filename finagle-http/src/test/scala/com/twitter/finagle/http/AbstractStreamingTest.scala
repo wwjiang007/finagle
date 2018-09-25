@@ -6,7 +6,7 @@ import com.twitter.finagle.client.Transporter
 import com.twitter.finagle.server.Listener
 import com.twitter.finagle.service.ConstantService
 import com.twitter.finagle.transport.{Transport, TransportContext}
-import com.twitter.io.{Buf, Reader, Writer}
+import com.twitter.io.{Buf, Pipe, Reader, Writer}
 import com.twitter.util.{Await, Closable, Future, Promise, Return, Throw}
 import java.net.{InetSocketAddress, SocketAddress}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
@@ -39,10 +39,10 @@ abstract class AbstractStreamingTest extends FunSuite {
 
   // We call write repeatedly for `streamChunks` to *be sure* to notice
   // transport failure.
-  def writeLots(writer: Writer, buf: Buf): Future[Unit] =
+  def writeLots(writer: Writer[Buf], buf: Buf): Future[Unit] =
     writer.write(buf) before writeLots(writer, buf)
 
-  class ClientCtx {
+  class ClientCtx(singletonPool: Boolean = false) {
     @volatile var shouldFail = true
     val failure = new Promise[Unit]
 
@@ -50,7 +50,7 @@ abstract class AbstractStreamingTest extends FunSuite {
     val client = connect(server.boundAddress, transport => {
       if (shouldFail) failure.ensure { transport.close() }
       transport
-    })
+    }, singletonPool = singletonPool)
 
     val buf = Buf.Utf8(".")
     val req = get("/")
@@ -64,10 +64,6 @@ abstract class AbstractStreamingTest extends FunSuite {
     shouldFail = false
     val req2 = get("abc")
     val res2 = client(req2)
-
-    // This is flaky. The assertion has been moved to the tests which use res2, and those have been
-    // marked as flaky.
-    //assert(!res2.isDefined)
 
     // Assert previously queued request is now processed, and not interrupted
     // midstream.
@@ -95,11 +91,11 @@ abstract class AbstractStreamingTest extends FunSuite {
     assertSecondRequestOk()
   })
 
-  test("client: response stream fails on read")(new ClientCtx {
-    assert(!res2.isDefined)
+  test("client: response stream fails on read")(new ClientCtx(singletonPool = true) {
+    assert(res2.poll == None)
     // Reader should be suspended in a reading state.
     val f = res.reader.read(1)
-    assert(!f.isDefined)
+    assert(f.poll == None)
 
     // Simulate network failure by closing the transport.
     failure.setDone()
@@ -146,8 +142,8 @@ abstract class AbstractStreamingTest extends FunSuite {
     await(closable.close())
   }
 
-  test("client: fail request writer")(new ClientCtx {
-    assert(!res2.isDefined)
+  test("client: fail request writer")(new ClientCtx(singletonPool = true) {
+    assert(res2.poll == None)
     val exc = new Exception
     req.writer.fail(exc)
 
@@ -156,8 +152,9 @@ abstract class AbstractStreamingTest extends FunSuite {
     assertSecondRequestOk()
   })
 
-  test("client: discard respond reader")(new ClientCtx {
-    assert(!res2.isDefined)
+  if (!sys.props.contains("SKIP_FLAKY"))
+  test("client: discard respond reader")(new ClientCtx(singletonPool = true) {
+    assert(res2.poll == None)
     res.reader.discard()
     assertSecondRequestOk()
   })
@@ -167,7 +164,7 @@ abstract class AbstractStreamingTest extends FunSuite {
     val n = new AtomicInteger(0)
     val failure = new Promise[Unit]
     val readp = new Promise[Unit]
-    val writer = Reader.writable()
+    val writer = new Pipe[Buf]()
 
     val service = new Service[Request, Response] {
       def apply(req: Request) = n.getAndIncrement() match {
@@ -175,7 +172,7 @@ abstract class AbstractStreamingTest extends FunSuite {
           req.reader.read(1).unit proxyTo readp
           Future.value(ok(writer))
         case _ =>
-          val writer = Reader.writable()
+          val writer = new Pipe[Buf]()
           failure.ensure { writer.write(buf) ensure writer.close() }
           Future.value(ok(writer))
       }
@@ -215,7 +212,7 @@ abstract class AbstractStreamingTest extends FunSuite {
     val n = new AtomicInteger(0)
     val failure = new Promise[Unit]
     val readp = new Promise[Unit]
-    val writer = Reader.writable()
+    val writer = new Pipe[Buf]()
     val writep = new Promise[Unit]
     failure.before(writeLots(writer, buf)).proxyTo(writep)
 
@@ -225,7 +222,7 @@ abstract class AbstractStreamingTest extends FunSuite {
           writep.ensure { req.reader.read(1).unit.proxyTo(readp) }
           Future.value(ok(writer))
         case _ =>
-          val writer = Reader.writable()
+          val writer = new Pipe[Buf]()
           failure.ensure { writer.write(buf).ensure { writer.close() } }
           Future.value(ok(writer))
       }
@@ -259,7 +256,7 @@ abstract class AbstractStreamingTest extends FunSuite {
     Closable.all(server, client1, client2, closable).close()
   }
 
-  test("server: fail response writer") {
+    test("server: fail response writer") {
     val buf = Buf.Utf8(".")
     val n = new AtomicInteger(0)
     val failure = new Promise[Unit]
@@ -267,11 +264,11 @@ abstract class AbstractStreamingTest extends FunSuite {
     val service = new Service[Request, Response] {
       def apply(req: Request) = n.getAndIncrement() match {
         case 0 =>
-          val writer = Reader.writable()
+          val writer = new Pipe[Buf]()
           failure.ensure { writer.fail(new Exception) }
           Future.value(ok(writer))
         case _ =>
-          val writer = Reader.writable()
+          val writer = new Pipe[Buf]()
           failure.ensure { writer.write(buf) ensure writer.close() }
           Future.value(ok(writer))
       }
@@ -307,14 +304,14 @@ abstract class AbstractStreamingTest extends FunSuite {
     val service = new Service[Request, Response] {
       def apply(req: Request) = n.getAndIncrement() match {
         case 0 =>
-          val writer = Reader.writable()
+          val writer = new Pipe[Buf]()
           failure.ensure {
             req.reader.discard()
             writer.write(buf).ensure { writer.close() }
           }
           Future.value(ok(writer))
         case _ =>
-          val writer = Reader.writable()
+          val writer = new Pipe[Buf]()
           failure.ensure { writer.write(buf). ensure { writer.close() } }
           Future.value(ok(writer))
       }
@@ -374,7 +371,7 @@ abstract class AbstractStreamingTest extends FunSuite {
 
     val server = startServer(svc, identity)
 
-    val writer = Reader.writable()
+    val writer = new Pipe[Buf]()
     val req = Request(Version.Http11, Method.Post, "/foo", writer)
     req.headerMap.put("Content-Length", "5")
     req.setChunked(true)
@@ -389,7 +386,7 @@ abstract class AbstractStreamingTest extends FunSuite {
 
   test("end-to-end: client may process multiple streaming requests simultaneously") {
     val service = Service.mk[Request, Response] { req =>
-      val writable = Reader.writable() // never gets closed
+      val writable = new Pipe[Buf]() // never gets closed
       Future.value(Response(req.version, Status.Ok, writable))
     }
     val server = startServer(service, identity)
@@ -423,10 +420,13 @@ abstract class AbstractStreamingTest extends FunSuite {
   def connect(
     addr: SocketAddress,
     mod: Modifier,
-    name: String = "client"
+    name: String = "client",
+    singletonPool: Boolean = false
   ): Service[Request, Response] = {
+    val poolSize = if (singletonPool) 1 else Int.MaxValue
     val modifiedImpl = impl.copy(transporter = modifiedTransporterFn(mod, impl.transporter))
     configureClient(FinagleHttp.client)
+      .withSessionPool.maxSize(poolSize)
       .withStreaming(true)
       .configured(modifiedImpl)
       .newService(Name.bound(Address(addr.asInstanceOf[InetSocketAddress])), name)
@@ -465,13 +465,13 @@ object StreamingTest {
 
   def const(bufs: Seq[Buf]): Service[Request, Response] =
     new Service[Request, Response] {
-      private def drain(writer: Writer, bs: Seq[Buf]): Future[Unit] = bs match {
+      private def drain(writer: Writer[Buf], bs: Seq[Buf]): Future[Unit] = bs match {
         case Nil => Future.Done
         case head +: tail => writer.write(head).before(drain(writer, tail))
       }
 
       def apply(req: Request) = {
-        val writer = Reader.writable()
+        val writer = new Pipe[Buf]()
         drain(writer, bufs).before(writer.close)
         Future.value(ok(writer))
       }
@@ -485,7 +485,7 @@ object StreamingTest {
     req
   }
 
-  def ok(readerIn: Reader) = {
+  def ok(readerIn: Reader[Buf]) = {
     val res = Response(Version.Http11, Status.Ok, readerIn)
     res.headerMap.set("Connection", "close")
     res

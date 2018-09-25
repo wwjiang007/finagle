@@ -2,7 +2,7 @@ package com.twitter.finagle.service
 
 import com.twitter.conversions.time._
 import com.twitter.finagle.stats.InMemoryStatsReceiver
-import com.twitter.finagle.{Failure, Service}
+import com.twitter.finagle.{Failure, FailureFlags, Service}
 import com.twitter.util.{Await, Promise, Future}
 import org.junit.runner.RunWith
 import org.scalatest.FunSuite
@@ -16,7 +16,9 @@ class PendingRequestFilterTest extends FunSuite with OneInstancePerTest {
     p
   }
   val sr = new InMemoryStatsReceiver
-  val filteredSvc = new PendingRequestFilter(3, sr).andThen(svc)
+  val filteredSvc = new PendingRequestFilter(
+    3, sr, PendingRequestFilter.PendingRequestsLimitExceeded
+  ).andThen(svc)
 
   test("it rejects excessive requests with restartable failures") {
     val (p1, p2, p3) = (new Promise[Unit], new Promise[Unit], new Promise[Unit])
@@ -30,7 +32,7 @@ class PendingRequestFilterTest extends FunSuite with OneInstancePerTest {
       Await.result(filteredSvc(Future.Done), 3.seconds)
     }
 
-    assert(rejected.isFlagged(Failure.Restartable))
+    assert(rejected.isFlagged(FailureFlags.Retryable))
 
     // one pending request is satisfied
     p1.setDone()
@@ -50,7 +52,7 @@ class PendingRequestFilterTest extends FunSuite with OneInstancePerTest {
     filteredSvc(p2)
     filteredSvc(p3)
 
-    assert(sr.counters.get(Seq("rejected")) == None)
+    assert(sr.counters(Seq("rejected")) == 0)
 
     intercept[Failure] {
       Await.result(filteredSvc(Future.Done), 3.seconds)
