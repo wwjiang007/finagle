@@ -1,10 +1,12 @@
 package com.twitter.finagle.param
 
+import com.twitter.finagle.filter.OffloadFilter
 import com.twitter.finagle.service.TimeoutFilter
-import com.twitter.finagle.{service, stats, tracing, Stack}
+import com.twitter.finagle.{Stack, service, stats, tracing}
 import com.twitter.util
-import com.twitter.util.Duration
+import com.twitter.util.{Duration, FuturePool}
 import com.twitter.util.tunable.Tunable
+import java.util.concurrent.ExecutorService
 
 /**
  * A collection of methods for configuring common parameters (labels, stats receivers, etc)
@@ -23,6 +25,30 @@ trait CommonParams[A <: Stack.Parameterized[A]] { self: Stack.Parameterized[A] =
   def withLabel(label: String): A =
     self.configured(Label(label))
 
+  /*
+   * Configures this server or client with a set of `tags` (default: empty set).
+   *
+   * Tags associate Finagle clients and servers with a set of keywords. Labels
+   * are simply Tags with a single keyword.
+   *
+   * Tags provide a general purpose configuration mechanism for functionality
+   * that is not yet known. This is powerful, but also easily misused. As such,
+   * be conservative in using them.
+   *
+   * Frameworks that create services for each endpoint should tag them with
+   * endpoint metadata, e.g.,
+   *
+   * {{{
+   * val showPost = Http.server.withLabels("GET", "/posts/show")
+   * val createPost = Http.server.withLabels("POST", "PUT", "/posts/create")
+   * }}}
+   *
+   * Note: Tags can't be used in place of Label (at least not quite yet). Label
+   * will appear in metrics, but Tags do not.
+   */
+  def withLabels(keywords: String*): A =
+    self.configured(Tags(keywords: _*))
+
   /**
    * Configures this server or client with given [[stats.StatsReceiver]]
    * (default: [[stats.DefaultStatsReceiver]]).
@@ -33,6 +59,41 @@ trait CommonParams[A <: Stack.Parameterized[A]] { self: Stack.Parameterized[A] =
   /**
    * Configures this server or client with given [[util.Monitor]]
    * (default: [[com.twitter.finagle.util.DefaultMonitor]]).
+   *
+   * Monitors are Finagle's out-of-band exception reporters. Whenever an exception is thrown
+   * on a request path, it's reported to the monitor. The default monitor implementation,
+   * [[com.twitter.finagle.util.DefaultMonitor]], logs these exceptions.
+   *
+   * Monitors are wired into the server or client stacks via
+   * [[com.twitter.finagle.filter.MonitorFilter]] and are applied to the following kinds
+   * of exceptions:
+   *
+   *  - Synchronous exceptions thrown on request path, `Service.apply(request)`
+   *  - Asynchronous exceptions (failed futures) thrown on request path, `Service.apply(request)`
+   *  - Exceptions thrown from `respond`, `onSuccess`, `onFailure` future callbacks
+   *  - Fatal exceptions thrown from `map`, `flatMap`, `transform` future continuations
+   *
+   * Put it this way, we apply `Monitor.handle` to an exception if we would otherwise "lose" it,
+   * i.e. when it's not connected to the `Future`, nor is it connected to the call stack.
+   *
+   * You can compose multiple monitors if you want to extend or override the standard behavior,
+   * defined in `DefaultMonitor`.
+   *
+   * {{{
+   *   import com.twitter.util.Monitor
+   *
+   *   val consoleMonitor = new Monitor {
+   *     def handle(exc: Throwable): Boolean = {
+   *       Console.err.println(exc.toString)
+   *       false // continue handling with the next monitor (usually DefaultMonitor)
+   *      }
+   *   }
+   *
+   *   $.withMonitor(consoleMonitor)
+   * }}}
+   *
+   * Returning `true` form within a monitor effectively terminates the monitor chain so no
+   * exceptions are propagated down to the next monitor.
    */
   def withMonitor(monitor: util.Monitor): A =
     self.configured(Monitor(monitor))
@@ -40,6 +101,11 @@ trait CommonParams[A <: Stack.Parameterized[A]] { self: Stack.Parameterized[A] =
   /**
    * Configures this server or client with given [[tracing.Tracer]]
    * (default: [[com.twitter.finagle.tracing.DefaultTracer]]).
+   *
+   * @note if you supply [[com.twitter.finagle.tracing.NullTracer]], no trace
+   * information will be written, but this does not disable Finagle from
+   * propagating trace information.  Instead, if traces are being aggregated
+   * across your fleet, it will orphan subsequent spans.
    */
   def withTracer(tracer: tracing.Tracer): A =
     self.configured(Tracer(tracer))
@@ -134,4 +200,34 @@ trait CommonParams[A <: Stack.Parameterized[A]] { self: Stack.Parameterized[A] =
    */
   def withRequestTimeout(timeout: Tunable[Duration]): A =
     self.configured(TimeoutFilter.Param(timeout))
+
+  /**
+   * Configures this server or client to shift user-defined computation ([[com.twitter.util.Future]]
+   * callbacks and transformations) off of IO threads into a given [[FuturePool]].
+   *
+   * By default, Finagle executes all futures in the IO threads, minimizing context switches. Given
+   * there is usually a fixed number of IO threads shared across a JVM process, it's critically
+   * important to ensure they aren't being blocked by the application code, affecting system's
+   * responsiveness. Shifting application-level work onto a dedicated [[FuturePool]] or
+   * [[ExecutorService]] offloads IO threads, which may improve throughput in CPU-bound systems.
+   *
+   * As always, run your own tests before enabling this feature.
+   */
+  def withExecutionOffloaded(pool: FuturePool): A =
+    self.configured(OffloadFilter.Param(pool))
+
+  /**
+   * Configures this server or client to shift user-defined computation ([[com.twitter.util.Future]]
+   * callbacks and transformations) off of IO threads into a given [[ExecutorService]].
+   *
+   * By default, Finagle executes all futures in the IO threads, minimizing context switches. Given
+   * there is usually a fixed number of IO threads shared across a JVM process, it's critically
+   * important to ensure they aren't being blocked by the application code, affecting system's
+   * responsiveness. Shifting application-level work onto a dedicated [[FuturePool]] or
+   * [[ExecutorService]] offloads IO threads, which may improve throughput in CPU-bound systems.
+   *
+   * As always, run your own tests before enabling this feature.
+   */
+  def withExecutionOffloaded(executor: ExecutorService): A =
+    self.configured(OffloadFilter.Param(executor))
 }

@@ -14,8 +14,8 @@ class PoolingReadRepairClient(
   allClients: Seq[BaseClient[Buf]],
   readRepairProbability: Float,
   readRepairCount: Int = 1,
-  futurePool: FuturePool = new ExecutorServiceFuturePool(Executors.newCachedThreadPool())
-) extends Client {
+  futurePool: FuturePool = new ExecutorServiceFuturePool(Executors.newCachedThreadPool()))
+    extends Client {
 
   val rand = new Random()
 
@@ -51,9 +51,7 @@ class PoolingReadRepairClient(
         // Read-repair clients that had partial values
         results.zip(clients).map { tuple =>
           val missing = canon.hits -- tuple._1.hits.keys
-          missing.map { hit =>
-            set(hit._1, hit._2.value)
-          }
+          missing.map { hit => set(hit._1, hit._2.value) }
         }
       }
 

@@ -5,7 +5,7 @@
 // you may not use this work except in compliance with the License.
 // You may obtain a copy of the License in the LICENSE file, or at:
 //
-//  http://www.apache.org/licenses/LICENSE-2.0
+//  https://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,8 @@
 // =================================================================================================
 
 namespace java com.twitter.thrift
+#@namespace scala com.twitter.thrift.endpoint.thriftscala
+namespace py gen.twitter.thrift.endpoint
 
 /*
  * Represents the status of a service.
@@ -103,4 +105,9 @@ struct ServiceInstance {
    * The shard identifier for this instance.
    */
   4: optional i32 shard;
+
+  /*
+   * Metadata associated with this service instance.
+   */
+  5: optional map<string, string> metadata;
 }

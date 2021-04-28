@@ -1,8 +1,8 @@
 package com.twitter.finagle.mux.lease.exp
 
-import com.twitter.conversions.percent._
-import com.twitter.conversions.storage._
-import com.twitter.conversions.time._
+import com.twitter.conversions.PercentOps._
+import com.twitter.conversions.StorageUnitOps._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.util.{DefaultTimer, WindowedPercentileHistogram}
 import com.twitter.util.{Duration, Stopwatch, StorageUnit, Time, Timer}
 
@@ -25,8 +25,7 @@ private[lease] class RequestSnooper(
   percentile: Int,
   lr: LogsReceiver = NullLogsReceiver,
   now: () => Long = Stopwatch.systemMillis,
-  timer: Timer = DefaultTimer
-) {
+  timer: Timer = DefaultTimer) {
   import RequestSnooper._
 
   private[this] val histogram = new WindowedPercentileHistogram(

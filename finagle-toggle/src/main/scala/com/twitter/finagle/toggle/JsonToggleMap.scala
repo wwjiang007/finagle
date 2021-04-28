@@ -8,15 +8,15 @@ import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.twitter.util.Try
 import java.net.URL
 import scala.collection.mutable
-import scala.collection.{breakOut, immutable}
+import scala.collection.immutable
 
 /**
  * [[ToggleMap ToggleMaps]] in JSON format.
  *
- * @define jsonschema The [[http://json-schema.org/ JSON Schema]] used is:
+ * @define jsonschema The [[https://json-schema.org/ JSON Schema]] used is:
  * {{{
  * {
- *   "\$schema": "http://json-schema.org/draft-04/schema#",
+ *   "\$schema": "https://json-schema.org/draft-04/schema#",
  *   "type": "object",
  *   "required": [
  *     "toggles"
@@ -108,15 +108,11 @@ object JsonToggleMap {
     @JsonProperty(required = true) id: String,
     @JsonProperty(required = true) fraction: Double,
     description: Option[String],
-    comment: Option[String]
-  )
+    comment: Option[String])
 
   private[this] case class JsonToggles(@JsonProperty(required = true) toggles: Seq[JsonToggle]) {
 
-    def toToggleMap(
-      source: String,
-      descriptionMode: DescriptionMode
-    ): ToggleMap = {
+    def toToggleMap(source: String, descriptionMode: DescriptionMode): ToggleMap = {
       val invalid = toggles.find { md =>
         descriptionMode match {
           case DescriptionRequired => md.description.isEmpty
@@ -136,7 +132,7 @@ object JsonToggleMap {
             case DescriptionIgnored => None
           }
           Toggle.Metadata(jsonToggle.id, jsonToggle.fraction, description, source)
-        }(breakOut)
+        }.toList
 
       val ids = metadata.map(_.id)
       val uniqueIds = ids.distinct
@@ -185,8 +181,7 @@ object JsonToggleMap {
     id: String,
     fraction: Double,
     lastValue: Option[Boolean],
-    description: Option[String]
-  )
+    description: Option[String])
 
   private val factory = new MappingJsonFactory()
   factory.disable(JsonFactory.Feature.USE_THREAD_LOCAL_FOR_BUFFER_RECYCLING)
@@ -196,17 +191,15 @@ object JsonToggleMap {
 
   private[this] def toLibraryToggles(toggleMap: ToggleMap): Seq[LibraryToggle] = {
     // create a map of id to metadata for faster lookups
-    val idToMetadata = toggleMap.iterator.map { md =>
-      md.id -> md
-    }.toMap
+    val idToMetadata = toggleMap.iterator.map { md => md.id -> md }.toMap
 
     // create a mapping of id to a seq of its components.
-    val idToComponents = mutable.Map.empty[String, mutable.ArrayBuffer[Component]]
+    val idToComponents = mutable.Map.empty[String, List[Component]]
     ToggleMap.components(toggleMap).foreach { tm =>
       tm.iterator.foreach { md =>
-        val components: mutable.ArrayBuffer[Component] =
-          idToComponents.getOrElse(md.id, mutable.ArrayBuffer.empty[Component])
-        idToComponents.put(md.id, components += Component(md.source, md.fraction))
+        val components: List[Component] =
+          idToComponents.getOrElse(md.id, List.empty[Component])
+        idToComponents.put(md.id, Component(md.source, md.fraction) :: components)
       }
     }
 

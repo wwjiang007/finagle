@@ -61,7 +61,7 @@ class ResolverAddressInvalid(addr: String)
  * 0-arg constructor must be registered in a file named
  * `META-INF/services/com.twitter.finagle.Resolver` included in the classpath; see
  * Oracle's
- * [[http://docs.oracle.com/javase/6/docs/api/java/util/ServiceLoader.html ServiceLoader]]
+ * [[https://docs.oracle.com/javase/6/docs/api/java/util/ServiceLoader.html ServiceLoader]]
  * documentation for further details.
  */
 trait Resolver {
@@ -90,13 +90,26 @@ object FailResolver extends Resolver {
 }
 
 private[finagle] abstract class BaseResolver(f: () => Seq[Resolver]) {
-  private[this] val inetResolver = InetResolver()
+  private[this] val log = Logger()
+  private[this] lazy val (inetResolvers, otherResolvers) = f().partition(_.scheme == "inet")
+  private[this] lazy val inetResolver = {
+    inetResolvers match {
+      case Seq(resolver) =>
+        log.info(s"Using service loaded inet resolver $resolver")
+        resolver
+      case Seq() =>
+        log.info(s"Using default inet resolver")
+        InetResolver()
+      case dups =>
+        log.warning(s"Multiple service loaded inet resolvers found: $dups")
+        throw new MultipleResolversPerSchemeException(dups.groupBy(_.scheme))
+    }
+  }
   private[this] val fixedInetResolver = FixedInetResolver()
 
   private[this] lazy val resolvers = {
-    val rs = f()
-    val log = Logger()
-    val resolvers = Seq(inetResolver, fixedInetResolver, NegResolver, NilResolver, FailResolver) ++ rs
+    val resolvers =
+      Seq(inetResolver, fixedInetResolver, NegResolver, NilResolver, FailResolver) ++ otherResolvers
 
     val dups = resolvers
       .groupBy(_.scheme)

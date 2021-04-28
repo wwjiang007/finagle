@@ -6,14 +6,24 @@ import com.twitter.util.{Future, Throw}
 object TraceInitializerFilter {
   val role: Stack.Role = Stack.Role("TraceInitializerFilter")
 
+  /**
+   * @param newId Set the next TraceId when the tracer is pushed, `true` for clients.
+   */
+  private[finagle] def apply[Req, Rep](tracer: Tracer, newId: Boolean): Filter[Req, Rep, Req, Rep] =
+    new TraceInitializerFilter[Req, Rep](tracer, newId)
+
+  private[finagle] def typeAgnostic(tracer: Tracer, newId: Boolean): Filter.TypeAgnostic =
+    new Filter.TypeAgnostic {
+      def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = apply(tracer, newId)
+    }
+
   private[finagle] class Module[Req, Rep](newId: Boolean)
       extends Stack.Module1[param.Tracer, ServiceFactory[Req, Rep]] {
     def this() = this(true)
     val role: Stack.Role = TraceInitializerFilter.role
     val description = "Initialize the tracing system"
     def make(_tracer: param.Tracer, next: ServiceFactory[Req, Rep]): ServiceFactory[Req, Rep] = {
-      val param.Tracer(tracer) = _tracer
-      new TraceInitializerFilter[Req, Rep](tracer, newId).andThen(next)
+      apply(_tracer.tracer, newId).andThen(next)
     }
   }
 
@@ -53,9 +63,11 @@ class TraceInitializerFilter[Req, Rep](tracer: Tracer, newId: Boolean)
     extends SimpleFilter[Req, Rep] {
   def apply(request: Req, service: Service[Req, Rep]): Future[Rep] =
     if (tracer.isNull) {
-      if (newId) Trace.letId(Trace.nextId) { service(request) } else service(request)
+      if (newId) Trace.letId(Trace.nextId) { service(request) }
+      else service(request)
     } else {
-      if (newId) Trace.letTracerAndNextId(tracer) { service(request) } else
+      if (newId) Trace.letTracerAndNextId(tracer) { service(request) }
+      else
         Trace.letTracer(tracer) { service(request) }
     }
 }
@@ -83,8 +95,8 @@ sealed class AnnotatingTracingFilter[Req, Rep](
   after: Annotation,
   afterFailure: String => Annotation,
   finagleVersion: () => String = () => Init.finagleVersion,
-  traceMetaData: Boolean = true
-) extends SimpleFilter[Req, Rep] {
+  traceMetadata: Boolean = true)
+    extends SimpleFilter[Req, Rep] {
   def this(
     label: String,
     before: Annotation,
@@ -99,12 +111,17 @@ sealed class AnnotatingTracingFilter[Req, Rep](
 
   private[this] val finagleVersionKey = s"$prefix/finagle.version"
   private[this] val dtabLocalKey = s"$prefix/dtab.local"
+  private[this] val labelKey = s"$prefix/finagle.label"
 
   def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = {
     val trace = Trace()
     if (trace.isActivelyTracing) {
-      if (traceMetaData) {
-        trace.recordServiceName(label)
+      if (traceMetadata) {
+        trace.recordServiceName(TraceServiceName() match {
+          case Some(l) => l
+          case None => label
+        })
+        trace.recordBinary(labelKey, label)
         trace.recordBinary(finagleVersionKey, finagleVersion())
         // Trace dtab propagation on all requests that have them.
         if (Dtab.local.nonEmpty) {
@@ -141,14 +158,15 @@ object ServerTracingFilter {
 
   case class TracingFilter[Req, Rep](
     label: String,
-    finagleVersion: () => String = () => Init.finagleVersion
-  ) extends AnnotatingTracingFilter[Req, Rep](
+    finagleVersion: () => String = () => Init.finagleVersion)
+      extends AnnotatingTracingFilter[Req, Rep](
         label,
         "srv",
         Annotation.ServerRecv,
         Annotation.ServerSend,
         Annotation.ServerSendError(_),
-        finagleVersion
+        finagleVersion,
+        traceMetadata = false
       )
 
   def module[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
@@ -178,8 +196,8 @@ object ClientTracingFilter {
 
   case class TracingFilter[Req, Rep](
     label: String,
-    finagleVersion: () => String = () => Init.finagleVersion
-  ) extends AnnotatingTracingFilter[Req, Rep](
+    finagleVersion: () => String = () => Init.finagleVersion)
+      extends AnnotatingTracingFilter[Req, Rep](
         label,
         "clnt",
         Annotation.ClientSend,
@@ -210,23 +228,32 @@ object ClientTracingFilter {
 /**
  * Annotate the request events directly before/after sending data on the wire (WireSend, WireRecv)
  */
-private[finagle] object WireTracingFilter {
-  val role = Stack.Role("WireTracingFilter")
+object WireTracingFilter {
+  private[finagle] val role = Stack.Role("WireTracingFilter")
 
   case class TracingFilter[Req, Rep](
     label: String,
-    finagleVersion: () => String = () => Init.finagleVersion
-  ) extends AnnotatingTracingFilter[Req, Rep](
+    prefix: String,
+    before: Annotation,
+    after: Annotation,
+    traceMetadata: Boolean,
+    finagleVersion: () => String = () => Init.finagleVersion)
+      extends AnnotatingTracingFilter[Req, Rep](
         label,
-        "clnt",
-        Annotation.WireSend,
-        Annotation.WireRecv,
+        prefix,
+        before,
+        after,
         Annotation.WireRecvError(_),
         finagleVersion,
-        false
+        traceMetadata
       )
 
-  def module[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
+  private def module[Req, Rep](
+    prefix: String,
+    before: Annotation,
+    after: Annotation,
+    traceMetadata: Boolean
+  ): Stackable[ServiceFactory[Req, Rep]] =
     new Stack.Module2[param.Label, param.Tracer, ServiceFactory[Req, Rep]] {
       val role: Stack.Role = WireTracingFilter.role
       val description = "Report finagle information and wire send/recv events"
@@ -239,8 +266,35 @@ private[finagle] object WireTracingFilter {
         if (tracer.isNull) next
         else {
           val param.Label(label) = _label
-          TracingFilter[Req, Rep](label).andThen(next)
+          TracingFilter[Req, Rep](label, prefix, before, after, traceMetadata).andThen(next)
         }
       }
     }
+
+  private[finagle] def clientModule[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] = module(
+    "clnt",
+    Annotation.WireSend,
+    Annotation.WireRecv,
+    traceMetadata = false
+  )
+
+  private[finagle] def serverModule[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] = module(
+    "srv",
+    Annotation.WireRecv,
+    Annotation.WireSend,
+    traceMetadata = true
+  )
+}
+
+/**
+ * A filter to clear tracing information
+ */
+class TracelessFilter extends Filter.TypeAgnostic {
+  override def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = new SimpleFilter[Req, Rep] {
+    def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = {
+      Trace.letClear {
+        service(request)
+      }
+    }
+  }
 }

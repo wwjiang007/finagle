@@ -1,10 +1,11 @@
 package com.twitter.finagle.mysql
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.ScalaObjectMapper
 import com.twitter.finagle.mysql.transport.MysqlBuf
 import com.twitter.util.TwitterDateFormat
 import java.sql.{Date, Timestamp}
 import java.text.ParsePosition
-import java.util.logging.Logger
 import java.util.{Calendar, TimeZone}
 
 /**
@@ -29,16 +30,11 @@ case object NullValue extends Value
  * bytes.
  *
  * @param typ The MySQL [[Type type]] code for this value.
- * @param charset The [[Charset charset]] encoding of the bytes.
+ * @param charset The [[MysqlCharset charset]] encoding of the bytes.
  * @param isBinary Disambiguates between the text and binary protocol.
  * @param bytes The raw bytes for this value.
  */
-case class RawValue(
-  typ: Short,
-  charset: Short,
-  isBinary: Boolean,
-  bytes: Array[Byte]
-) extends Value
+case class RawValue(typ: Short, charset: Short, isBinary: Boolean, bytes: Array[Byte]) extends Value
 
 /**
  * A type class used for injecting values of a domain type `A` into
@@ -85,7 +81,7 @@ class TimestampValue(val injectionTimeZone: TimeZone, val extractionTimeZone: Ti
     bw.writeByte(cal.get(Calendar.MINUTE))
     bw.writeByte(cal.get(Calendar.SECOND))
     bw.writeIntLE(ts.getNanos / 1000) // sub-second part is written as microseconds
-    RawValue(Type.Timestamp, Charset.Binary, isBinary = true, bytes)
+    RawValue(Type.Timestamp, MysqlCharset.Binary, isBinary = true, bytes)
   }
 
   /**
@@ -108,7 +104,6 @@ object TimestampValue
       TimeZone.getTimeZone("UTC"),
       TimeZone.getTimeZone("UTC")
     ) {
-  private[this] val log = Logger.getLogger("finagle-mysql")
 
   private[mysql] def isTimestamp(value: Value): Boolean =
     value match {
@@ -124,7 +119,7 @@ object TimestampValue
     value match {
       case raw: RawValue if isTimestamp(raw) =>
         val timestamp = if (!raw.isBinary) {
-          val str = new String(raw.bytes, Charset(raw.charset))
+          val str = new String(raw.bytes, MysqlCharset(raw.charset))
           fromString(str, timeZone)
         } else {
           fromBytes(raw.bytes, timeZone)
@@ -262,19 +257,19 @@ object DateValue extends Injectable[Date] with Extractable[Date] {
     bw.writeShortLE(cal.get(Calendar.YEAR))
     bw.writeByte(cal.get(Calendar.MONTH) + 1) // increment 0 indexed month
     bw.writeByte(cal.get(Calendar.DATE))
-    RawValue(Type.Date, Charset.Binary, true, bytes)
+    RawValue(Type.Date, MysqlCharset.Binary, true, bytes)
   }
 
   /**
    * Value extractor for java.sql.Date
    */
   def unapply(v: Value): Option[Date] = v match {
-    case RawValue(Type.Date, Charset.Binary, false, bytes) =>
-      val str = new String(bytes, Charset(Charset.Binary))
+    case RawValue(Type.Date, charset, false, bytes) =>
+      val str = new String(bytes, MysqlCharset(charset))
       if (str == Zero.toString) Some(Zero)
       else Some(Date.valueOf(str))
 
-    case RawValue(Type.Date, Charset.Binary, true, bytes) =>
+    case RawValue(Type.Date, MysqlCharset.Binary, true, bytes) =>
       Some(fromBytes(bytes))
     case _ => None
   }
@@ -322,13 +317,24 @@ object DateValue extends Injectable[Date] with Extractable[Date] {
 
 object BigDecimalValue extends Injectable[BigDecimal] with Extractable[BigDecimal] {
   def apply(b: BigDecimal): Value = {
-    val str = b.toString.getBytes(Charset(Charset.Binary))
-    RawValue(Type.NewDecimal, Charset.Binary, true, str)
+    val str = b.toString.getBytes(MysqlCharset(MysqlCharset.Binary))
+    RawValue(Type.NewDecimal, MysqlCharset.Binary, true, str)
   }
 
   def unapply(v: Value): Option[BigDecimal] = v match {
-    case RawValue(Type.NewDecimal, Charset.Binary, _, bytes) =>
-      Some(BigDecimal(new String(bytes, Charset(Charset.Binary))))
+    case RawValue(Type.NewDecimal, MysqlCharset.Binary, _, bytes) =>
+      Some(BigDecimal(new String(bytes, MysqlCharset(MysqlCharset.Binary))))
     case _ => None
+  }
+}
+
+object JsonValue {
+  type Serializer = ObjectMapper with ScalaObjectMapper
+
+  private[mysql] def fromValue(value: Value): Option[Array[Byte]] = {
+    value match {
+      case RawValue(Type.Json, _, _, bytes) => Some(bytes)
+      case _ => None
+    }
   }
 }

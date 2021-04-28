@@ -8,11 +8,8 @@ import java.io.File
 import java.net.InetSocketAddress
 import java.security.KeyStore
 import javax.net.ssl.{KeyManagerFactory, TrustManagerFactory}
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class Netty4ClientEngineFactoryTest extends FunSuite {
 
   private[this] val address: Address = Address(new InetSocketAddress("localhost", 12345))
@@ -68,7 +65,37 @@ class Netty4ClientEngineFactoryTest extends FunSuite {
     val config = SslClientConfiguration(keyCredentials = keyCredentials)
 
     intercept[SslConfigurationException] {
-      val engine = factory(address, config)
+      factory(address, config)
+    }
+  }
+
+  test("config with good cert chain and key credentials succeeds") {
+    val tempCertFile = TempFile.fromResourcePath("/ssl/certs/svc-test-client-full-chain.cert.pem")
+    // deleteOnExit is handled by TempFile
+
+    val tempKeyFile = TempFile.fromResourcePath("/ssl/keys/svc-test-client-pkcs8.key.pem")
+    // deleteOnExit is handled by TempFile
+
+    val keyCredentials = KeyCredentials.CertsAndKey(tempCertFile, tempKeyFile)
+    val config = SslClientConfiguration(keyCredentials = keyCredentials)
+    val engine = factory(address, config)
+    val sslEngine = engine.self
+
+    assert(sslEngine != null)
+  }
+
+  test("config with bad cert chain or key credential fails") {
+    val tempCertFile = File.createTempFile("test", "crt")
+    tempCertFile.deleteOnExit()
+
+    val tempKeyFile = TempFile.fromResourcePath("/ssl/keys/svc-test-client-pkcs8.key.pem")
+    // deleteOnExit is handled by TempFile
+
+    val keyCredentials = KeyCredentials.CertsAndKey(tempCertFile, tempKeyFile)
+    val config = SslClientConfiguration(keyCredentials = keyCredentials)
+
+    intercept[SslConfigurationException] {
+      factory(address, config)
     }
   }
 
@@ -128,7 +155,8 @@ class Netty4ClientEngineFactoryTest extends FunSuite {
   }
 
   test("config with TrustManagerFactory succeeds") {
-    val trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm)
+    val trustManagerFactory =
+      TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm)
     trustManagerFactory.init(null.asInstanceOf[KeyStore])
 
     val trustCredentials = TrustCredentials.TrustManagerFactory(trustManagerFactory)
@@ -159,12 +187,12 @@ class Netty4ClientEngineFactoryTest extends FunSuite {
     val config = SslClientConfiguration(trustCredentials = trustCredentials)
 
     intercept[IllegalArgumentException] {
-      val engine = factory(address, config)
+      factory(address, config)
     }
   }
 
   test("config with good cipher suites succeeds") {
-    val cipherSuites = CipherSuites.Enabled(Seq("TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384"))
+    val cipherSuites = CipherSuites.Enabled(Seq("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"))
     val config = SslClientConfiguration(cipherSuites = cipherSuites)
     val engine = factory(address, config)
     val sslEngine = engine.self
@@ -172,7 +200,7 @@ class Netty4ClientEngineFactoryTest extends FunSuite {
     assert(sslEngine != null)
     val enabled = sslEngine.getEnabledCipherSuites()
     assert(enabled.length == 1)
-    assert(enabled(0) == "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384")
+    assert(enabled(0) == "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256")
   }
 
   test("config with bad cipher suites fails") {
@@ -180,7 +208,7 @@ class Netty4ClientEngineFactoryTest extends FunSuite {
     val config = SslClientConfiguration(cipherSuites = cipherSuites)
 
     intercept[IllegalArgumentException] {
-      val engine = factory(address, config)
+      factory(address, config)
     }
   }
 
@@ -201,20 +229,7 @@ class Netty4ClientEngineFactoryTest extends FunSuite {
     val config = SslClientConfiguration(protocols = protocols)
 
     intercept[IllegalArgumentException] {
-      val engine = factory(address, config)
+      factory(address, config)
     }
   }
-
-  // application protocols are supported only by netty-tcnative, which is
-  // not tested via these tests.
-  test("config with any application protocols fails for JDK provider") {
-    // tests are run against the JDK provider which does not support NPN_AND_ALPN
-    val appProtocols = ApplicationProtocols.Supported(Seq("h2"))
-    val config = SslClientConfiguration(applicationProtocols = appProtocols)
-
-    intercept[RuntimeException] {
-      val engine = factory(address, config)
-    }
-  }
-
 }

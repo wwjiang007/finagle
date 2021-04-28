@@ -1,7 +1,7 @@
 package com.twitter.finagle.serverset2
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 private[serverset2] object IntObj {
@@ -41,16 +41,25 @@ private[serverset2] object DictObj {
   }
 }
 
+private[serverset2] object ExtractMetadata {
+  def unapply(o: Object): Option[Map[String, String]] = o match {
+    case m: java.util.Map[_, _] =>
+      val mm = m.asInstanceOf[java.util.Map[String, String]].asScala.toMap
+      Some(mm)
+    case _ => None
+  }
+}
+
 private[serverset2] object JsonDict {
   private[this] val m = new ObjectMapper
 
   def apply(json: String): (Object => Option[Object]) = {
-    val o = try m.readValue(json, classOf[java.util.Map[Object, Object]])
-    catch {
-      case NonFatal(_) => return Function.const(None)
-    }
+    val o =
+      try m.readValue(json, classOf[java.util.Map[Object, Object]])
+      catch {
+        case NonFatal(_) => return Function.const(None)
+      }
 
-    key =>
-      Option(o.get(key))
+    key => Option(o.get(key))
   }
 }

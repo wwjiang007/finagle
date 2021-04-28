@@ -1,26 +1,21 @@
 package com.twitter.finagle.client
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.param.HighResTimer
 import com.twitter.finagle.service.{Retries, RetryPolicy, TimeoutFilter}
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.util._
 import com.twitter.util.tunable.Tunable
-import org.junit.runner.RunWith
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.{FunSuite, Matchers}
 
-@RunWith(classOf[JUnitRunner])
 class DynamicTimeoutTest extends FunSuite with Matchers with Eventually with IntegrationPatience {
 
   private[this] val timer = new MockTimer()
 
   private def mkSvc(): Service[Int, Int] =
-    Service.mk { _ =>
-      Future.never
-    }
+    Service.mk { _ => Future.never }
 
   private val perReqStack: Stack[ServiceFactory[Int, Int]] = {
     val svc = mkSvc()
@@ -34,10 +29,7 @@ class DynamicTimeoutTest extends FunSuite with Matchers with Eventually with Int
 
   private val totalExn = classOf[GlobalRequestTimeoutException]
 
-  private def perReqParams(
-    timeout: Duration,
-    compensation: Duration
-  ): Stack.Params = {
+  private def perReqParams(timeout: Duration, compensation: Duration): Stack.Params = {
     Stack.Params.empty +
       TimeoutFilter.Param(timeout) +
       param.Timer(timer) +
@@ -45,10 +37,7 @@ class DynamicTimeoutTest extends FunSuite with Matchers with Eventually with Int
       param.Stats(NullStatsReceiver)
   }
 
-  private def perReqParams(
-    timeout: Tunable[Duration],
-    compensation: Duration
-  ): Stack.Params = {
+  private def perReqParams(timeout: Tunable[Duration], compensation: Duration): Stack.Params = {
     Stack.Params.empty +
       TimeoutFilter.Param(timeout) +
       param.Timer(timer) +
@@ -229,9 +218,11 @@ class DynamicTimeoutTest extends FunSuite with Matchers with Eventually with Int
     val stats = new InMemoryStatsReceiver()
 
     // 1 retry on a per-request timeout
-    val retryOnTimeout = RetryPolicy.tries[Try[Nothing]](2, {
-      case Throw(_: IndividualRequestTimeoutException) => true
-    })
+    val retryOnTimeout = RetryPolicy.tries[Try[Nothing]](
+      2,
+      {
+        case Throw(_: IndividualRequestTimeoutException) => true
+      })
 
     val params =
       totalParams(1500.millis) ++
@@ -240,9 +231,7 @@ class DynamicTimeoutTest extends FunSuite with Matchers with Eventually with Int
         Retries.Policy(retryOnTimeout) +
         param.Stats(stats)
 
-    val svrSvc = Service.mk { _: Int =>
-      new Promise[Int]()
-    }
+    val svrSvc = Service.mk { _: Int => new Promise[Int]() }
     val svcFactory = ServiceFactory.const(svrSvc)
 
     // build a stack with requests flowing top to bottom (though StackBuilder.push

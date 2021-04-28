@@ -4,7 +4,7 @@ import com.twitter.finagle.{CancelledRequestException, Failure}
 import com.twitter.finagle.context.{Contexts, RemoteInfo}
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.util.DefaultTimer
-import com.twitter.logging.Logger
+import com.twitter.logging.{Level, Logger}
 import com.twitter.util._
 import java.util.concurrent.atomic.AtomicReference
 
@@ -28,8 +28,8 @@ private[finagle] object GenStreamingSerialServerDispatcher {
  * allowing the implementor to furnish custom dispatchers & handlers.
  */
 private[finagle] abstract class GenStreamingSerialServerDispatcher[Req, Rep, In, Out](
-  trans: StreamTransport[In, Out]
-) extends Closable {
+  trans: StreamTransport[In, Out])
+    extends Closable {
 
   def this(trans: Transport[In, Out]) = this(new IdentityStreamTransport(trans))
 
@@ -73,17 +73,15 @@ private[finagle] abstract class GenStreamingSerialServerDispatcher[Req, Rep, In,
     case Multi(req, eos) =>
       if (state.compareAndSet(Idle, Running)) {
         val save = Local.save()
-        val dispatched = try {
-          Contexts.local.let(RemoteInfo.Upstream.AddressCtx, trans.remoteAddress) {
-            trans.peerCertificate match {
-              case None => dispatch(req)
-              case Some(cert) =>
-                Contexts.local.let(Transport.peerCertCtx, cert) {
-                  dispatch(req)
-                }
-            }
-          }
-        } finally Local.restore(save)
+        val dispatched =
+          try {
+            Contexts.local.let(
+              RemoteInfo.Upstream.AddressCtx, // key 1
+              trans.context.remoteAddress, // value 1
+              Transport.sslSessionInfoCtx, // key 2
+              trans.context.sslSessionInfo // value 2
+            )(dispatch(req))
+          } finally Local.restore(save)
 
         val handled = dispatched.flatMap(handleFn)
 
@@ -115,10 +113,14 @@ private[finagle] abstract class GenStreamingSerialServerDispatcher[Req, Rep, In,
       // we need to close the transport.
       // Note: We don't sequence the transport.close() Future because we don't care to wait
       // for it and also don't want to clobber the result of the loop.
-      if (res.isThrow) {
-        logger.debug(res.throwable, s"closing $trans due to read error")
-      } else {
-        logger.debug(s"closing $trans due to status.cas failure,  state is ${state.get()}, expect Running")
+      if (logger.isLoggable(Level.TRACE)) {
+        if (res.isThrow) {
+          logger.trace(res.throwable, s"closing $trans due to read error")
+        } else {
+          logger.trace(
+            s"closing $trans due to status.cas failure,  state is ${state.get()}, expect Running"
+          )
+        }
       }
 
       trans.close()

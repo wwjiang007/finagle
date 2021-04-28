@@ -1,3 +1,6 @@
 resources(
-    sources = globs("*.sql"),
+    sources = [
+        "*.sql",
+        "auth/keys/*.pem",
+    ],
 )

@@ -4,12 +4,13 @@ import com.twitter.finagle.stats.{Counter, DefaultStatsReceiver, StatsReceiver}
 import com.twitter.logging.Logger
 import java.nio.{ByteBuffer, CharBuffer}
 import java.nio.charset.{CharsetEncoder, CoderResult, CodingErrorAction, StandardCharsets}
-import java.security.{PrivilegedExceptionAction, AccessController}
+import java.security.{AccessController, PrivilegedExceptionAction}
 import org.apache.thrift.protocol.{
+  TBinaryProtocol,
+  TCompactProtocol,
   TMultiplexedProtocol,
   TProtocol,
-  TProtocolFactory,
-  TBinaryProtocol
+  TProtocolFactory
 }
 import org.apache.thrift.transport.TTransport
 import scala.util.control.NonFatal
@@ -46,44 +47,52 @@ object Protocols {
 
   private val unsafe: Option[sun.misc.Unsafe] = Option(getUnsafe)
 
-  // JDK9 Strings are no longer backed by Array[Char] - http://openjdk.java.net/jeps/254
-  private val StringsBackedByCharArray = try {
-    // Versioning changes between 8 and 9 - http://openjdk.java.net/jeps/223
-    System.getProperty("java.specification.version").replace("1.", "").toInt < 9
-  } catch {
-    case _: Throwable => false
-  }
+  // JDK9 Strings are no longer backed by Array[Char] - https://openjdk.java.net/jeps/254
+  private val StringsBackedByCharArray =
+    try {
+      // Versioning changes between 8 and 9 - https://openjdk.java.net/jeps/223
+      System.getProperty("java.specification.version").replace("1.", "").toInt < 9
+    } catch {
+      case _: Throwable => false
+    }
 
-  /**
-   * The JVM property of size limit on the incoming Thrift message
-   */
-  private[thrift] val SysPropReadLength: Long =
-    System.getProperty("org.apache.thrift.readLength", "-1").toLong
+  private[thrift] def limitToOption(limit: Long): Option[Long] =
+    if (limit > NoLimit) Some(limit) else None
 
-  /**
-   * No size limit on the incoming Thrift message, value is -1
-   */
-  private[thrift] val NoReadLimit: Int = -1
-
-  private[this] def optimizedBinarySupported: Boolean = unsafe.isDefined && StringsBackedByCharArray
-
-  /**
-   * Returns a shorter read size limit when it is set both by system property and a method parameter
-   *
-   * @param readLength method parameter
-   */
-  private[thrift] def getReadLimit(readLength: Long): Long = {
-    val readLengthOption = if (readLength <= NoReadLimit) None else Some(readLength)
-    val sysPropReadLengthOption =
-      if (SysPropReadLength <= NoReadLimit) None else Some(SysPropReadLength)
-
-    (readLengthOption, sysPropReadLengthOption) match {
-      case (Some(validatedReadLength), Some(validatedSystemLength)) =>
-        validatedReadLength.min(validatedSystemLength)
-      case (validatedReadLength, validatedSystemLength) =>
-        validatedReadLength.orElse(validatedSystemLength).getOrElse(NoReadLimit)
+  private[thrift] def minLimit(a: Option[Long], b: Option[Long]): Option[Long] = {
+    (a, b) match {
+      case (Some(al), Some(bl)) => Some(al.min(bl))
+      case _ => a.orElse(b)
     }
   }
+
+  /**
+   * These JVM properties limit the max number of characters allowed in any one String
+   * or the max number of bytes in a binary found in a thrift object.
+   *
+   * The minimum value of the two is used, and only one needs to be specified.
+   * org.apache.thrift.readLength is supported for backwards compatibility.
+   */
+  private[thrift] val SysPropStringLengthLimit: Option[Long] = {
+    val stringLengthLimit =
+      limitToOption(System.getProperty("com.twitter.finagle.thrift.stringLengthLimit", "-1").toLong)
+    val readLimit = limitToOption(System.getProperty("org.apache.thrift.readLength", "-1").toLong)
+    minLimit(stringLengthLimit, readLimit)
+  }
+
+  /**
+   * This JVM property limits the max number of elements in a single collection in a thrift object.
+   */
+  private[thrift] val SysPropContainerLengthLimit: Option[Long] =
+    limitToOption(
+      System.getProperty("com.twitter.finagle.thrift.containerLengthLimit", "-1").toLong)
+
+  /**
+   * Represents no limit for the two limits above
+   */
+  private[thrift] val NoLimit: Long = -1
+
+  private[this] def optimizedBinarySupported: Boolean = unsafe.isDefined && StringsBackedByCharArray
 
   /**
    * Returns a `TProtocolFactory` that creates `TProtocol`s that
@@ -92,12 +101,22 @@ object Protocols {
   def binaryFactory(
     strictRead: Boolean = false,
     strictWrite: Boolean = true,
-    readLength: Long = -1,
+    stringLengthLimit: Long = NoLimit,
+    containerLengthLimit: Long = NoLimit,
     statsReceiver: StatsReceiver = DefaultStatsReceiver
   ): TProtocolFactory = {
-    val readLengthLimit: Long = getReadLimit(readLength)
+    val stringLengthLimitToUse: Long =
+      minLimit(limitToOption(stringLengthLimit), SysPropStringLengthLimit).getOrElse(NoLimit)
+
+    val containerLengthLimitToUse: Long =
+      minLimit(limitToOption(containerLengthLimit), SysPropContainerLengthLimit).getOrElse(NoLimit)
+
     if (!optimizedBinarySupported) {
-      new TBinaryProtocol.Factory(strictRead, strictWrite, readLengthLimit, NoReadLimit)
+      new TBinaryProtocol.Factory(
+        strictRead,
+        strictWrite,
+        stringLengthLimitToUse,
+        containerLengthLimitToUse)
     } else {
       // Factories are created rarely while the creation of their TProtocol's
       // is a common event. Minimize counter creation to just once per Factory.
@@ -107,14 +126,32 @@ object Protocols {
           new TFinagleBinaryProtocol(
             trans,
             largerThanTlOutBuffer,
-            readLengthLimit,
-            NoReadLimit,
+            stringLengthLimitToUse,
+            containerLengthLimitToUse,
             strictRead,
             strictWrite
           )
         }
       }
     }
+  }
+
+  /**
+   * Returns a `TProtocolFactory` that creates `TProtocol`s that
+   * are wire-compatible with `TCompactProtocol`.
+   */
+  def compactFactory(
+    stringLengthLimit: Long = NoLimit,
+    containerLengthLimit: Long = NoLimit
+  ): TProtocolFactory = {
+
+    val stringLengthLimitToUse: Long =
+      minLimit(limitToOption(stringLengthLimit), SysPropStringLengthLimit).getOrElse(NoLimit)
+
+    val containerLengthLimitToUse: Long =
+      minLimit(limitToOption(containerLengthLimit), SysPropContainerLengthLimit).getOrElse(NoLimit)
+
+    new TCompactProtocol.Factory(stringLengthLimitToUse, containerLengthLimitToUse)
   }
 
   def factory(statsReceiver: StatsReceiver = DefaultStatsReceiver): TProtocolFactory = {
@@ -131,6 +168,21 @@ object Protocols {
 
   // Visible for testing purposes.
   private[thrift] object TFinagleBinaryProtocol {
+
+    /**
+     * JDK 9 introduced a change in how Strings are stored.
+     * This is known as compact strings: https://openjdk.java.net/jeps/254
+     * With that change, the optimization below no longer works.
+     * A future effort could look into supporting something similar with compact strings.
+     */
+    val usesCompactStrings: Boolean = {
+      // minimum JDK version is 8.
+      // Java 8 has the format: 1.8.0_211
+      // Java 9 and higher has the format: 9.0.1, 11.0.4, 12, 12.0.1
+      val version = System.getProperty("java.version", "")
+      !version.startsWith("1.8")
+    }
+
     // zero-length strings are written to the wire as an i32 of its length, which is 0
     private val EmptyStringInBytes = Array[Byte](0, 0, 0, 0)
 
@@ -201,11 +253,11 @@ object Protocols {
   private[thrift] class TFinagleBinaryProtocol(
     trans: TTransport,
     largerThanTlOutBuffer: Counter,
-    stringLengthLimit: Long = -1,
-    containerLengthLimit: Long = -1,
-    strictRead: Boolean = false,
-    strictWrite: Boolean = true
-  ) extends TBinaryProtocol(
+    stringLengthLimit: Long,
+    containerLengthLimit: Long,
+    strictRead: Boolean,
+    strictWrite: Boolean)
+      extends TBinaryProtocol(
         trans,
         stringLengthLimit,
         containerLengthLimit,
@@ -214,13 +266,9 @@ object Protocols {
       ) {
     import TFinagleBinaryProtocol._
 
-    override def writeString(str: String): Unit = {
-      if (str.length == 0) {
-        trans.write(EmptyStringInBytes)
-        return
-      }
+    private[this] def writeNonCompactString(str: String): Unit = {
       // this is based on the CharsetEncoder code at:
-      // http://psy-lob-saw.blogspot.co.nz/2013/04/writing-java-micro-benchmarks-with-jmh.html
+      // https://psy-lob-saw.blogspot.co.nz/2013/04/writing-java-micro-benchmarks-with-jmh.html
       // we could probably do better than this via:
       // https://github.com/nitsanw/jmh-samples/blob/master/src/main/java/psy/lob/saw/utf8/CustomUtf8Encoder.java
       val u = unsafe.get
@@ -259,6 +307,19 @@ object Protocols {
 
       writeI32(out.position())
       trans.write(out.array(), 0, out.position())
+    }
+
+    override def writeString(str: String): Unit = {
+      if (str.length == 0) {
+        trans.write(EmptyStringInBytes)
+        return
+      }
+
+      if (usesCompactStrings) {
+        super.writeString(str)
+      } else {
+        writeNonCompactString(str)
+      }
     }
 
     // Note: libthrift 0.5.0 has a bug when operating on ByteBuffer's with a non-zero arrayOffset.

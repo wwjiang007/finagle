@@ -1,14 +1,13 @@
 package com.twitter.finagle
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Namer.AddrWeightKey
+import com.twitter.finagle.naming.namerMaxDepth
 import com.twitter.util._
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.{AssertionsForJUnit, JUnitRunner}
+import org.scalatestplus.junit.AssertionsForJUnit
 import scala.language.reflectiveCalls
 
-@RunWith(classOf[JUnitRunner])
 class NamerTest extends FunSuite with AssertionsForJUnit {
   trait Ctx {
     case class OrElse(fst: Namer, snd: Namer) extends Namer {
@@ -52,14 +51,10 @@ class NamerTest extends FunSuite with AssertionsForJUnit {
           case p @ Path.Utf8(elems @ _*) =>
             acts.get(p) match {
               case Some((a, _)) =>
-                a map { tree =>
-                  tree.map(Name(_))
-                }
+                a map { tree => tree.map(Name(_)) }
               case None =>
                 val (act, _) = addPath(p)
-                act map { tree =>
-                  tree.map(Name(_))
-                }
+                act map { tree => tree.map(Name(_)) }
             }
           case _ => Activity.value(NameTree.Neg)
         }
@@ -193,6 +188,39 @@ class NamerTest extends FunSuite with AssertionsForJUnit {
     }
   }
 
+  test("Namer.global: /$/fixedinet") {
+    Namer.global.lookup(Path.read("/$/fixedinet/1234")).sample() match {
+      case NameTree.Leaf(Name.Bound(addr)) =>
+        assert(addr.sample() == Addr.Bound(Set(Address(1234))))
+      case _ => fail()
+    }
+
+    Await.result(
+      Namer.global.lookup(Path.read("/$/fixedinet/127.0.0.1/1234")).values.toFuture(),
+      1.second
+    )() match {
+      case NameTree.Leaf(Name.Bound(addr)) =>
+        assert(
+          Await.result(addr.changes.filter(_ != Addr.Pending).toFuture(), 1.second)
+            == Addr.Bound(Set(Address("127.0.0.1", 1234)))
+        )
+      case _ => fail()
+    }
+
+    intercept[ClassNotFoundException] {
+      Namer.global.lookup(Path.read("/$/fixedinet")).sample()
+    }
+
+    Namer.global.lookup(Path.read("/$/fixedinet/1234/foobar")).sample() match {
+      case NameTree.Leaf(bound: Name.Bound) =>
+        assert(bound.addr.sample() == Addr.Bound(Address(1234)))
+        assert(bound.id == Path.Utf8("$", "fixedinet", "1234"))
+        assert(bound.path == Path.Utf8("foobar"))
+
+      case _ => fail()
+    }
+  }
+
   test("Namer.global: /$/fail") {
     assert(
       Namer.global.lookup(Path.read("/$/fail")).sample()
@@ -231,13 +259,13 @@ class NamerTest extends FunSuite with AssertionsForJUnit {
           case bound: Addr.Bound =>
             assert(bound.addrs.size == 1)
             bound.addrs.head match {
-              case exp.Address.ServiceFactory(sf, _) =>
+              case Address.ServiceFactory(sf, _) =>
                 val svc = Await.result(sf.asInstanceOf[ServiceFactory[Path, Path]](), 5.seconds)
                 val rsp = Await.result(svc(Path.Utf8("yodles")), 5.seconds)
                 assert(rsp == Path.Utf8("foo", "yodles"))
 
               case addr =>
-                fail(s"$addr not a exp.Address.ServiceFactory")
+                fail(s"$addr not a Address.ServiceFactory")
             }
           case x => throw new MatchError(x)
         }
@@ -255,14 +283,14 @@ class NamerTest extends FunSuite with AssertionsForJUnit {
           case bound: Addr.Bound =>
             assert(bound.addrs.size == 1)
             bound.addrs.head match {
-              case exp.Address.ServiceFactory(sf, _) =>
+              case Address.ServiceFactory(sf, _) =>
                 val svc = Await.result(sf.asInstanceOf[ServiceFactory[Int, Int]](), 5.seconds)
                 intercept[ClassCastException] {
                   val rsp = Await.result(svc(3), 5.seconds)
                 }
 
               case addr =>
-                fail(s"$addr not a exp.Address.ServiceFactory")
+                fail(s"$addr not a Address.ServiceFactory")
             }
           case x => throw new MatchError(x)
         }
@@ -288,6 +316,17 @@ class NamerTest extends FunSuite with AssertionsForJUnit {
       case _ => false
     })
   }
+
+  test("Namer.bind: max recursion level reached") {
+    namerMaxDepth.let(2) {
+      assert(Namer.resolve(Dtab.read("/s => /s/srv"), Path.read("/s/foo/bar")).sample() match {
+        case Addr.Failed(exception: Exception) =>
+          assert(exception.getMessage === "Max recursion level: 2 reached in Namer lookup")
+          true
+        case _ => false
+      })
+    }
+  }
 }
 
 class TestNamer extends Namer {
@@ -300,9 +339,7 @@ class TestNamer extends Namer {
 
 class PathServiceNamer extends ServiceNamer[Path, Path] {
   def lookupService(pfx: Path) = {
-    val svc = Service.mk[Path, Path] { req =>
-      Future.value(pfx ++ req)
-    }
+    val svc = Service.mk[Path, Path] { req => Future.value(pfx ++ req) }
     Some(svc)
   }
 }

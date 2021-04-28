@@ -1,6 +1,6 @@
 package com.twitter.finagle.tracing
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.builder.{ClientBuilder, ServerBuilder}
 import com.twitter.finagle.client.utils.StringClient
 import com.twitter.finagle.server.utils.StringServer
@@ -43,6 +43,8 @@ class DefaultTracingTest extends FunSuite with Eventually with IntegrationPatien
       Seq(
         Annotation.ServiceName("theClient"),
         Annotation.ClientSend,
+        Annotation.WireSend,
+        Annotation.WireRecv,
         Annotation.ClientRecv
       )
     )
@@ -55,8 +57,10 @@ class DefaultTracingTest extends FunSuite with Eventually with IntegrationPatien
         serverTracer.toSeq,
         Seq(
           Annotation.ServiceName("theServer"),
+          Annotation.WireRecv,
           Annotation.ServerRecv,
-          Annotation.ServerSend
+          Annotation.ServerSend,
+          Annotation.WireSend
         )
       )
     }
@@ -111,6 +115,53 @@ class DefaultTracingTest extends FunSuite with Eventually with IntegrationPatien
       }
 
       (client, finalizer)
+    }
+  }
+
+  test("TraceServiceName overrides local client/server names") {
+    val serverTracer = new BufferingTracer
+    val clientTracer = new BufferingTracer
+
+    def assertServiceNames(server: String, client: String): Unit = {
+      eventually(
+        assert(serverTracer.toSeq.map(_.annotation).contains(Annotation.ServiceName(server)))
+      )
+      assert(clientTracer.toSeq.map(_.annotation).contains(Annotation.ServiceName(client)))
+    }
+
+    val server = StringServer.server
+      .configured(fparam.Tracer(serverTracer))
+      .configured(fparam.Label("theServer"))
+      .serve("localhost:*", Svc)
+
+    val client = StringClient.client
+      .configured(fparam.Tracer(clientTracer))
+      .newService(
+        Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+        "theClient"
+      )
+
+    Await.result(client("foo"), 1.second)
+    assertServiceNames("theServer", "theClient")
+
+    val saved = TraceServiceName()
+    try {
+      TraceServiceName.set(Some("/p/fqn"))
+      Await.result(client("foo"), 1.second)
+
+      assertServiceNames("/p/fqn", "/p/fqn")
+      assert(
+        clientTracer.toSeq
+          .map(_.annotation).contains(
+            Annotation.BinaryAnnotation("clnt/finagle.label", "theClient")
+          )
+      )
+      assert(
+        serverTracer.toSeq
+          .map(_.annotation).contains(Annotation.BinaryAnnotation("srv/finagle.label", "theServer"))
+      )
+    } finally {
+      TraceServiceName.set(saved)
     }
   }
 }

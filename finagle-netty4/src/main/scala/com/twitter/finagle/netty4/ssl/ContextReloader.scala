@@ -1,6 +1,6 @@
 package com.twitter.finagle.netty4.ssl
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.logging.Logger
 import com.twitter.util._
 import io.netty.handler.ssl.SslContext
@@ -20,8 +20,8 @@ final private class ContextReloader(
   ctxFac: => SslContext,
   timer: Timer,
   reloadPeriod: Duration = 1.minute,
-  pool: FuturePool = FuturePool.unboundedPool
-) extends Closable {
+  pool: FuturePool = FuturePool.unboundedPool)
+    extends Closable {
   import ContextReloader.log
 
   // this evaluation of `ctxFac` could entail synchronous i/o happening on

@@ -16,8 +16,8 @@ final class Failure private[finagle] (
   val cause: Option[Throwable] = None,
   val flags: Long = FailureFlags.Empty,
   protected val sources: Map[Failure.Source.Value, Object] = Map.empty,
-  val logLevel: Level = Level.WARNING
-) extends Exception(why, cause.orNull)
+  val logLevel: Level = Level.WARNING)
+    extends Exception(why, cause.orNull)
     with NoStackTrace
     with HasLogLevel
     with FailureFlags[Failure] {
@@ -95,6 +95,7 @@ final class Failure private[finagle] (
 object Failure {
   object Source extends Enumeration {
     val
+
     /**
      * Represents the name of the service.
      * See [[com.twitter.finagle.filter.ExceptionSourceFilter]]
@@ -147,7 +148,6 @@ object Failure {
       "The request was Nacked by the server and should not be retried",
       FailureFlags.Rejected | FailureFlags.NonRetryable
     )
-
 
   /**
    * Create a new failure with the given cause and flags.
@@ -273,6 +273,10 @@ object Failure {
 
   /**
    * Create a new [[FailureFlags.Ignorable]] failure with the given message.
+   *
+   * @note `Ignorable` implies `NonRetryable`, but does not set the flag
+   *       explicitly. See [[com.twitter.finagle.service.ResponseClassifier]]
+   *       for how `Ignorable` is used.
    */
   def ignorable(why: String): Failure =
     new Failure(why, None, FailureFlags.Ignorable, logLevel = Level.TRACE)

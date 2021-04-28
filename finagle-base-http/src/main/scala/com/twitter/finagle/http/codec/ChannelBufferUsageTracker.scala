@@ -1,6 +1,6 @@
 package com.twitter.finagle.http.codec
 
-import com.twitter.conversions.storage._
+import com.twitter.conversions.StorageUnitOps._
 import com.twitter.finagle.ChannelBufferUsageException
 import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
 import com.twitter.util.StorageUnit
@@ -12,8 +12,7 @@ import com.twitter.util.StorageUnit
  */
 private[finagle] class ChannelBufferUsageTracker(
   limit: StorageUnit,
-  statsReceiver: StatsReceiver = NullStatsReceiver
-) {
+  statsReceiver: StatsReceiver = NullStatsReceiver) {
   private[this] object state {
     var currentUsage = 0L
     var maxUsage = 0L

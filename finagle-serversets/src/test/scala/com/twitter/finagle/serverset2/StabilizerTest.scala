@@ -1,7 +1,7 @@
 package com.twitter.finagle.serverset2
 
 import com.twitter.finagle.addr.WeightedAddress
-import com.twitter.finagle.serverset2.addr.ZkMetadata
+import com.twitter.finagle.partitioning.zk.ZkMetadata
 import com.twitter.finagle.{Addr, Address}
 import com.twitter.util._
 import java.net.{InetAddress, InetSocketAddress}
@@ -36,9 +36,9 @@ object StabilizerTest {
 
   // Note, weights are stored as metadata in the
   // original addrs.
-  def addr1w1: Address = WeightedAddress(addr1, 1D)
-  def addr1w2: Address = WeightedAddress(addr1, 2D)
-  def addr2w2: Address = WeightedAddress(addr2, 2D)
+  def addr1w1: Address = WeightedAddress(addr1, 1d)
+  def addr1w2: Address = WeightedAddress(addr1, 2d)
+  def addr2w2: Address = WeightedAddress(addr2, 2d)
 
   def shard1: Address = newAddress(1, Some(1))
   def shard2: Address = newAddress(2, Some(2))
@@ -104,7 +104,7 @@ class StabilizerTest extends FunSuite {
 
     // we are pinned to the last bound addr so long
     // as we don't receive anymore updates.
-    (0 to 10).foreach {  _ =>
+    (0 to 10).foreach { _ =>
       pulse()
       addrEquals(Addr.Bound(addr1, addr2, addr3))
     }
@@ -427,7 +427,7 @@ class StabilizerTest extends FunSuite {
     (1 to initShards.size).foreach { n =>
       var oldShards = currentShards
       val newShard = newAddress(initShards.size + n, Some(n))
-      currentShards = currentShards.filter(!_.equals(initShards(n-1))) ++ Seq(newShard)
+      currentShards = currentShards.filter(!_.equals(initShards(n - 1))) ++ Seq(newShard)
       va() = Addr.Bound(currentShards.toSet)
       addrEquals(Addr.Bound(oldShards.toSet))
       pulse()
@@ -447,7 +447,7 @@ class StabilizerTest extends FunSuite {
     var currentShards = initShards
     (1 to initShards.size).foreach { n =>
       val newShard = newAddress(initShards.size + n, Some(n))
-      currentShards = currentShards.filter(!_.equals(initShards(n-1))) ++ Seq(newShard)
+      currentShards = currentShards.filter(!_.equals(initShards(n - 1))) ++ Seq(newShard)
       va() = Addr.Bound(currentShards.toSet)
       addrEquals(Addr.Bound(initShards.toSet))
     }

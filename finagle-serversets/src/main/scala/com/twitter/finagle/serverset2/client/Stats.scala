@@ -11,7 +11,8 @@ private[serverset2] trait StatsClient extends ZooKeeperClient {
     lazy val success = stats.counter(s"${name}_successes")
 
     def apply[T](result: Future[T]): Future[T] = {
-      Stat.timeFuture(stats.stat("name_latency_ms"))(result)
+      Stat
+        .timeFuture(stats.stat("name_latency_ms"))(result)
         .respond {
           case Return(_) =>
             success.incr()
@@ -148,6 +149,7 @@ object SessionStats {
     timer: Timer
   ): Var[WatchState] = {
     import SessionState._
+    val closedCounter = statsReceiver.counter(Closed.name)
     val unknownCounter = statsReceiver.counter(Unknown.name)
     val authFailedCounter = statsReceiver.counter(AuthFailed.name)
     val disconnectedCounter = statsReceiver.counter(Disconnected.name)
@@ -166,6 +168,7 @@ object SessionStats {
             stateTracker.transition(newState)
 
             newState match {
+              case Closed => closedCounter.incr()
               case Unknown => unknownCounter.incr()
               case AuthFailed => authFailedCounter.incr()
               case Disconnected => disconnectedCounter.incr()

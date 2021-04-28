@@ -15,8 +15,18 @@ Twitter Server) or as JVM properties.
 Common
 ------
 
-**com.twitter.finagle.loadbalancer.defaultBalancer** `choice|heap|aperture`
-  The default load balancer used in clients (default: `choice`).
+**com.twitter.finagle.client.useNackAdmissionFilter** `bool`
+  A global on/off switch for client-side nack admission control (default: `true`,
+  which opts clients into using nack admission control). This controller is designed
+  to allow backends to recover when they overloaded. See
+  `com.twitter.finagle.filter.NackAdmissionFilter` for more details. This value can
+  also be set on per-client with `$Client.configured(NackAdmissionFilter.Param)`.
+
+**com.twitter.finagle.loadbalancer.defaultBalancer** `choice|heap|aperture|random_aperture`
+  The default load balancer used in clients (default: `choice`). `random_aperture` should only
+  be used in situations where subsetting is a firm requirement. An example of that is in a testing
+  situation where p2c behavior isn't acceptable. In other cases `aperture` will select between
+  random aperture and deterministic aperture when appropriate.
 
 **com.twitter.finagle.loadbalancer.perHostStats** `bool`
   Enable/disable per-host granularity for stats (default: `false`). When enabled,the configured stats
@@ -50,6 +60,22 @@ Common
 **com.twitter.finagle.util.defaultTimerSlowTaskLogMinInterval** `duration`
   Minimum interval between recording stack traces for slow tasks (default: `20.seconds`).
 
+**com.twitter.finagle.offload.numWorkers** `int`
+  Experimental flag. Enables the offload filter using a thread pool with the specified number of threads.
+  When this flag is greater than zero, the execution of application code happens in an isolated pool and the netty threads are used only to handle the network channels. This behavior changes the assumptions regarding the scheduling of tasks in finagle applications. Traditionally, the recommendation is to execute CPU-intensive tasks using a `FuturePool` but, when this flag is enabled, CPU-intensive tasks don't require a `FuturePool`. Important: Blocking tasks should still use a `FuturePool`.
+  It's important to review the allocation of thread pools when this flag is enabled otherwise the application might create too many threads, which leads to more GC pressure and increases the risk of CPU throttling.
+
+**com.twitter.finagle.offload.queueSize** `int`
+  Experimental flag. When offload filter is enabled, its queue is bounded by this value (default:
+  "unbounded" or `Int.MaxValue`) Any excess work that can't be offloaded due to the queue overflow
+  is run on IO (Netty) threads instead. Thus, when set, this flag enforces the backpressure on the
+  link between "Netty (producer) and your application (consumer).
+
+**com.twitter.finagle.offload.statsSampleInterval** `duration`
+  When offload filter is enabled, sample additional offload queue stats (`delays_ms`) at this
+  interval (default: `100.milliseconds`). Only finite and positive values are accepted, everything
+  else disables the stats.
+
 Netty 4
 -------
 
@@ -58,7 +84,7 @@ Netty 4
 
 **com.twitter.finagle.netty4.trackReferenceLeaks** `bool`
   Enable reference leak tracking in Netty 4 and export a counter at `finagle/netty4/reference_leaks`
-  (default: `true`).
+  (default: `false`).
 
 **com.twitter.finagle.netty4.timerTicksPerWheel** `int`
   Netty 4 timer ticks per wheel (default: `512`).
@@ -69,6 +95,9 @@ Netty 4
 **com.twitter.finagle.netty4.useNativeEpoll** `bool`
   When available, use Linux's native epoll transport directly instead of bouncing through JDK
   (default: `true`).
+
+**com.twitter.finagle.netty4.http.revalidateInboundHeaders** `bool`
+  Validate headers when converting from Netty to Finagle. (default: `false`).
 
 Stats
 -----
@@ -94,6 +123,11 @@ Stats
 
 **com.twitter.finagle.stats.includeEmptyHistograms** `bool`
   Include full histogram details when there are no data points (default: `false`).
+
+**com.twitter.finagle.stats.verbose** `string`
+  Comma-separated list of *-wildcard expressions to allowlist debug metrics that are not exported by
+  default (default: undefined). A tunable, `com.twitter.finagle.stats.verbose` has a higher priority
+  if defined.
 
 Http
 ----

@@ -1,23 +1,21 @@
 package com.twitter.finagle.http
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Service
 import com.twitter.finagle.tracing.{Flags, SpanId, Trace, TraceId}
 import com.twitter.util.{Await, Future}
-import org.junit.runner.RunWith
 import org.scalacheck.Gen
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 
-@RunWith(classOf[JUnitRunner])
-class TracingTest extends FunSuite with GeneratorDrivenPropertyChecks {
+class TracingTest extends FunSuite with ScalaCheckDrivenPropertyChecks {
 
   import HttpTracing.{Header, stripParameters}
 
   lazy val flags = Flags().setDebug
   lazy val traceId = TraceId(Some(SpanId(1)), None, SpanId(2), Some(true), flags)
-  lazy val traceId128Bit = TraceId(Some(SpanId(2L)), None, SpanId(2), Some(true), flags, Some(SpanId(1L)))
+  lazy val traceId128Bit =
+    TraceId(Some(SpanId(2L)), None, SpanId(2), Some(true), flags, Some(SpanId(1L)))
 
   test("set header") {
     Trace.letId(traceId) {
@@ -161,11 +159,9 @@ class TracingTest extends FunSuite with GeneratorDrivenPropertyChecks {
   }
 
   test("hasAllRequiredHeaders with all") {
-    forAll(Gen.someOf(Header.Required :+ "lol")) { headers: Seq[String] =>
+    forAll(Gen.someOf(Header.Required :+ "lol")) { headers =>
       val hm = HeaderMap()
-      headers.foreach { h =>
-        hm.add(h, "1")
-      }
+      headers.foreach { h => hm.add(h, "1") }
       val forall = Header.Required.forall { headers.contains(_) }
       val hasReqd = Header.hasAllRequired(hm)
       assert(forall == hasReqd)

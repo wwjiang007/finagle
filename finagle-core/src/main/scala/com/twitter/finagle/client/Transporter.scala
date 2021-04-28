@@ -33,7 +33,7 @@ trait Transporter[In, Out, Ctx <: TransportContext] {
  * @define $param a [[com.twitter.finagle.Stack.Param]] used to configure
  */
 object Transporter {
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
 
   /**
    * $param a `SocketAddress` that a `Transporter` connects to.
@@ -67,7 +67,10 @@ object Transporter {
   /**
    * $param a SocksProxy as the endpoint for a `Transporter`.
    */
-  case class SocksProxy(sa: Option[SocketAddress], credentials: Option[(String, String)]) {
+  case class SocksProxy(
+    sa: Option[SocketAddress],
+    credentials: Option[(String, String)],
+    bypassLocalhost: Boolean = true) {
     def mk(): (SocksProxy, Stack.Param[SocksProxy]) =
       (this, SocksProxy)
   }
@@ -85,23 +88,27 @@ object Transporter {
         case _ => None
       }
 
-    val default: SocksProxy = SocksProxy(socksProxy, socksUsernameAndPassword)
+    val default: SocksProxy =
+      SocksProxy(socksProxy, socksUsernameAndPassword, !socksProxyForLocalhost())
 
     override def show(p: SocksProxy): Seq[(String, () => String)] = {
       // do not show the password for security reasons
       Seq(
         ("socketAddress", () => p.sa.toString),
-        ("credentials",
-          () => p.credentials
-            .map(c => s"username=${c._1}")
-            .toString)
+        (
+          "credentials",
+          () =>
+            p.credentials
+              .map(c => s"username=${c._1}")
+              .toString
+        )
       )
     }
   }
 
   /**
    * $param a HttpProxy as the endpoint for a `Transporter`.
-   * @see http://www.w3.org/Protocols/rfc2616/rfc2616-sec9.html#9.9
+   * @see https://www.w3.org/Protocols/rfc2616/rfc2616-sec9.html#9.9
    */
   case class HttpProxy(sa: Option[SocketAddress], credentials: Option[Credentials]) {
     def mk(): (HttpProxy, Stack.Param[HttpProxy]) =
@@ -129,11 +136,14 @@ object Transporter {
       // do not show the password for security reasons
       Seq(
         ("host", () => p.hostAndCredentials.map(_._1).toString),
-        ("credentials",
-          () => p.hostAndCredentials
-            .flatMap(_._2)
-            .map(_.toStringNoPassword)
-            .toString)
+        (
+          "credentials",
+          () =>
+            p.hostAndCredentials
+              .flatMap(_._2)
+              .map(_.toStringNoPassword)
+              .toString
+        )
       )
     }
   }

@@ -22,9 +22,10 @@ sealed abstract class StorageCommand(
   flags: Int,
   expiry: Time,
   value: Buf,
-  name: String
-) extends Command(name) {
+  name: String)
+    extends Command(name) {
   KeyValidation.checkKey(key)
+  ExpiryValidation.checkExpiry(name, expiry)
 }
 
 sealed abstract class NonStorageCommand(name: String) extends Command(name)

@@ -1,10 +1,7 @@
 package com.twitter.finagle.http
 
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class MethodTest extends FunSuite {
 
   val knownMethods = Set(
@@ -30,9 +27,7 @@ class MethodTest extends FunSuite {
   }
 
   test("apply(..) is case insensitive for known method names") {
-    knownMethods.foreach { m =>
-      assert(Method(m.name.toUpperCase) eq Method(m.name.toLowerCase))
-    }
+    knownMethods.foreach { m => assert(Method(m.name.toUpperCase) eq Method(m.name.toLowerCase)) }
   }
 
   test("case sensitive for unknown method names") {

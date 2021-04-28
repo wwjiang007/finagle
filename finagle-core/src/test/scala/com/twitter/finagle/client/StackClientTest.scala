@@ -1,6 +1,6 @@
 package com.twitter.finagle.client
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Stack.Module0
 import com.twitter.finagle._
 import com.twitter.finagle.client.utils.{PushStringClient, StringClient}
@@ -14,9 +14,9 @@ import com.twitter.finagle.netty4.Netty4Transporter
 import com.twitter.finagle.server.utils.StringServer
 import com.twitter.finagle.service.FailFastFactory.FailFast
 import com.twitter.finagle.service.PendingRequestFilter
-import com.twitter.finagle.stats.InMemoryStatsReceiver
+import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.finagle.transport.{Transport, TransportContext}
-import com.twitter.finagle.util.StackRegistry
+import com.twitter.finagle.util.{StackRegistry, TestParam}
 import com.twitter.finagle.{Name, param}
 import com.twitter.util._
 import com.twitter.util.registry.{Entry, GlobalRegistry, SimpleRegistry}
@@ -30,8 +30,8 @@ private object StackClientTest {
   case class LocalCheckingStringClient(
     localKey: Contexts.local.Key[String],
     stack: Stack[ServiceFactory[String, String]] = StackClient.newStack,
-    params: Stack.Params = Stack.Params.empty
-  ) extends StdStackClient[String, String, LocalCheckingStringClient] {
+    params: Stack.Params = Stack.Params.empty)
+      extends StdStackClient[String, String, LocalCheckingStringClient] {
 
     protected def copy1(
       stack: Stack[ServiceFactory[String, String]] = this.stack,
@@ -56,7 +56,7 @@ private object StackClientTest {
             Future.exception(new IllegalStateException("should not have a local context: " + s))
           )
         case None =>
-          new SerialClientDispatcher(transport)
+          new SerialClientDispatcher(transport, NullStatsReceiver)
       }
     }
   }
@@ -148,31 +148,30 @@ abstract class AbstractStackClientTest
     val alwaysFailStack = new StackBuilder(stack.nilStack[String, String])
       .push(alwaysFail)
       .result
-    val stk = ctx.client.stack.concat(alwaysFailStack)
 
-    def newClient(name: String, failFastOn: Option[Boolean]): Service[String, String] = {
+    def newClient(label: String, failFastOn: Option[Boolean]): Service[String, String] = {
       var stack = ctx.client
-        .configured(param.Label(name))
-        .withStack(stk)
-      failFastOn.foreach { ffOn =>
-        stack = stack.configured(FailFast(ffOn))
-      }
+        .withLabel(label)
+        .withStack(_.concat(alwaysFailStack))
+      failFastOn.foreach { ffOn => stack = stack.configured(FailFast(ffOn)) }
       val client = stack.newClient("/$/inet/localhost/0")
       new FactoryToService[String, String](client)
     }
 
-    def testClient(name: String, failFastOn: Option[Boolean]): Unit = {
-      val svc = newClient(name, failFastOn)
+    def testClient(label: String, failFastOn: Option[Boolean]): Unit = {
+      val svc = newClient(label, failFastOn)
       val e = intercept[RuntimeException] { await(svc("hi")) }
       assert(e == ex)
+
+      def markedDead: Option[Long] = ctx.sr.counters.get(Seq(label, "failfast", "marked_dead"))
       failFastOn match {
-        case Some(on) if !on =>
-          assert(!ctx.sr.counters.contains(Seq(name, "failfast", "marked_dead")))
+        // Although the default for FailFast = true, we disable it
+        // for clients connecting to a dest with a size of 1.
+        case Some(false) | None =>
+          eventually { assert(markedDead == None) }
           intercept[RuntimeException] { await(svc("hi2")) }
-        case _ =>
-          eventually {
-            assert(ctx.sr.counters(Seq(name, "failfast", "marked_dead")) == 1)
-          }
+        case Some(true) =>
+          eventually { assert(markedDead == Some(1)) }
           intercept[FailedFastException] { await(svc("hi2")) }
       }
     }
@@ -181,6 +180,54 @@ abstract class AbstractStackClientTest
     testClient("ff-client-enabled", Some(true))
     testClient("ff-client-disabled", Some(false))
   }
+
+  test("withStack (Function1)") {
+    val module = new Module0[ServiceFactory[String, String]] {
+      def make(next: ServiceFactory[String, String]): ServiceFactory[String, String] = ???
+      def role: Stack.Role = Stack.Role("no-op")
+      def description: String = "no-op"
+    }
+
+    val ctx = new Ctx {}
+    val init = ctx.client.stack
+    assert(!init.contains(module.role))
+
+    val modified = ctx.client.withStack(_.prepend(module)).stack
+    assert(modified.contains(module.role))
+
+    init.tails.map(_.head).foreach { stackHead => assert(modified.contains(stackHead.role)) }
+  }
+
+  test("closed services from newClient respect close()")(new Ctx {
+    val nilModule = new Module0[ServiceFactory[String, String]] {
+      val role = Stack.Role("yo")
+      val description = "yoo"
+
+      def make(next: ServiceFactory[String, String]): ServiceFactory[String, String] = {
+        ServiceFactory.const[String, String](
+          Service.mk[String, String](_ => Future.value(""))
+        )
+      }
+    }
+
+    val nilStack = new StackBuilder(stack.nilStack[String, String])
+      .push(nilModule)
+      .result
+
+    val svcFac = client
+      .withStack(_.concat(nilStack))
+      .newClient("/$/inet/localhost/0")
+
+    val svc = await(svcFac())
+    assert(svc.status == Status.Open)
+
+    await(svc.close())
+    assert(svc.status == Status.Closed)
+
+    intercept[ServiceReturnedToPoolException] {
+      await(svc(""))
+    }
+  })
 
   test("FactoryToService close propagated to underlying service") {
     /*
@@ -253,7 +300,8 @@ abstract class AbstractStackClientTest
       // don't pool or else we don't see underlying close until service is ejected from pool
       .remove(DefaultPool.Role)
       .replace(
-        StackClient.Role.prepFactory, { next: ServiceFactory[Unit, Unit] =>
+        StackClient.Role.prepFactory,
+        { next: ServiceFactory[Unit, Unit] =>
           next map { service: Service[Unit, Unit] =>
             new ServiceProxy[Unit, Unit](service) {
               override def close(deadline: Time) = Future.never
@@ -312,13 +360,10 @@ abstract class AbstractStackClientTest
     val sr = new InMemoryStatsReceiver
     val client = baseClient.configured(param.Stats(sr))
 
-    val stk = client.stack.replace(
-      LoadBalancerFactory.role,
-      (_: ServiceFactory[String, String]) => stubLB
-    )
-
     val cl = client
-      .withStack(stk)
+      .withStack { stack =>
+        stack.replace(LoadBalancerFactory.role, (_: ServiceFactory[String, String]) => stubLB)
+      }
       .configured(param.Label("myclient"))
       .newClient("/$/inet/localhost/0")
 
@@ -342,6 +387,10 @@ abstract class AbstractStackClientTest
     test(s"don't requeue failing requests when the stack is $status")(new RequeueCtx {
       // failing request and Busy | Closed load balancer => zero requeues
       _svcFacStatus = status
+
+      // the session should reflect the status of the stack
+      _sessionStatus = status
+
       await(cl().map(_("hi")))
       assert(requeues == Some(0))
     })
@@ -434,8 +483,8 @@ abstract class AbstractStackClientTest
         assert(dtab == baseDtab)
         Activity.value(
           NameTree.Union(
-            NameTree.Weighted(1D, NameTree.Leaf(Name.bound(addr1))),
-            NameTree.Weighted(1D, NameTree.Leaf(Name.bound(addr2)))
+            NameTree.Weighted(1d, NameTree.Leaf(Name.bound(addr1))),
+            NameTree.Weighted(1d, NameTree.Leaf(Name.bound(addr2)))
           )
         )
       }
@@ -443,7 +492,6 @@ abstract class AbstractStackClientTest
 
     val stack = StackClient
       .newStack[Unit, Unit]
-
       // direct the two addresses to the two service factories instead
       // of trying to connect to them
       .replace(
@@ -505,12 +553,10 @@ abstract class AbstractStackClientTest
       client.configured[param.Label]((param.Label("foo"), param.Label.param))
   }
 
-  test("StackClient binds to a local service via exp.Address.ServiceFactory") {
-    val reverser = Service.mk[String, String] { in =>
-      Future.value(in.reverse)
-    }
+  test("StackClient binds to a local service via Address.ServiceFactory") {
+    val reverser = Service.mk[String, String] { in => Future.value(in.reverse) }
     val sf = ServiceFactory(() => Future.value(reverser))
-    val addr = exp.Address(sf)
+    val addr = Address(sf)
     val name = Name.bound(addr)
     val service = baseClient.newService(name, "sfsa-test")
     val forward = "a man a plan a canal: panama"
@@ -519,11 +565,9 @@ abstract class AbstractStackClientTest
   }
 
   test("filtered composes filters atop the stack") {
-    val echoServer = Service.mk[String, String] { in =>
-      Future.value(in)
-    }
+    val echoServer = Service.mk[String, String] { in => Future.value(in) }
     val sf = ServiceFactory(() => Future.value(echoServer))
-    val addr = exp.Address(sf)
+    val addr = Address(sf)
     val name = Name.bound(addr)
 
     val reverseFilter = new SimpleFilter[String, String] {
@@ -656,7 +700,7 @@ abstract class AbstractStackClientTest
 
   test("exports transporter type to registry") {
     val listeningServer = StringServer.server
-      .serve(":*", Service.mk[String, String](Future.value(_)))
+      .serve(":*", Service.mk[String, String](Future.value))
     val boundAddress = listeningServer.boundAddress.asInstanceOf[InetSocketAddress]
 
     val label = "stringClient"
@@ -680,7 +724,7 @@ abstract class AbstractStackClientTest
 
   test("Sources exceptions") {
     val listeningServer = StringServer.server
-      .serve(":*", Service.mk[String, String](Future.value(_)))
+      .serve(":*", Service.mk[String, String](Future.value))
     val boundAddress = listeningServer.boundAddress.asInstanceOf[InetSocketAddress]
     val label = "stringClient"
 
@@ -688,15 +732,11 @@ abstract class AbstractStackClientTest
       val role = Stack.Role("Throws")
       val description = "Throws Exception"
 
-      def make(
-        next: ServiceFactory[String, String]
-      ): ServiceFactory[String, String] =
-        (new SimpleFilter[String, String] {
-          def apply(
-            request: String,
-            service: Service[String, String]
-          ): Future[String] = Future.exception(new Failure("boom!"))
-        }).andThen(next)
+      def make(next: ServiceFactory[String, String]): ServiceFactory[String, String] =
+        new SimpleFilter[String, String] {
+          def apply(request: String, service: Service[String, String]): Future[String] =
+            Future.exception(new Failure("boom!"))
+        }.andThen(next)
     }
 
     // Insert a module that throws near before [[ExceptionSourceFilter]].
@@ -704,7 +744,7 @@ abstract class AbstractStackClientTest
     // another module instead so that if the [[ExceptionSourceFilter]] were moved earlier in the
     // stack, this test would fail.
     val svc = baseClient
-      .withStack(baseClient.stack.insertBefore(ClearContextValueFilter.role, throwsModule))
+      .withStack(_.insertBefore(ClearContextValueFilter.role, throwsModule))
       .newService(Name.bound(Address(boundAddress)), label)
 
     val failure = intercept[Failure] {
@@ -712,5 +752,38 @@ abstract class AbstractStackClientTest
     }
 
     assert(failure.toString == "Failure(boom!, flags=0x00) with Service -> stringClient")
+  }
+
+  test("Injects the appropriate params") {
+    val listeningServer = StringServer.server
+      .serve(":*", Service.mk[String, String](Future.value))
+    val boundAddress = listeningServer.boundAddress.asInstanceOf[InetSocketAddress]
+    val label = "stringClient"
+
+    var testParamValue = 0
+
+    val verifyModule = new Stack.Module1[TestParam, ServiceFactory[String, String]] {
+      val role = Stack.Role("verify")
+      val description = "Verifies the value of the test param"
+
+      def make(testParam: TestParam, next: ServiceFactory[String, String]): ServiceFactory[String, String] = {
+        testParamValue = testParam.p1
+        new SimpleFilter[String, String] {
+          def apply(request: String, service: Service[String, String]): Future[String] = {
+            Future.value("world")
+          }
+        }.andThen(next)
+      }
+    }
+
+    // push the verification module onto the stack.  doesn't really matter where in the stack it
+    // goes
+    val svc = baseClient
+      .withStack(verifyModule +: _)
+      .newService(Name.bound(Address(boundAddress)), label)
+
+    await(svc("hello"))
+
+    assert(testParamValue == 37)
   }
 }

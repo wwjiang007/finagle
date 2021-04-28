@@ -1,7 +1,7 @@
 package com.twitter.finagle.memcached
 
 import _root_.java.lang.{Boolean => JBoolean, Long => JLong}
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.memcached.protocol.{ClientError, Value}
 import com.twitter.io.Buf
 import com.twitter.util.{Future, Time}
@@ -68,7 +68,7 @@ class MockClient extends Client {
             misses += key
         }
         // Needed due to compiler bug: https://github.com/scala/bug/issues/10151
-        Unit
+        ()
       }
     }
     GetResult(hits.toMap, misses.toSet)
@@ -197,7 +197,7 @@ class MockClient extends Client {
     Future.value(
       mm.synchronized {
         mm.get(key) match {
-          case Some(cached@Cached(value, exp, _)) if !isExpired(exp) =>
+          case Some(cached @ Cached(value, exp, _)) if !isExpired(exp) =>
             try {
               val Buf.Utf8(valStr) = value
               val newValue = math.max(valStr.toLong + delta, 0L)
@@ -236,7 +236,7 @@ class MockClient extends Client {
   /** Returns an immutable copy of the current cache with expired elements filtered out */
   def active: Map[String, Cached] =
     toMap.collect {
-      case (k, v@Cached(_, expiry, _)) if !isExpired(expiry) => k -> v
+      case (k, v @ Cached(_, expiry, _)) if !isExpired(expiry) => k -> v
     }
 
   /**

@@ -9,14 +9,11 @@ import javax.security.auth.Subject
 import javax.security.auth.kerberos.{KerberosPrincipal, KerberosTicket}
 import javax.security.auth.login.LoginContext
 import org.ietf.jgss.GSSContext
-import org.junit.runner.RunWith
 import org.mockito.Matchers.any
 import org.mockito.Mockito.{stub, verify}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
 class SpnegoAuthenticatorTest extends FunSuite with MockitoSugar {
   import SpnegoAuthenticator._
 
@@ -34,7 +31,7 @@ class SpnegoAuthenticatorTest extends FunSuite with MockitoSugar {
   }
 
   test("malformed token") {
-    // TODO: c.t.u.Base64StringEncoder is crazy permissive: the only way to win is not to play
+    // TODO: c.t.u.Base64StringEncoder is too permissive: the only way to win is not to play
     negative {
       builder.setHeader(Fields.Authorization, AuthScheme).buildGet()
     }
@@ -161,9 +158,7 @@ class SpnegoAuthenticatorTest extends FunSuite with MockitoSugar {
 
     val client =
       clientSrc
-        .map { src =>
-          new ClientFilter(src) andThen rawClient
-        }
+        .map { src => new ClientFilter(src) andThen rawClient }
         .getOrElse {
           rawClient
         }

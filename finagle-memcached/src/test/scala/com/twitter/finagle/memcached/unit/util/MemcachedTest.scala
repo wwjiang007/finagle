@@ -1,6 +1,6 @@
 package com.twitter.finagle.memcached.unit.util
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.Memcached.UsePartitioningMemcachedClientToggle
 import com.twitter.finagle.client.Transporter
@@ -8,48 +8,46 @@ import com.twitter.finagle.factory.TimeoutFactory
 import com.twitter.finagle.filter.NackAdmissionFilter
 import com.twitter.finagle.liveness.{FailureAccrualFactory, FailureAccrualPolicy}
 import com.twitter.finagle.memcached.{Client, KetamaPartitionedClient, TwemcacheClient}
-import com.twitter.finagle.pool.SingletonPool
+import com.twitter.finagle.pool.BalancingPool
 import com.twitter.finagle.param.Stats
+import com.twitter.finagle.partitioning.{param => pparam}
 import com.twitter.finagle.service._
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.finagle.toggle.flag
 import com.twitter.util.{Await, Time}
 import org.scalatest.FunSuite
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
-class MemcachedTest
-    extends FunSuite
-    with MockitoSugar
-    with Eventually
-    with IntegrationPatience {
+class MemcachedTest extends FunSuite with MockitoSugar with Eventually with IntegrationPatience {
 
   protected def baseClient: Memcached.Client = Memcached.client
 
   test("Memcached.Client has expected stack and params") {
-    val markDeadFor = Backoff.const(1.second)
+    var markDeadFor = Backoff.const(1.second)
     val failureAccrualPolicy = FailureAccrualPolicy.consecutiveFailures(20, markDeadFor)
     val client = baseClient
       .configured(FailureAccrualFactory.Param(() => failureAccrualPolicy))
       .configured(Transporter.ConnectTimeout(100.milliseconds))
       .configured(TimeoutFilter.Param(200.milliseconds))
       .configured(TimeoutFactory.Param(200.milliseconds))
-      .configured(Memcached.param.EjectFailedHost(false))
+      .configured(pparam.EjectFailedHost(false))
 
     val stack = client.stack
     assert(stack.contains(FailureAccrualFactory.role))
-    assert(stack.contains(SingletonPool.role))
+    assert(stack.contains(BalancingPool.role))
     assert(!stack.contains(NackAdmissionFilter.role))
 
     val params = client.params
 
     val FailureAccrualFactory.Param.Configured(policy) = params[FailureAccrualFactory.Param]
     assert(policy() == failureAccrualPolicy)
-    assert(markDeadFor.take(10).force === (0 until 10 map { _ =>
-      1.second
-    }))
+    for (_ <- 0 until 10) {
+      assert(markDeadFor.duration == 1.second)
+      markDeadFor = markDeadFor.next
+    }
     assert(params[Transporter.ConnectTimeout] == Transporter.ConnectTimeout(100.milliseconds))
-    assert(params[Memcached.param.EjectFailedHost] == Memcached.param.EjectFailedHost(false))
+    assert(params[pparam.EjectFailedHost] == pparam.EjectFailedHost(false))
     assert(params[FailFastFactory.FailFast] == FailFastFactory.FailFast(false))
   }
 

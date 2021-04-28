@@ -1,23 +1,28 @@
 package com.twitter.finagle.mux.lease.exp
 
-import com.twitter.conversions.storage.intToStorageUnitableWholeNumber
-import com.twitter.conversions.time._
+import com.twitter.conversions.StorageUnitOps._
+import com.twitter.conversions.DurationOps._
 import com.twitter.util.{Duration, Time}
 import java.lang.management.{GarbageCollectorMXBean, MemoryPoolMXBean}
 import java.util.logging.Logger
 import org.mockito.Mockito.when
 import org.scalactic.source.Position
 import org.scalatest.{FunSuite, Tag}
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 import scala.collection.mutable.Buffer
 
 class CoordinatorTest extends FunSuite with LocalConductors with MockitoSugar {
 
   val skipWholeTest: Boolean = sys.props.contains("SKIP_FLAKY")
 
-  override def test(testName: String, testTags: Tag*)(
+  override def test(
+    testName: String,
+    testTags: Tag*
+  )(
     testFun: => Any
-  )(implicit pos: Position): Unit = {
+  )(
+    implicit pos: Position
+  ): Unit = {
     if (skipWholeTest)
       ignore(testName)(testFun)
     else
@@ -103,9 +108,7 @@ class CoordinatorTest extends FunSuite with LocalConductors with MockitoSugar {
     Time.withCurrentTimeFrozen { ctl =>
       localThread(conductor) {
         coord.sleepUntilGc(
-          { () =>
-            when(nfo.generation()).thenReturn(x)
-          },
+          { () => when(nfo.generation()).thenReturn(x) },
           20.milliseconds
         )
       }

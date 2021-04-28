@@ -1,27 +1,33 @@
 package com.twitter.finagle.service
 
-import RetryPolicy._
-import com.twitter.conversions.time._
-import com.twitter.finagle.{ChannelClosedException, Failure, FailureFlags, TimeoutException, WriteException}
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.service.RetryPolicy._
+import com.twitter.finagle.{
+  Backoff,
+  ChannelClosedException,
+  Failure,
+  FailureFlags,
+  TimeoutException,
+  WriteException
+}
 import com.twitter.util._
-import org.junit.runner.RunWith
 import org.scalatest.FunSpec
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class RetryPolicyTest extends FunSpec {
+
   def getBackoffs(
     policy: RetryPolicy[Try[Nothing]],
     exceptions: Stream[Exception]
-  ): Stream[Duration] =
+  ): Backoff = {
     exceptions match {
-      case Stream.Empty => Stream.empty
+      case Stream.Empty => Backoff.empty
       case e #:: tail =>
         policy(Throw(e)) match {
-          case None => Stream.empty
-          case Some((backoff, p2)) => backoff #:: getBackoffs(p2, tail)
+          case None => Backoff.empty
+          case Some((backoff, p2)) => Backoff.fromStream(backoff #:: getBackoffs(p2, tail).toStream)
         }
     }
+  }
 
   describe("RetryPolicy") {
     val NoExceptions: PartialFunction[Try[Nothing], Boolean] = {
@@ -92,38 +98,38 @@ class RetryPolicyTest extends FunSpec {
   }
 
   describe("RetryPolicy.filter/filterEach") {
-    val backoffs = Stream(10.milliseconds, 20.milliseconds, 30.milliseconds)
+    val backoffs = Backoff.linear(10.milliseconds, 10.milliseconds).take(3)
     val policy = RetryPolicy.backoff(backoffs)(iExceptionsOnly).filter(iGreaterThan1)
 
     it("returns None if filter rejects") {
       val actual = getBackoffs(policy, Stream(IException(0), IException(1)))
-      assert(actual == Stream.empty)
+      assert(actual == Backoff.empty)
     }
 
     it("returns underlying result if filter accepts first") {
       val actual = getBackoffs(policy, Stream(IException(2), IException(0)))
-      assert(actual == backoffs.take(2))
+      verifyBackoff(actual, backoffs.take(2))
     }
   }
 
   describe("RetryPolicy.filterEach") {
-    val backoffs = Stream(10.milliseconds, 20.milliseconds, 30.milliseconds)
+    val backoffs = Backoff.linear(10.milliseconds, 10.milliseconds).take(3)
     val policy = RetryPolicy.backoff(backoffs)(iExceptionsOnly).filterEach(iGreaterThan1)
 
     it("returns None if filterEach rejects") {
       val actual = getBackoffs(policy, Stream(IException(0), IException(1)))
-      assert(actual == Stream.empty)
+      assert(actual == Backoff.empty)
     }
 
     it("returns underlying result if filterEach accepts") {
       val actual = getBackoffs(policy, Stream(IException(2), IException(2), IException(0)))
-      assert(actual == backoffs.take(2))
+      verifyBackoff(actual, backoffs.take(2))
     }
   }
 
   describe("RetryPolicy.limit") {
     var currentMaxRetries: Int = 0
-    val maxBackoffs = Stream.fill(3)(10.milliseconds)
+    val maxBackoffs = Backoff.const(10.milliseconds).take(3)
     val policy =
       RetryPolicy
         .backoff(maxBackoffs)(RetryPolicy.ChannelClosedExceptionsOnly)
@@ -133,7 +139,7 @@ class RetryPolicyTest extends FunSpec {
       for (i <- 0 until 5) {
         currentMaxRetries = i
         val backoffs = getBackoffs(policy, Stream.fill(3)(new ChannelClosedException()))
-        assert(backoffs == maxBackoffs.take(i min 3))
+        verifyBackoff(backoffs, maxBackoffs.take(1.min(3)))
       }
     }
   }
@@ -146,22 +152,23 @@ class RetryPolicyTest extends FunSpec {
       RetryPolicy.combine(
         RetryPolicy.backoff(Backoff.const(Duration.Zero).take(2))(RetryPolicy.WriteExceptionsOnly),
         RetryPolicy
-          .backoff(Stream.fill(3)(channelClosedBackoff))(RetryPolicy.ChannelClosedExceptionsOnly)
+          .backoff(Backoff.const(channelClosedBackoff).take(3))(
+            RetryPolicy.ChannelClosedExceptionsOnly)
       )
 
     it("return None for unmatched exception") {
       val backoffs = getBackoffs(combinedPolicy, Stream(new UnsupportedOperationException))
-      assert(backoffs == Stream.empty)
+      assert(backoffs == Backoff.empty)
     }
 
     it("mimicks first policy") {
       val backoffs = getBackoffs(combinedPolicy, Stream.fill(4)(WriteException(new Exception)))
-      assert(backoffs == Stream.fill(2)(writeExceptionBackoff))
+      verifyBackoff(backoffs, Backoff.const(writeExceptionBackoff).take(2))
     }
 
     it("mimicks second policy") {
       val backoffs = getBackoffs(combinedPolicy, Stream.fill(4)(new ChannelClosedException()))
-      assert(backoffs == Stream.fill(3)(channelClosedBackoff))
+      verifyBackoff(backoffs, Backoff.const(channelClosedBackoff).take(3))
     }
 
     it("interleaves backoffs") {
@@ -174,13 +181,34 @@ class RetryPolicyTest extends FunSpec {
       )
 
       val backoffs = getBackoffs(combinedPolicy, exceptions)
-      val expectedBackoffs = Stream(
-        channelClosedBackoff,
-        writeExceptionBackoff,
-        writeExceptionBackoff,
-        channelClosedBackoff
-      )
-      assert(backoffs == expectedBackoffs)
+      val expectedBackoffs = Backoff
+        .const(channelClosedBackoff).take(1)
+        .concat(Backoff.const(writeExceptionBackoff).take(2))
+        .concat(Backoff.const(channelClosedBackoff).take(1))
+      verifyBackoff(backoffs, expectedBackoffs)
+    }
+  }
+
+  describe("RetryPolicy.namedPF") {
+    it("uses the name parameter as the toString method") {
+      val f = RetryPolicy.namedPF[Int]("foo") { case _ => false }
+      assert(f.toString == "foo")
+    }
+
+    it("preserves the behavior of the underlying partial function") {
+      val f: PartialFunction[Int, Boolean] = { case i if i >= 0 => true }
+      val f1 = RetryPolicy.namedPF("foo")(f)
+
+      assert(f.isDefinedAt(1) == f1.isDefinedAt(1))
+      assert(f.isDefinedAt(-1) == f1.isDefinedAt(-1))
+    }
+
+    it("preserves toString information when composition with .orElse") {
+      val f1 = RetryPolicy.namedPF[Int]("foo") { case i if i >= 0 => false }
+      val f2 = RetryPolicy.namedPF[Int]("bar") { case _ => true }
+
+      val composed = f1.orElse(f2)
+      assert(composed.toString == "foo.orElse(bar)")
     }
   }
 
@@ -197,6 +225,13 @@ class RetryPolicyTest extends FunSpec {
     it("should not retry") {
       assert(None == nah((1, Return(1))))
       assert(None == nah((1, Throw(new RuntimeException))))
+    }
+  }
+
+  private def verifyBackoff(b1: Backoff, b2: Backoff): Unit = {
+    if (!b1.isExhausted && !b2.isExhausted) {
+      assert(b1.duration == b2.duration)
+      verifyBackoff(b1.next, b2.next)
     }
   }
 }

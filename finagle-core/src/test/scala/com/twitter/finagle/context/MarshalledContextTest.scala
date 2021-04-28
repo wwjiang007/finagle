@@ -2,10 +2,7 @@ package com.twitter.finagle.context
 
 import com.twitter.io.Buf
 import com.twitter.util.{Return, Throw}
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class MarshalledContextTest extends AbstractContextTest {
   val ctx = new MarshalledContext
 
@@ -13,7 +10,6 @@ class MarshalledContextTest extends AbstractContextTest {
     def marshal(value: String) = Buf.Utf8(value)
     def tryUnmarshal(buf: Buf) = buf match {
       case Buf.Utf8(value) => Return(value)
-      case _ => Throw(new IllegalArgumentException)
     }
   }
 
@@ -87,7 +83,8 @@ class MarshalledContextTest extends AbstractContextTest {
   }
 
   test("Unmarshal") {
-    ctx.let(Seq(ctx.KeyValuePair(a, "ok"), ctx.KeyValuePair(b, 123), ctx.KeyValuePair(a, "notok"))) {
+    ctx.let(
+      Seq(ctx.KeyValuePair(a, "ok"), ctx.KeyValuePair(b, 123), ctx.KeyValuePair(a, "notok"))) {
       val roundTrip = ctx.doUnmarshal(Map.empty, ctx.marshal())
 
       def checkKey(key: ctx.Key[_]): Unit = {
@@ -100,7 +97,10 @@ class MarshalledContextTest extends AbstractContextTest {
       checkKey(a)
       checkKey(b)
 
-      assert(ctx.marshal(roundTrip) == ctx.marshal())
+      val marshallRoundtrip = ctx.marshal(roundTrip)
+      val marshallDirect = ctx.marshal()
+
+      assert(marshallRoundtrip.iterator.sameElements(marshallDirect.iterator))
     }
   }
 }

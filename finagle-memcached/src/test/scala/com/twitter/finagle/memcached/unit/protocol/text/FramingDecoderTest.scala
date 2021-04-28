@@ -3,7 +3,7 @@ package com.twitter.finagle.memcached.unit.protocol.text
 import com.twitter.finagle.memcached.protocol.text.{FrameDecoder, FramingDecoder}
 import com.twitter.io.{Buf, ByteReader}
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 import scala.collection.mutable
 
 class FramingDecoderTest extends FunSuite with MockitoSugar {
@@ -31,7 +31,8 @@ class FramingDecoderTest extends FunSuite with MockitoSugar {
   }
 
   test("frame response without data") {
-    val framer = newFramer(-1, -1) // second one because the framer checks to see if we need an empty Buf
+    val framer =
+      newFramer(-1, -1) // second one because the framer checks to see if we need an empty Buf
     val outputMessages = new mutable.ArrayBuffer[Buf]()
     framer(ByteReader(Buf.Utf8("STORED\r\n")), outputMessages)
     assert(outputMessages == Seq(Buf.Utf8("STORED")))

@@ -2,12 +2,12 @@ Netty Transporter
 <<<<<<<<<<<<<<<<<
 
 **connect_latency_ms**
-  A histogram of the length of time it takes for a connection to succeed,
-  in milliseconds.
+  A histogram of the length of time it takes for a socket connection (including SSL/TLS handshake)
+  to succeed, in milliseconds.
 
 **failed_connect_latency_ms**
-  A histogram of the length of time it takes for a connection to fail,
-  in milliseconds.
+  A histogram of the length of time it takes for a socket connection (including SSL/TLS handshake)
+  to fail, in milliseconds.
 
 **cancelled_connects**
   A counter of the number of attempts to connect that were cancelled before
@@ -27,7 +27,7 @@ ServerBridge
 ChannelRequestStatsHandler
 <<<<<<<<<<<<<<<<<<<<<<<<<<
 
-**connection_requests**
+**connection_requests** `verbosity:debug`
   A histogram of the number of requests received over the lifetime of a
   connection.
 
@@ -58,6 +58,12 @@ ChannelStatsHandler
 **sent_bytes**
   A counter of the total number of sent bytes.
 
+**tcp_retransmits** `verbosity:debug`
+  A counter of the number of TCP retransmits that have occurred.
+
+**tcp_send_window_size** `verbosity:debug`
+  A histogram of the TCP send window size (in bytes) per channel.
+
 **writableDuration** `verbosity:debug`
   A gauge of the length of time the socket has been writable in the channel.
 
@@ -67,6 +73,13 @@ ChannelStatsHandler
 **connections**
   A gauge of the total number of connections that are currently open in the
   channel.
+
+**pending_io_events**
+  A gauge of the number of pending IO events enqueued in all event loops servicing
+  this client or server. If this metric climbs up, it indicates an overload scenario
+  when IO threads are not being able to process the scheduled work (handling new
+  requests and new connections). A very typical cause of these symptoms is either
+  blocking or running a CPU intensive workloads on IO threads.
 
 **exn/<exception_name>+**
   A counter of the number of times a specific exception has been thrown within
@@ -87,7 +100,7 @@ SSL/TLS
 <<<<<<<
 
 **handshake_latency_ms**
-   A histogram of the tls handshake latency in milliseconds.
+   A histogram of the SSL/TLS handshake latency in milliseconds.
 
 **failed_handshake_latency_ms** `verbosity:debug`
-   A histogram of the failed tls handshake latency in milliseconds.
+   A histogram of the failed SSL/TLS handshake latency in milliseconds.

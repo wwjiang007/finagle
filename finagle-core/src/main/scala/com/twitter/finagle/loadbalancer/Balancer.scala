@@ -61,7 +61,14 @@ private trait Balancer[Req, Rep] extends ServiceFactory[Req, Rep] with BalancerN
    * Create a node whose sole purpose it is to endlessly fail
    * with the given cause.
    */
-  protected def failingNode(cause: Throwable): Node
+  final protected def failingNode(cause: Throwable): Node =
+    newNode(new FailingEndpointFactory(cause))
+
+  /**
+   * A failing factory that always fails using the value of `emptyException`
+   */
+  private[loadbalancer] lazy val failingNode: Node =
+    failingNode(emptyException)
 
   /**
    * The type of Distributor. Mixed in.
@@ -93,8 +100,13 @@ private trait Balancer[Req, Rep] extends ServiceFactory[Req, Rep] with BalancerN
     val rebuilt = synchronized {
       if (initial != dist) false // someone else rebuild for us so no need for us to do so
       else {
-        dist = dist.rebuild()
-        true
+        val rebuildAttempt = initial.rebuild()
+        if (rebuildAttempt != initial) {
+          dist = rebuildAttempt
+          true
+        } else {
+          false
+        }
       }
     }
 
@@ -159,25 +171,30 @@ private trait Balancer[Req, Rep] extends ServiceFactory[Req, Rep] with BalancerN
 
     // These nodes are currently maintained by `Distributor`.
     val oldFactories: mutable.HashMap[EndpointFactory[Req, Rep], Node] =
-      dist.vector.map(factoryToNode)(collection.breakOut)
+      mutable.HashMap(dist.vector.map(factoryToNode): _*)
 
     var numAdded: Int = 0
-
     for (factory <- newFactories) {
-      if (oldFactories.contains(factory)) {
-        transferred += oldFactories(factory)
-        oldFactories.remove(factory)
-      } else {
-        transferred += newNode(factory)
-        numAdded += 1
+      oldFactories.remove(factory) match {
+        case Some(f) =>
+          transferred += f
+        case None =>
+          transferred += newNode(factory)
+          numAdded += 1
       }
     }
+    val numRemoved = oldFactories.size
 
-    removes.incr(oldFactories.size)
+    removes.incr(numRemoved)
     adds.incr(numAdded)
 
-    dist = dist.rebuild(transferred.result())
-    rebuilds.incr()
+    // It isn't contractual that `newFactories` must have new or removed endpoints from the
+    // current serverset. Lets guard against unnecessarily rebuilding here if no endpoints
+    // have been added or removed.
+    if (numAdded > 0 || numRemoved > 0) {
+      dist = dist.rebuild(transferred.result())
+      rebuilds.incr()
+    }
   }
 
   /**
@@ -187,13 +204,13 @@ private trait Balancer[Req, Rep] extends ServiceFactory[Req, Rep] with BalancerN
    * with a `Status.Open`.
    */
   @tailrec
-  private[this] def pick(count: Int): Node = {
-    if (count == 0)
-      return null.asInstanceOf[Node]
-
-    val n = dist.pick()
-    if (n.factory.status == Status.Open) n
-    else pick(count - 1)
+  private[this] def pick(count: Int): ServiceFactory[Req, Rep] = {
+    if (count == 0) null
+    else {
+      val n = dist.pick()
+      if (n.status == Status.Open) n
+      else pick(count - 1)
+    }
   }
 
   def apply(conn: ClientConnection): Future[Service[Req, Rep]] = {

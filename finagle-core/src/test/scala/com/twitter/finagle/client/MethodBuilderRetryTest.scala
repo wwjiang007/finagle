@@ -1,16 +1,13 @@
 package com.twitter.finagle.client
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.client.MethodBuilderTest.TestStackClient
 import com.twitter.finagle.service.{ReqRep, ResponseClass, _}
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, StatsReceiver}
 import com.twitter.finagle.{Failure, FailureFlags, Service, ServiceFactory, Stack, param}
 import com.twitter.util.{Await, Future, Throw}
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class MethodBuilderRetryTest extends FunSuite {
 
   private[this] class RetrySvc {
@@ -102,6 +99,33 @@ class MethodBuilderRetryTest extends FunSuite {
     assert(stats.stat(clientName, "client", "retries")() == Seq(1))
   }
 
+  test("maxRetries") {
+    val stats = new InMemoryStatsReceiver()
+    class InfiniteRetrySvc {
+      var reqNum = 0
+      val svc: Service[Int, Int] = Service.mk { _ =>
+        reqNum += 1
+        Future.exception(new IllegalArgumentException("uno"))
+      }
+    }
+    val retrySvc = new InfiniteRetrySvc
+    val methodBuilder = retryMethodBuilder(retrySvc.svc, stats)
+    val classifier: ResponseClassifier = {
+      case ReqRep(_, Throw(_: IllegalArgumentException)) =>
+        ResponseClass.RetryableFailure
+    }
+    val client = methodBuilder.withRetry
+      .forClassifier(classifier)
+      .withRetry.maxRetries(5)
+      .newService("client")
+
+    // the client will retry 5 times and then fail
+    intercept[IllegalArgumentException] {
+      Await.result(client(1), 5.seconds)
+    }
+    assert(stats.stat(clientName, "client", "retries")() == Seq(5))
+  }
+
   test("scoped to clientName if methodName is None") {
     val stats = new InMemoryStatsReceiver()
     val retrySvc = new RetrySvc()
@@ -123,9 +147,7 @@ class MethodBuilderRetryTest extends FunSuite {
 
   test("retries do not apply to failures handled by the RequeueFilter") {
     val stats = new InMemoryStatsReceiver()
-    val svc = Service.mk[Int, Int] { _ =>
-      Future.exception(Failure.rejected("nuh uh"))
-    }
+    val svc = Service.mk[Int, Int] { _ => Future.exception(Failure.rejected("nuh uh")) }
     val methodBuilder = retryMethodBuilder(svc, stats)
     val client = methodBuilder.withRetry
       .forClassifier {

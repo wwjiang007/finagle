@@ -1,6 +1,6 @@
 package com.twitter.finagle.client
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.context.RemoteInfo
 import com.twitter.finagle.service.FailedService
@@ -8,7 +8,7 @@ import com.twitter.finagle.tracing.Trace
 import com.twitter.util.{Await, Future, Time}
 import java.net.InetSocketAddress
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 class ExceptionRemoteInfoFactoryTest extends FunSuite with MockitoSugar {
   test(

@@ -5,7 +5,7 @@
 
 # Finagle
 
-[![Build status](https://travis-ci.org/twitter/finagle.svg?branch=develop)](https://travis-ci.org/twitter/finagle)
+[![Build Status](https://github.com/twitter/finagle/workflows/continuous%20integration/badge.svg?branch=develop)](https://github.com/twitter/finagle/actions?query=workflow%3A%22continuous+integration%22+branch%3Adevelop)
 [![Codecov](https://codecov.io/gh/twitter/finagle/branch/develop/graph/badge.svg)](https://codecov.io/gh/twitter/finagle)
 [![Project status](https://img.shields.io/badge/status-active-brightgreen.svg)](#status)
 [![Gitter](https://badges.gitter.im/twitter/finagle.svg)](https://gitter.im/twitter/finagle?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
@@ -13,13 +13,13 @@
 
 ## Status
 
-This project is used in production at Twitter (and many other organizations),and is being actively developed and maintained.
+This project is used in production at Twitter (and many other organizations), and is being actively developed and maintained.
 
 
 ## Releases
 
 [Releases](https://maven-badges.herokuapp.com/maven-central/com.twitter/finagle_2.12)
-are done on an approximately monthly schedule. While [semver](http://semver.org/)
+are done on an approximately monthly schedule. While [semver](https://semver.org/)
 is not followed, the [changelogs](CHANGELOG.rst) are detailed and include sections on
 public API breaks and changes in runtime behavior.
 
@@ -55,7 +55,7 @@ The following are a few of the companies that are using Finagle:
 * [Twitter](https://twitter.com/)
 
 For a more complete list, please see
-[our adopter page](https://github.com/twitter/finagle/blob/master/ADOPTERS.md).
+[our adopter page](https://github.com/twitter/finagle/blob/release/ADOPTERS.md).
 If your organization is using Finagle, consider adding a link there and sending
 us a pull request!
 
@@ -65,8 +65,14 @@ We feel that a welcoming community is important and we ask that you follow Twitt
 [Open Source Code of Conduct](https://github.com/twitter/code-of-conduct/blob/master/code-of-conduct.md)
 in all interactions with the community.
 
-The `master` branch of this repository contains the latest stable release of
+The `release` branch of this repository contains the latest stable release of
 Finagle, and weekly snapshots are published to the `develop` branch. In general
 pull requests should be submitted against `develop`. See
-[CONTRIBUTING.md](https://github.com/twitter/finagle/blob/master/CONTRIBUTING.md)
+[CONTRIBUTING.md](https://github.com/twitter/finagle/blob/release/CONTRIBUTING.md)
 for more details about how to contribute.
+
+## License
+
+Copyright 2010 Twitter, Inc.
+
+Licensed under the Apache License, Version 2.0: https://www.apache.org/licenses/LICENSE-2.0

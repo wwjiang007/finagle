@@ -1,6 +1,6 @@
 package com.twitter.finagle.memcached.unit.partitioning
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.addr.WeightedAddress
 import com.twitter.finagle.memcached.TwemcacheClient
@@ -8,20 +8,17 @@ import com.twitter.finagle.memcached.partitioning.MemcachedPartitioningService
 import com.twitter.finagle.memcached.partitioning.MemcachedPartitioningService.UnsupportedCommand
 import com.twitter.finagle.memcached.protocol._
 import com.twitter.finagle.naming.BindingFactory
-import com.twitter.finagle.serverset2.addr.ZkMetadata
+import com.twitter.finagle.partitioning.zk.ZkMetadata
 import com.twitter.finagle.stack.nilStack
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.io.Buf
 import com.twitter.util.{Command => _, _}
 import java.net.{InetAddress, InetSocketAddress}
-import org.junit.runner.RunWith
 import org.mockito.Matchers._
 import org.mockito.Mockito._
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 import org.scalatest.{BeforeAndAfterEach, FunSuite, MustMatchers}
 
-@RunWith(classOf[JUnitRunner])
 class MemcachedPartitioningServiceTest
     extends FunSuite
     with MockitoSugar
@@ -126,14 +123,10 @@ class MemcachedPartitioningServiceTest
     assert(statsReceiver.counters(Seq(clientName, "partitioner", "redistributes")) == 1)
 
     val numKeys = 500
-    val kvMap = (1 to numKeys).map { i =>
-      s"key-$i" -> s"value-$i"
-    }.toMap
+    val kvMap = (1 to numKeys).map { i => s"key-$i" -> s"value-$i" }.toMap
 
     val values = Values(
-      (1 to numKeys).map { i =>
-        Value(Buf.Utf8(s"key-$i"), Buf.Utf8(s"value-$i"))
-      }
+      (1 to numKeys).map { i => Value(Buf.Utf8(s"key-$i"), Buf.Utf8(s"value-$i")) }
     )
 
     when(mockService.apply(any[Get])).thenReturn(Future.value(values))

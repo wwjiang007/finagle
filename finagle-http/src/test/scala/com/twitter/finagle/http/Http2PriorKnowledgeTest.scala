@@ -1,33 +1,10 @@
 package com.twitter.finagle.http
 
-import com.twitter.finagle
-import com.twitter.finagle.Service
-import com.twitter.finagle.http2.param.PriorKnowledge
-import com.twitter.util.Future
-
-class Http2PriorKnowledgeTest extends AbstractHttp2EndToEndTest {
+class Http2PriorKnowledgeTest extends AbstractHttp2PriorKnowledgeTest {
   def implName: String = "prior knowledge http/2"
-  def clientImpl(): finagle.Http.Client =
-    finagle.Http.client
-      .withHttp2
-      .configured(PriorKnowledge(true))
-      .withStatsReceiver(statsRecv)
 
-  def serverImpl(): finagle.Http.Server =
-    finagle.Http.server
-      .withHttp2
-
-  def featureImplemented(feature: Feature): Boolean = true
-
-  test("A prior knowledge connection counts as one upgrade for stats") {
-    val client = nonStreamingConnect(Service.mk { _: Request =>
-      Future.value(Response())
-    })
-
-    await(client(Request("/")))
-
-    assert(statsRecv.counters(Seq("server", "upgrade", "success")) == 1)
-    assert(statsRecv.counters(Seq("client", "upgrade", "success")) == 1)
-    await(client.close())
-  }
+  // MaxHeaderSize should be allowed when https://github.com/netty/netty/issues/8434 is fixed.
+  // The RequiresAsciiFilter is due to Netty filtering non-ASCII characters in the h2 pipeline.
+  override def featureImplemented(feature: Feature): Boolean =
+    feature != MaxHeaderSize && feature != RequiresAsciiFilter && super.featureImplemented(feature)
 }

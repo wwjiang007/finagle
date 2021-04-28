@@ -1,12 +1,16 @@
 package com.twitter.finagle.builder
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.client.utils.StringClient
 import com.twitter.finagle.param.ProtocolLibrary
 import com.twitter.finagle.service.RetryPolicy
 import com.twitter.finagle.ssl.Engine
-import com.twitter.finagle.ssl.client.{SslClientConfiguration, SslClientEngineFactory, SslClientSessionVerifier}
+import com.twitter.finagle.ssl.client.{
+  SslClientConfiguration,
+  SslClientEngineFactory,
+  SslClientSessionVerifier
+}
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.finagle.transport.Transport
 import com.twitter.util._
@@ -17,7 +21,7 @@ import org.mockito.Matchers._
 import org.mockito.Mockito.when
 import org.scalatest.FunSuite
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 class ClientBuilderTest
     extends FunSuite
@@ -32,7 +36,7 @@ class ClientBuilderTest
     { case Throw(_: MyException) => true }
   )
 
-  test("ClientBuilder should collect stats on 'tries' for retrypolicy") {
+  test("ClientBuilder should collect stats on 'tries' for retryPolicy") {
     val service = mock[Service[String, String]]
     when(service("123")) thenReturn Future.exception(new MyException())
     when(service.close(any[Time])) thenReturn Future.Done
@@ -58,10 +62,11 @@ class ClientBuilderTest
     assert(inMemory.counters(Seq("test", "requests")) == 2)
   }
 
-  test("ClientBuilder should collect stats on 'tries' with no retrypolicy") {
+  test("ClientBuilder should collect stats on 'tries' with no retryPolicy") {
     val service = mock[Service[String, String]]
     when(service("123")) thenReturn Future.exception(WriteException(new Exception()))
     when(service.close(any[Time])) thenReturn Future.Done
+    when(service.status) thenReturn Status.Open
 
     val inMemory = new InMemoryStatsReceiver
     val numFailures = 21 // There will be 20 requeues by default

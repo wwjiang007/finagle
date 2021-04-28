@@ -1,8 +1,9 @@
 junit_tests(
-    sources = rglobs("*.java"),
-    compiler_option_sets = {"fatal_warnings"},
+    sources = ["**/*.java"],
+    compiler_option_sets = ["fatal_warnings"],
     dependencies = [
         "3rdparty/jvm/junit",
-        "finagle/finagle-base-http/src/main/scala",
+        "3rdparty/jvm/org/scalatestplus:junit",
+        "finagle/finagle-base-http/src/main",
     ],
 )

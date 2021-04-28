@@ -1,6 +1,6 @@
 package com.twitter.finagle.client
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.client.LatencyCompensation.Compensator
 import com.twitter.finagle.service.TimeoutFilter
 import com.twitter.finagle.stack.nilStack
@@ -10,7 +10,7 @@ import com.twitter.finagle.server.utils.StringServer
 import com.twitter.util._
 import java.net.InetSocketAddress
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.junit.AssertionsForJUnit
+import org.scalatestplus.junit.AssertionsForJUnit
 import org.scalatest.{BeforeAndAfterEach, FunSuite}
 
 /**
@@ -100,7 +100,11 @@ class LatencyCompensationTest
      * N.B. connection timeout compensation is not tested
      * end-to-end-because it's tricky to cause connection latency.
      */
-    def whileConnected(echoClient: StringClient.Client)(f: Service[String, String] => Unit): Unit = {
+    def whileConnected(
+      echoClient: StringClient.Client
+    )(
+      f: Service[String, String] => Unit
+    ): Unit = {
       val server = StringServer.server.serve("127.1:0", service)
       val ia = server.boundAddress.asInstanceOf[InetSocketAddress]
       val addr = Addr.Bound(Set[Address](Address(ia)), metadata)
@@ -210,7 +214,7 @@ class LatencyCompensationTest
             assert(!sup.isDefined)
             assert(respond.interrupted == None)
 
-            clock.advance(4.seconds)
+            clock.advance(6.seconds)
             timer.tick() // triggers the timeout
 
             eventually {
@@ -225,34 +229,34 @@ class LatencyCompensationTest
       }
     }
 
-    test("Latency compensator doesn't always add compensation") {
-      new Ctx {
-        Time.withCurrentTimeFrozen { clock =>
-          whileConnected(compensatedEchoClient) { client =>
-            val nm = client("nm")
-            assert(!nm.isDefined)
-            assert(respond.interrupted.isEmpty)
+  test("Latency compensator doesn't always add compensation") {
+    new Ctx {
+      Time.withCurrentTimeFrozen { clock =>
+        whileConnected(compensatedEchoClient) { client =>
+          val nm = client("nm")
+          assert(!nm.isDefined)
+          assert(respond.interrupted.isEmpty)
 
-            awaitReceipt()
-            assert(!nm.isDefined)
-            assert(respond.interrupted.isEmpty)
+          awaitReceipt()
+          assert(!nm.isDefined)
+          assert(respond.interrupted.isEmpty)
 
-            clock.advance(2.seconds)
-            timer.tick() // triggers the timeout
+          clock.advance(2.seconds)
+          timer.tick() // triggers the timeout
 
-            eventually {
-              assert(nm.isDefined)
-            }
-            eventually {
-              assert(respond.interrupted.isDefined)
-            }
-            intercept[IndividualRequestTimeoutException] {
-              Await.result(nm, 10.seconds)
-            }
+          eventually {
+            assert(nm.isDefined)
+          }
+          eventually {
+            assert(respond.interrupted.isDefined)
+          }
+          intercept[IndividualRequestTimeoutException] {
+            Await.result(nm, 10.seconds)
           }
         }
       }
     }
+  }
 
   test("Latency compensator doesn't apply if there's no base timeout") {
     new Ctx {

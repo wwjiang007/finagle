@@ -16,21 +16,21 @@ import java.util.BitSet
 case class Path(elems: Buf*) {
   require(elems.forall(Path.nonemptyBuf))
 
-  def startsWith(other: Path) = elems.startsWith(other.elems)
+  def startsWith(other: Path): Boolean = elems.startsWith(other.elems)
 
-  def take(n: Int) = Path(elems.take(n): _*)
-  def drop(n: Int) = Path(elems.drop(n): _*)
-  def ++(that: Path) =
+  def take(n: Int): Path = Path(elems.take(n): _*)
+  def drop(n: Int): Path = Path(elems.drop(n): _*)
+  def ++(that: Path): Path =
     if (that.isEmpty) this
     else Path((elems ++ that.elems): _*)
-  def size = elems.size
-  def isEmpty = elems.isEmpty
+  def size: Int = elems.size
+  def isEmpty: Boolean = elems.isEmpty
 
-  lazy val showElems = elems.map(Path.showElem(_))
+  lazy val showElems: Seq[String] = elems.map(Path.showElem(_))
 
-  lazy val show = showElems.mkString("/", "/", "")
+  lazy val show: String = showElems.mkString("/", "/", "")
 
-  override def toString = s"""Path(${showElems.mkString(",")})"""
+  override def toString: String = s"""Path(${showElems.mkString(",")})"""
 }
 
 object Path {
@@ -141,9 +141,7 @@ object Path {
    */
   object Utf8 {
     def apply(elems: String*): Path = {
-      val elems8 = elems map { el =>
-        Buf.Utf8(el)
-      }
+      val elems8 = elems map { el => Buf.Utf8(el) }
       Path(elems8: _*)
     }
 
@@ -157,8 +155,6 @@ object Path {
         elems(i) match {
           case Buf.Utf8(s) =>
             elemss(i) = s
-          case _ =>
-            return None
         }
         i += 1
       }

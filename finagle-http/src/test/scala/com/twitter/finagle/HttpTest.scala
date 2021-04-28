@@ -1,7 +1,7 @@
 package com.twitter.finagle
 
 import com.twitter.finagle.filter.NackAdmissionFilter
-import com.twitter.finagle.http.{Request, Response, serverErrorsAsFailures}
+import com.twitter.finagle.http.{ClientEndpointer, Request, Response, serverErrorsAsFailures}
 import com.twitter.finagle.service.{ReqRep, ResponseClass, ResponseClassifier}
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.util.{Await, Duration, Future, Return}
@@ -83,7 +83,7 @@ class HttpTest extends FunSuite with Eventually {
 
     val service = new Service[Request, Response] {
       def apply(request: Request): Future[Response] = {
-        val response = request.response
+        val response = Response()
         response.statusCode = 404
         response.write("hello")
         Future.value(response)
@@ -109,13 +109,13 @@ class HttpTest extends FunSuite with Eventually {
     eventually {
       assert(serverReceiver.counters(Seq("stats_test_server", "http", "status", "404")) == 1)
       assert(serverReceiver.counters(Seq("stats_test_server", "http", "status", "4XX")) == 1)
-      assert(serverReceiver.stats(Seq("stats_test_server", "http", "response_size")) == Seq(5.0))
 
       assert(clientReceiver.counters(Seq("stats_test_client", "http", "status", "404")) == 1)
       assert(clientReceiver.counters(Seq("stats_test_client", "http", "status", "4XX")) == 1)
-      assert(clientReceiver.stats(Seq("stats_test_client", "http", "response_size")) == Seq(5.0))
       assert(
-        clientReceiver.gauges.contains(Seq("stats_test_client", "dispatcher", "serial", "queue_size"))
+        clientReceiver.gauges.contains(
+          Seq("stats_test_client", "dispatcher", "serial", "queue_size")
+        )
       )
     }
   }
@@ -131,12 +131,10 @@ class HttpTest extends FunSuite with Eventually {
   }
 
   test("Netty 4 is a default implementation") {
-    val transporter = Http.client.params[Http.HttpImpl].transporter
+    val transporter = Http.client.params[Http.HttpImpl].clientEndpointer
     val listener = Http.server.params[Http.HttpImpl].listener
 
-    val addr = InetSocketAddress.createUnresolved("supdog", 0)
-
-    assert(transporter(Stack.Params.empty)(addr).toString == "Netty4Transporter")
+    assert(transporter == ClientEndpointer.HttpEndpointer)
     assert(listener(Stack.Params.empty).toString == "Netty4Listener")
   }
 }

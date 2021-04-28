@@ -43,25 +43,48 @@ is used. This gives us the simple classification rules of responses that are
 Custom Classifiers
 ~~~~~~~~~~~~~~~~~~
 
-Writing a custom classifier requires understanding of the few classes used. A
 ``ResponseClassifier`` is a ``PartialFunction`` from ``ReqRep`` to
-``ResponseClass``.
+``ResponseClass``. Custom classifiers allow the user to tell Finagle what
+constitutes a failed outcome, and also what to do about it. Users define
+classifiers in terms of ``ReqRep`` and ``Try``.
 
-Let's work our way backwards through those, beginning with ``ResponseClass``.
-This can be either ``Successful`` or ``Failed`` and those values are
-self-explanatory. There are three constants which will cover the vast majority
-of usage: ``Success``, ``NonRetryableFailure`` and ``RetryableFailure``. While
-as of today there is no distinction made between retryable and non-retryable
-failures, this lays the groundwork for use in the future.
+``rc``, defined below, is a classifier that tells Finagle that ``Throw`` means
+failure, and ``Return`` means success.
 
-A ``ReqRep`` is a request/response struct with a request of type ``Any`` and a
-response of type ``Try[Any]``. While all of this functionality is called
-response classification, you’ll note that classifiers make judgements on both a
-request and response.
+.. code-block:: scala
 
-Creating a custom ``ResponseClassifier`` is fairly straightforward for HTTP
-as the ``ReqRep`` is an ``http.Request`` and ``Try[http.Response]`` pair.
-Here is an example that counts HTTP 503s as failures:
+  val rc: ResponseClassifier = {
+    case ReqRep(req, Throw(exc)) => ResponseClass.RetryableFailure
+    case ReqRep(req, Return(rep)) => ResponseClass.Success
+  }
+
+A ``ReqRep`` is a request-response pair. This is so that classifiers can make
+judgements on both a request and response.
+
+More than just telling Finagle if this ``ReqRep`` is a successful or failed
+outcome, it also gives Finagle a hint about what it should do next. Finagle can
+respond to failed outcomes with some nuance, for example, it may retry the
+operation.
+
+``ResponseClass`` defines three classes of failure:
+
+- ``NonRetryableFailure``: Something went wrong, don't retry.
+- ``RetryableFailure``: Something went wrong, consider retrying the operation.
+- ``Ignorable``: Something went wrong, but it can be ignored.
+
+And, of course, ``Success`` means that the operation succeeded.
+``Ignorable`` does not apply to ``Success`` because it is a mapping from
+``FailureFlags.Ignorable`` which only applies to ``Failure`` and not any
+arbitrary response.
+
+It's important to note that classifiers are only consulted but not obeyed. For
+example, a classifier may emit ``Ignorable`` for a given ``ReqRep`` but what
+actually happens depends on how the caller chooses to interpret ``Ignorable``.
+Similarly, just because a classifier emits ``RetryableFailure`` does not mean
+the caller will retry the operation.
+
+Now that we've covered the basics, let's look at an example in HTTP. Here is
+an example that counts HTTP 503s as failures:
 
 .. code-block:: scala
 
@@ -93,9 +116,15 @@ classifiers can be written in terms of the Scrooge generated request type,
 .. code-block:: none
 
   exception NotFoundException { 1: string reason }
+  exception InvalidQueryException {
+    1: i32 errorCode
+  }
 
   service SocialGraph {
-    i32 follow(1: i64 follower, 2: i64 followee) throws (1: NotFoundException ex)
+    i32 follow(1: i64 follower, 2: i64 followee) throws (
+      1: NotFoundException ex1,
+      2: InvalidQueryException ex2
+    )
   }
 
 One possible classifier would be:
@@ -113,23 +142,33 @@ One possible classifier would be:
     case ReqRep(_, Return(x: Int)) if x == 0 =>
       ResponseClass.NonRetryableFailure
 
-    // #3
+    // #3 *Caution*
     case ReqRep(SocialGraph.Follow.Args(a, b), _) if a <= 0 =>
       ResponseClass.NonRetryableFailure
+
+    // #4
+    case ReqRep(_, Throw(_: InvalidQueryException)) =>
+      ResponseClass.Success
   }
 
 If you examine that classifier you'll note a few things. First (#1), the
-deserialized ``NotFoundException`` can be treated as a failure. Next (#2), a
+deserialized ``NotFoundException`` can be treated as a failure. Second (#2), a
 "successful" response can be examined to enable services using status codes to
-classify errors. Lastly (#3), the request can be introspected to make the
-decision.
+classify errors. Next (#3), the request can be introspected to make the
+decision - *HOWEVER* - if an exception is thrown at the Mux layer
+(ex: ``c.t.f.mux.ClientDiscardedRequestException``) there will **NOT**
+be a match against (#3). This style (#3) should be avoided for Thrift and ThriftMux.
+Instead, prefer to handle request specific details at the application layer, such as creating
+a `Filter <ServicesAndFilters.html#filters>`_ to reject the request, and reserve Response
+Classification to deal with wire level response concerns. Lastly (#4), the deserialized
+``InvalidQueryException`` can be treated as a successful response.
 
 Other Details
 ~~~~~~~~~~~~~
 
-If you have a response classifier that categorizes ``Returns`` as
-failures, note that they will be counted in the ``StatsFilter``
-as a ``com.twitter.finagle.service.ResponseClassificationSyntheticException`` in the
-``StatsReceiver`` to indicate when this happens. See the
+If you have a response classifier that categorizes non-Exceptions as failures, this includes
+Thrift Responses (#2) or embedded Thrift Exceptions (#1), note that they will be counted in
+the ``StatsFilter`` as a ``com.twitter.finagle.service.ResponseClassificationSyntheticException``
+in the ``StatsReceiver`` to indicate when this happens. See the
 `FAQ <https://twitter.github.io/finagle/guide/FAQ.html#what-is-a-com-twitter-finagle-service-responseclassificationsyntheticexception>`_
 for more details.

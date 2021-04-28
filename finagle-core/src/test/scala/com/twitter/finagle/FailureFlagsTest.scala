@@ -1,12 +1,13 @@
 package com.twitter.finagle
 
-import com.twitter.conversions.time._
-import com.twitter.util.{Await, Future, Throw}
+import java.util.concurrent.{Executors, ThreadPoolExecutor}
+import com.twitter.conversions.DurationOps._
+import com.twitter.util.{Await, Future, FuturePool, Throw}
 import org.scalacheck.Gen
 import org.scalatest.FunSuite
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 
-class FailureFlagsTest extends FunSuite with GeneratorDrivenPropertyChecks {
+class FailureFlagsTest extends FunSuite with ScalaCheckDrivenPropertyChecks {
   import FailureFlags._
 
   private def await[T](f: Future[T]): T =
@@ -100,4 +101,12 @@ class FailureFlagsTest extends FunSuite with GeneratorDrivenPropertyChecks {
     assert(ex == notWrapped)
   }
 
+  test("FuturePool doesn't obscure failure flags in interrupts") {
+    val executor = Executors.newFixedThreadPool(1).asInstanceOf[ThreadPoolExecutor]
+    val pool = FuturePool.interruptible(executor)
+    val f = pool { await(Future.never) }
+    f.raise(Failure.ignorable("hello"))
+    val ff = intercept[FailureFlags[_]] { await(f) }
+    assert(ff.isFlagged(FailureFlags.Ignorable))
+  }
 }

@@ -1,6 +1,6 @@
 package com.twitter.finagle.filter
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Filter.TypeAgnostic
 import com.twitter.finagle._
 import com.twitter.finagle.context.Contexts
@@ -9,7 +9,7 @@ import com.twitter.finagle.stack.Endpoint
 import com.twitter.util.{Await, Future}
 import java.util.concurrent.atomic.AtomicInteger
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 class ServerAdmissionControlTest extends FunSuite with MockitoSugar {
   class Ctx {

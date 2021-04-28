@@ -3,8 +3,9 @@ package com.twitter.finagle.http
 import com.twitter.finagle.builder.{ClientBuilder, ClientConfig}
 import com.twitter.finagle.client.StackClient
 import com.twitter.finagle.http.service.HttpResponseClassifier
+import com.twitter.finagle.param.{Tracer => TracerParam}
 import com.twitter.finagle.service.ResponseClassifier
-import com.twitter.finagle.{Name, Resolver, Service, client}
+import com.twitter.finagle.{Filter, Name, Resolver, Service, client}
 import com.twitter.util.Duration
 import com.twitter.util.tunable.Tunable
 import com.twitter.{finagle => ctf}
@@ -27,10 +28,7 @@ object MethodBuilder {
    *
    * @see [[com.twitter.finagle.Http.Client.methodBuilder(String)]]
    */
-  def from(
-    dest: String,
-    stackClient: StackClient[Request, Response]
-  ): MethodBuilder =
+  def from(dest: String, stackClient: StackClient[Request, Response]): MethodBuilder =
     from(Resolver.eval(dest), stackClient)
 
   /**
@@ -49,11 +47,13 @@ object MethodBuilder {
    *
    * @see [[com.twitter.finagle.Http.Client.methodBuilder(Name)]]
    */
-  def from(
-    dest: Name,
-    stackClient: StackClient[Request, Response]
-  ): MethodBuilder = {
-    val mb = client.MethodBuilder.from(dest, stackClient)
+  def from(dest: Name, stackClient: StackClient[Request, Response]): MethodBuilder = {
+    val initializer = HttpClientTraceInitializer.typeAgnostic(
+      stackClient.params[TracerParam].tracer
+    )
+    val mb = client.MethodBuilder
+      .from(dest, stackClient)
+      .withTraceInitializer(initializer)
     new MethodBuilder(mb)
   }
 
@@ -124,7 +124,7 @@ object MethodBuilder {
  *
  * A client that has timeouts and retries on a 418 status code.
  * {{{
- * import com.twitter.conversions.time._
+ * import com.twitter.conversions.DurationOps._
  * import com.twitter.finagle.Http
  * import com.twitter.finagle.service.{ReqRep, ResponseClass}
  * import com.twitter.util.Return
@@ -146,7 +146,7 @@ object MethodBuilder {
  * An example of setting a per-request timeout of 50 milliseconds and a total
  * timeout of 100 milliseconds:
  * {{{
- * import com.twitter.conversions.time._
+ * import com.twitter.conversions.DurationOps._
  * import com.twitter.finagle.Http
  * import com.twitter.finagle.http.MethodBuilder
  *
@@ -201,7 +201,7 @@ object MethodBuilder {
  * @see The [[https://twitter.github.io/finagle/guide/MethodBuilder.html user guide]].
  */
 class MethodBuilder private (mb: client.MethodBuilder[Request, Response])
-    extends client.MethodBuilderScaladoc[MethodBuilder] {
+    extends client.BaseMethodBuilder[MethodBuilder] {
 
   def withTimeoutTotal(howLong: Duration): MethodBuilder =
     new MethodBuilder(mb.withTimeout.total(howLong))
@@ -215,8 +215,14 @@ class MethodBuilder private (mb: client.MethodBuilder[Request, Response])
   def withTimeoutPerRequest(howLong: Tunable[Duration]): MethodBuilder =
     new MethodBuilder(mb.withTimeout.perRequest(howLong))
 
+  def withTraceInitializer(initializer: Filter.TypeAgnostic): MethodBuilder =
+    new MethodBuilder(mb.withTraceInitializer(initializer))
+
   def withRetryForClassifier(classifier: ResponseClassifier): MethodBuilder =
     new MethodBuilder(mb.withRetry.forClassifier(classifier))
+
+  def withMaxRetries(value: Int): MethodBuilder =
+    new MethodBuilder(mb.withRetry.maxRetries(value))
 
   def withRetryDisabled: MethodBuilder =
     new MethodBuilder(mb.withRetry.disabled)
@@ -227,10 +233,13 @@ class MethodBuilder private (mb: client.MethodBuilder[Request, Response])
    * This additionally causes any server error HTTP status codes (500s) to be retried.
    */
   def idempotent(maxExtraLoad: Double): MethodBuilder =
-    new MethodBuilder(mb.idempotent(
-      maxExtraLoad,
-      sendInterrupts = false,
-      HttpResponseClassifier.ServerErrorsAsFailures))
+    new MethodBuilder(
+      mb.idempotent(
+        maxExtraLoad,
+        sendInterrupts = false,
+        HttpResponseClassifier.ServerErrorsAsFailures
+      )
+    )
 
   /**
    * @inheritdoc
@@ -238,10 +247,13 @@ class MethodBuilder private (mb: client.MethodBuilder[Request, Response])
    * This additionally causes any server error HTTP status codes (500s) to be retried.
    */
   def idempotent(maxExtraLoad: Tunable[Double]): MethodBuilder =
-    new MethodBuilder(mb.idempotent(
-      maxExtraLoad,
-      sendInterrupts = false,
-      HttpResponseClassifier.ServerErrorsAsFailures))
+    new MethodBuilder(
+      mb.idempotent(
+        maxExtraLoad,
+        sendInterrupts = false,
+        HttpResponseClassifier.ServerErrorsAsFailures
+      )
+    )
 
   def nonIdempotent: MethodBuilder =
     new MethodBuilder(mb.nonIdempotent)
@@ -254,10 +266,11 @@ class MethodBuilder private (mb: client.MethodBuilder[Request, Response])
   def newService(methodName: String): Service[Request, Response] =
     mb.newService(methodName)
 
- /**
-  * Construct a [[Service]] to be used for the client.
-  */
+  /**
+   * Construct a [[Service]] to be used for the client.
+   */
   def newService: Service[Request, Response] =
     mb.newService
 
+  override def toString: String = mb.toString
 }

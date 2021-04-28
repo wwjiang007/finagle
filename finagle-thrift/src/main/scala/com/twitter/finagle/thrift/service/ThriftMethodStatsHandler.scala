@@ -7,7 +7,9 @@ import com.twitter.util.{Throw, Throwables, Try}
 
 private[thrift] object ThriftMethodStatsHandler {
 
-  def apply(method: ThriftMethod)(
+  def apply(
+    method: ThriftMethod
+  )(
     responseClassifier: ResponseClassifier,
     thriftMethodStats: ThriftMethodStats,
     args: method.Args,
@@ -16,6 +18,7 @@ private[thrift] object ThriftMethodStatsHandler {
     val responseClass =
       responseClassifier.applyOrElse(ReqRep(args, response), ResponseClassifier.Default)
     responseClass match {
+      case ResponseClass.Ignorable => // Do nothing.
       case ResponseClass.Successful(_) =>
         thriftMethodStats.successCounter.incr()
       case ResponseClass.Failed(_) =>

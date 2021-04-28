@@ -1,32 +1,31 @@
-java_thrift_library(
-    name = "thrift-java",
+create_thrift_libraries(
+    base_name = "thrift",
     sources = ["echo.thrift"],
-    compiler = "scrooge",
-    language = "java",
+    generate_languages = [
+        "java",
+        "scala",
+    ],
 )
 
-java_thrift_library(
-    name = "thrift-scala",
-    sources = ["echo.thrift"],
-    language = "scala",
-)
-
-java_thrift_library(
-    name = "test-thrift-scala",
+create_thrift_libraries(
+    base_name = "test-thrift",
     sources = [
         "fb303.thrift",
         "test.thrift",
     ],
-    compiler = "scrooge",
-    language = "scala",
+    generate_languages = [
+        "java",
+        "scala",
+    ],
 )
 
-java_thrift_library(
-    name = "test-thrift-java",
+create_thrift_libraries(
+    base_name = "delivery-thrift",
     sources = [
-        "fb303.thrift",
-        "test.thrift",
+        "delivery_service.thrift",
     ],
-    compiler = "scrooge",
-    language = "java",
+    generate_languages = [
+        "java",
+        "scala",
+    ],
 )

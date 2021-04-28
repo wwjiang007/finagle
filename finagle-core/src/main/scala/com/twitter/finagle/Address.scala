@@ -44,8 +44,13 @@ object Address {
     }
     def compare(a0: Address, a1: Address): Int = (a0, a1) match {
       case (Address.Inet(inet0, _), Address.Inet(inet1, _)) =>
-        if (inet0.isUnresolved || inet1.isUnresolved) 0
-        else {
+        if (inet0.isUnresolved && inet1.isUnresolved) {
+          inet0.toString.compareTo(inet1.toString)
+        } else if (inet0.isUnresolved) {
+          -1
+        } else if (inet1.isUnresolved) {
+          1
+        } else {
           val ipHash0 = MurmurHash3.bytesHash(inet0.getAddress.getAddress, seed)
           val ipHash1 = MurmurHash3.bytesHash(inet1.getAddress.getAddress, seed)
           val ipCompare = Integer.compare(ipHash0, ipHash1)
@@ -59,7 +64,7 @@ object Address {
       case _ => 0
     }
 
-    override def toString: String = "HashOrdering"
+    override def toString: String = s"HashOrdering($seed)"
   }
 
   /**
@@ -72,6 +77,21 @@ object Address {
    */
   case class Failed(cause: Throwable) extends Address
 
+  /**
+   * An endpoint address represented by a [[com.twitter.finagle.ServiceFactory]]
+   * that implements the endpoint.
+   */
+  case class ServiceFactory[Req, Rep](
+    factory: com.twitter.finagle.ServiceFactory[Req, Rep],
+    metadata: Addr.Metadata)
+      extends Address
+
+  object ServiceFactory {
+    def apply[Req, Rep](
+      factory: com.twitter.finagle.ServiceFactory[Req, Rep]
+    ): ServiceFactory[Req, Rep] = ServiceFactory(factory, Addr.Metadata.empty)
+  }
+
   /** Create a new [[Address]] with given [[java.net.InetSocketAddress]]. */
   def apply(addr: InetSocketAddress): Address =
     Address.Inet(addr, Addr.Metadata.empty)
@@ -83,24 +103,11 @@ object Address {
   /** Create a new loopback [[Address]] with the given `port`. */
   def apply(port: Int): Address =
     Address(new InetSocketAddress(InetAddress.getLoopbackAddress, port))
-}
 
-package exp {
-  object Address {
+  /** Create a new [[Address]] with the given [[com.twitter.finagle.ServiceFactory]]. */
+  def apply[Req, Rep](factory: com.twitter.finagle.ServiceFactory[Req, Rep]): Address =
+    Address.ServiceFactory(factory, Addr.Metadata.empty)
 
-    /** Create a new [[Address]] with the given [[com.twitter.finagle.ServiceFactory]]. */
-    def apply[Req, Rep](factory: com.twitter.finagle.ServiceFactory[Req, Rep]): Address =
-      Address.ServiceFactory(factory, Addr.Metadata.empty)
-
-    /**
-     * An endpoint address represented by a [[com.twitter.finagle.ServiceFactory]]
-     * that implements the endpoint.
-     */
-    case class ServiceFactory[Req, Rep](
-      factory: com.twitter.finagle.ServiceFactory[Req, Rep],
-      metadata: Addr.Metadata
-    ) extends Address
-  }
 }
 
 /**

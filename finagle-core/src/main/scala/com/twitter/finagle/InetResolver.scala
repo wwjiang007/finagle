@@ -3,7 +3,7 @@ package com.twitter.finagle
 import com.github.benmanes.caffeine.cache.{CacheLoader, Caffeine, LoadingCache}
 import com.twitter.cache.caffeine.CaffeineCache
 import com.twitter.concurrent.AsyncSemaphore
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stats.{DefaultStatsReceiver, StatsReceiver}
 import com.twitter.finagle.util.{DefaultTimer, InetSocketAddressUtil, Updater}
 import com.twitter.logging.Logger
@@ -33,7 +33,7 @@ private[finagle] class DnsResolver(statsReceiver: StatsReceiver, resolvePool: Fu
     } else {
       dnsLookups.incr()
       dnsCond.acquire().flatMap { permit =>
-        resolvePool(InetAddress.getAllByName(host).toSeq)
+        resolvePool(InetSocketAddressUtil.getAllByName(host).toSeq)
           .onFailure { e =>
             log.debug(s"Failed to resolve $host. Error $e")
             dnsLookupFailures.incr()
@@ -58,13 +58,18 @@ object InetResolver {
   def apply(unscopedStatsReceiver: StatsReceiver, resolvePool: FuturePool): Resolver =
     apply(unscopedStatsReceiver, Some(5.seconds), resolvePool)
 
-  def apply(unscopedStatsReceiver: StatsReceiver, pollIntervalOpt: Option[Duration], resolvePool: FuturePool) = {
+  def apply(
+    unscopedStatsReceiver: StatsReceiver,
+    pollIntervalOpt: Option[Duration],
+    resolvePool: FuturePool
+  ) = {
     val statsReceiver = unscopedStatsReceiver.scope("inet").scope("dns")
     new InetResolver(
       new DnsResolver(statsReceiver, resolvePool),
       statsReceiver,
       pollIntervalOpt,
-      resolvePool)
+      resolvePool
+    )
   }
 }
 
@@ -72,8 +77,8 @@ private[finagle] class InetResolver(
   resolveHost: String => Future[Seq[InetAddress]],
   statsReceiver: StatsReceiver,
   pollIntervalOpt: Option[Duration],
-  resolvePool: FuturePool
-) extends Resolver {
+  resolvePool: FuturePool)
+    extends Resolver {
   import InetSocketAddressUtil._
 
   type HostPortMetadata = (String, Int, Addr.Metadata)
@@ -98,9 +103,7 @@ private[finagle] class InetResolver(
       .collectToTry(hp.map {
         case (host, port, meta) =>
           resolveHost(host).map { inetAddrs =>
-            inetAddrs.map { inetAddr =>
-              Address.Inet(new InetSocketAddress(inetAddr, port), meta)
-            }
+            inetAddrs.map { inetAddr => Address.Inet(new InetSocketAddress(inetAddr, port), meta) }
           }
       })
       .flatMap { seq: Seq[Try[Seq[Address]]] =>
@@ -188,7 +191,7 @@ object FixedInetResolver {
     apply(unscopedStatsReceiver, 16000)
 
   def apply(unscopedStatsReceiver: StatsReceiver, maxCacheSize: Long): InetResolver =
-    apply(unscopedStatsReceiver, maxCacheSize, Stream.empty, DefaultTimer)
+    apply(unscopedStatsReceiver, maxCacheSize, Backoff.empty, DefaultTimer)
 
   /**
    * Uses a [[com.twitter.util.Future]] cache to memoize lookups.
@@ -196,12 +199,12 @@ object FixedInetResolver {
    * @param maxCacheSize Specifies the maximum number of `Futures` that can be cached.
    *                     No maximum size limit if Long.MaxValue.
    * @param backoffs Optionally retry DNS resolution failures using this sequence of
-   *                 durations for backoff. Stream.empty means don't retry.
+   *                 durations for backoff. [[Backoff.empty]] means don't retry.
    */
   def apply(
     unscopedStatsReceiver: StatsReceiver,
     maxCacheSize: Long,
-    backoffs: Stream[Duration],
+    backoffs: Backoff,
     timer: Timer
   ): InetResolver = {
     val statsReceiver = unscopedStatsReceiver.scope("inet").scope("dns")
@@ -220,24 +223,23 @@ object FixedInetResolver {
   private[finagle] def cache(
     resolveHost: String => Future[Seq[InetAddress]],
     maxCacheSize: Long,
-    backoffs: Stream[Duration] = Stream.empty,
+    backoffs: Backoff = Backoff.empty,
     timer: Timer = DefaultTimer
   ): LoadingCache[String, Future[Seq[InetAddress]]] = {
 
     val cacheLoader = new CacheLoader[String, Future[Seq[InetAddress]]]() {
       def load(host: String): Future[Seq[InetAddress]] = {
         // Optionally retry failed DNS resolutions with specified backoff.
-        def retryingLoad(nextBackoffs: Stream[Duration]): Future[Seq[InetAddress]] = {
+        def retryingLoad(nextBackoffs: Backoff): Future[Seq[InetAddress]] = {
           resolveHost(host).rescue {
             case exc: UnknownHostException =>
-              nextBackoffs match {
-                case nextBackoff #:: restBackoffs =>
-                  log.debug(
-                    s"Caught UnknownHostException resolving host '$host'. Retrying in $nextBackoff..."
-                  )
-                  Future.sleep(nextBackoff)(timer).before(retryingLoad(restBackoffs))
-                case Stream.Empty =>
-                  Future.exception(exc)
+              if (nextBackoffs.isExhausted) {
+                Future.exception(exc)
+              } else {
+                log.debug(
+                  s"Caught UnknownHostException resolving host '$host'. Retrying in ${nextBackoffs.duration}..."
+                )
+                Future.sleep(nextBackoffs.duration)(timer).before(retryingLoad(nextBackoffs.next))
               }
           }
         }
@@ -263,8 +265,8 @@ object FixedInetResolver {
  */
 private[finagle] class FixedInetResolver(
   cache: LoadingCache[String, Future[Seq[InetAddress]]],
-  statsReceiver: StatsReceiver
-) extends InetResolver(
+  statsReceiver: StatsReceiver)
+    extends InetResolver(
       CaffeineCache.fromLoadingCache(cache),
       statsReceiver,
       None,

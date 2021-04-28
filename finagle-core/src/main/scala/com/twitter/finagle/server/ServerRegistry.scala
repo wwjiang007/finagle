@@ -1,17 +1,41 @@
 package com.twitter.finagle.server
 
+import com.twitter.finagle.ClientConnection
 import com.twitter.finagle.util.{InetSocketAddressUtil, StackRegistry}
 import com.twitter.logging.Level
-import com.twitter.util.Time
 import java.net.SocketAddress
 import java.util.concurrent.ConcurrentHashMap
 import java.util.function.{Function => JFunction}
 import java.util.logging.Logger
 import scala.collection.JavaConverters._
 
-private[twitter] object ServerRegistry extends StackRegistry {
+private[twitter] object ServerRegistry extends ServerRegistry {
   private val log = Logger.getLogger(getClass.getName)
-  private var addrNames = Map[SocketAddress, String]()
+
+  /**
+   * Used to maintain a registry of client connections to a server, represented by the remote
+   * [[SocketAddress]], to [[ClientConnection]].
+   *
+   * @note This is scoped as private[twitter] so that it is accessible by TwitterServer.
+   */
+  private[twitter] class ConnectionRegistry(localAddr: SocketAddress) {
+    private[this] val map = new ConcurrentHashMap[SocketAddress, ClientConnection]
+
+    def register(session: ClientConnection): ClientConnection =
+      map.put(session.remoteAddress, session)
+
+    def unregister(session: ClientConnection): Unit = map.remove(session.remoteAddress)
+
+    def iterator: Iterator[ClientConnection] = map.values.iterator.asScala
+
+    def clear(): Unit = map.clear()
+  }
+}
+
+private[twitter] class ServerRegistry extends StackRegistry {
+  import ServerRegistry._
+
+  private[this] var addrNames = Map[SocketAddress, String]()
 
   def registryName: String = "server"
 
@@ -52,24 +76,5 @@ private[twitter] object ServerRegistry extends StackRegistry {
       new ConnectionRegistry(localAddr)
   }
 
-  private[server] case class ConnectionInfo(establishedAt: Time)
-
-  /**
-   * Used to maintain a registry of connections to a server, represented by the remote
-   * [[SocketAddress]], to [[ConnectionInfo]].
-   */
-  private[server] class ConnectionRegistry(localAddr: SocketAddress) {
-
-    private[this] val map = new ConcurrentHashMap[SocketAddress, ConnectionInfo]
-
-    def register(remoteAddr: SocketAddress): ConnectionInfo =
-      map.put(remoteAddr, ConnectionInfo(Time.now))
-
-    def unregister(remoteAddr: SocketAddress): Unit = map.remove(remoteAddr)
-
-    def iterator: Iterator[SocketAddress] = map.keySet.iterator.asScala
-
-    // Exposed for testing
-    def clear(): Unit = map.clear()
-  }
+  private[twitter] def serverAddresses: Seq[SocketAddress] = registries.keySet().asScala.toSeq
 }

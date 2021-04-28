@@ -1,27 +1,24 @@
 package com.twitter.finagle.mysql.integration
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.mysql.{IsolationLevel, LongValue, ServerError, StdClient}
 import com.twitter.finagle.stats.InMemoryStatsReceiver
-import com.twitter.util.{Await, Future}
+import com.twitter.util.{Await, Awaitable}
 import org.scalatest.FunSuite
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
 
-class TransactionTest extends FunSuite
-  with IntegrationClient
-  with Eventually
-  with IntegrationPatience {
+class TransactionTest
+    extends FunSuite
+    with IntegrationClient
+    with Eventually
+    with IntegrationPatience {
 
-  private def await[T](f: Future[T]): T = Await.result(f, 5.seconds)
+  private[this] def await[T](t: Awaitable[T]): T = Await.result(t, 5.seconds)
 
   test("Simple transaction") {
     for (c <- client) {
       assertResult(Seq(Seq(LongValue(1)))) {
-        await(c.transaction { client =>
-          client.select("SELECT 1") { row =>
-            row.values
-          }
-        })
+        await(c.transaction { client => client.select("SELECT 1") { row => row.values } })
       }
     }
   }
@@ -38,9 +35,7 @@ class TransactionTest extends FunSuite
       for (iso <- isolationLevels) {
         assertResult(Seq(Seq(LongValue(1)))) {
           await(c.transactionWithIsolation(iso) { client =>
-            client.select("SELECT 1") { row =>
-              row.values
-            }
+            client.select("SELECT 1") { row => row.values }
           })
         }
       }

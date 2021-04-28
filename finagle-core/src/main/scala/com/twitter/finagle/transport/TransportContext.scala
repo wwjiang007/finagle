@@ -1,29 +1,14 @@
 package com.twitter.finagle.transport
 
-import com.twitter.finagle.Status
-import com.twitter.util.{Future, Closable, Time, Updatable}
+import com.twitter.finagle.ssl.session.{NullSslSessionInfo, SslSessionInfo}
+import com.twitter.util.Updatable
 import java.net.SocketAddress
-import java.security.cert.Certificate
 
 /**
  * Exposes a way to control the transport, and read off properties from the
  * transport.
  */
-abstract class TransportContext extends Closable {
-
-  /**
-   * The status of this transport; see [[com.twitter.finagle.Status]] for
-   * status definitions.
-   */
-  def status: Status
-
-  /**
-   * The channel closed with the given exception. This is the
-   * same exception you would get if attempting to read or
-   * write on the Transport, but this allows clients to listen to
-   * close events.
-   */
-  def onClose: Future[Throwable]
+abstract class TransportContext {
 
   /**
    * The locally bound address of this transport.
@@ -36,25 +21,18 @@ abstract class TransportContext extends Closable {
   def remoteAddress: SocketAddress
 
   /**
-   * The peer certificate if a TLS session is established.
+   * SSL/TLS session information associated with the transport.
+   *
+   * @note If SSL/TLS is not being used a `NullSslSessionInfo` will be returned instead.
    */
-  def peerCertificate: Option[Certificate]
+  def sslSessionInfo: SslSessionInfo
 }
 
-/**
- * A TransportContext that can derive its methods from an underlying transport.
- *
- * Useful as a stopgap before implementing the methods on TransportContext
- * directly.
- */
-private[finagle] class LegacyContext(underlying: Transport[_, _]) extends TransportContext {
-  def status: Status = underlying.status
-  def close(deadline: Time): Future[Unit] = underlying.close(deadline)
-  def onClose: Future[Throwable] = underlying.onClose
-  def localAddress: SocketAddress = underlying.localAddress
-  def remoteAddress: SocketAddress = underlying.remoteAddress
-  def peerCertificate: Option[Certificate] = underlying.peerCertificate
-}
+private[finagle] class SimpleTransportContext(
+  val localAddress: SocketAddress = new SocketAddress {},
+  val remoteAddress: SocketAddress = new SocketAddress {},
+  val sslSessionInfo: SslSessionInfo = NullSslSessionInfo)
+    extends TransportContext
 
 private[finagle] class UpdatableContext(first: TransportContext)
     extends TransportContext
@@ -65,10 +43,7 @@ private[finagle] class UpdatableContext(first: TransportContext)
     underlying = context
   }
 
-  def status: Status = underlying.status
-  def close(deadline: Time): Future[Unit] = underlying.close(deadline)
-  def onClose: Future[Throwable] = underlying.onClose
   def localAddress: SocketAddress = underlying.localAddress
   def remoteAddress: SocketAddress = underlying.remoteAddress
-  def peerCertificate: Option[Certificate] = underlying.peerCertificate
+  def sslSessionInfo: SslSessionInfo = underlying.sslSessionInfo
 }

@@ -2,10 +2,10 @@ package com.twitter.finagle.decoder
 
 import com.twitter.io.Buf
 import org.scalatest.FunSuite
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 import scala.util.Random
 
-class LengthFieldFramerTest extends FunSuite with GeneratorDrivenPropertyChecks {
+class LengthFieldFramerTest extends FunSuite with ScalaCheckDrivenPropertyChecks {
 
   val MaxTestFrameSize = 32
   val MaxTestFrames = 30
@@ -49,9 +49,7 @@ class LengthFieldFramerTest extends FunSuite with GeneratorDrivenPropertyChecks 
     val frames = rand.nextInt(MaxTestFrames) + 1
     val frameSizes = (1 to frames).map(_ => rand.nextInt(MaxTestFrameSize))
     val stream = frameSizes
-      .map { size =>
-        mkTestFrame(size)
-      }
+      .map { size => mkTestFrame(size) }
       .foldLeft(Buf.Empty)(_.concat(_))
     (frameSizes, stream)
   }
@@ -86,7 +84,7 @@ class LengthFieldFramerTest extends FunSuite with GeneratorDrivenPropertyChecks 
 
   test("behave properly for frames that report zero size") {
     // [1 byte magic][2 bytes size of data][data]
-    val packetSizeOne = mkBuf(0x11, 0x00, 0x01, 0x0D)
+    val packetSizeOne = mkBuf(0x11, 0x00, 0x01, 0x0d)
     val packetSizeZero = mkBuf(0x11, 0x00, 0x00)
 
     val decoder = new LengthFieldFramer(
@@ -107,7 +105,7 @@ class LengthFieldFramerTest extends FunSuite with GeneratorDrivenPropertyChecks 
     "behave properly if the length field is in the middle and the given length counts the header"
   ) {
     //               { header     len  header}{ data                     }
-    val frame = mkBuf(0x0A, 0x0A, 0x09, 0x0A, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D)
+    val frame = mkBuf(0x0a, 0x0a, 0x09, 0x0a, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d)
     val decoder = new LengthFieldFramer(
       lengthFieldBegin = 2,
       lengthFieldLength = 1,
@@ -121,7 +119,7 @@ class LengthFieldFramerTest extends FunSuite with GeneratorDrivenPropertyChecks 
   }
 
   test("throw FrameTooLargeException when a frame exceeds maxFrameLength") {
-    val frame = mkBuf(0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+    val frame = mkBuf(0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
     val decoder = new LengthFieldFramer(
       lengthFieldBegin = 0,
       lengthFieldLength = 1,

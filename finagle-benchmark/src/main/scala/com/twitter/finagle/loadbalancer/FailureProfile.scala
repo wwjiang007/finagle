@@ -18,14 +18,13 @@ private object FailureProfile {
 
   /**
    * Creates a failure profile from a file where each line is a boolean
-   * representing a response success or failure. One of these responses is 
-   * picked uniformly at random as a starting point for the profile. Retrieving 
+   * representing a response success or failure. One of these responses is
+   * picked uniformly at random as a starting point for the profile. Retrieving
    * the next response type is synchronized across threads
    */
   def fromFile(path: java.net.URL): () => Boolean = {
-    val responses = Source.fromURL(path).getLines.toIndexedSeq.map { line: String =>
-      line.toBoolean
-    }
+    val responses =
+      Source.fromURL(path).getLines.toIndexedSeq.map { line: String => line.toBoolean }
 
     () => responses(rng.nextInt(responses.size))
   }
@@ -36,6 +35,7 @@ private object FailureProfile {
  * a success or failure based on the elapsed time.
  */
 private class FailureProfile(elapsed: () => Duration) {
+
   /** Successfully fulfill requests within the healthy period but fail all else. */
   def failAfter(healthyPeriod: Duration): () => Boolean = () => {
     val timeElapsed = elapsed()

@@ -13,7 +13,7 @@ private[finagle] object ReqRepFilter {
     case Message.RreqError(_, error) =>
       Throw(ServerApplicationError(error))
 
-    case r@ Message.RdispatchOk(_, _, rep) =>
+    case r @ Message.RdispatchOk(_, _, rep) =>
       Return(Response(ReqRepHeaders.responseHeaders(r), rep))
 
     case Message.RdispatchError(_, contexts, error) =>
@@ -26,7 +26,7 @@ private[finagle] object ReqRepFilter {
 
     case Message.RdispatchNack(_, contexts) =>
       val exn = MuxFailure.fromContexts(contexts) match {
-        case Some(f) => Failure(Failure.RetryableNackFailure.why, f.finagleFlags)
+        case Some(f) => Failure.RetryableNackFailure.withFlags(f.finagleFlags)
         case None => Failure.RetryableNackFailure
       }
       Throw(exn)

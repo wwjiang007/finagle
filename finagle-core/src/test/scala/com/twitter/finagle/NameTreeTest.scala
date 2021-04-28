@@ -1,13 +1,10 @@
 package com.twitter.finagle
 
-import com.twitter.finagle.naming.DefaultInterpreter
-import org.junit.runner.RunWith
+import com.twitter.finagle.naming.{DefaultInterpreter, NamerExceededMaxDepthException}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 import scala.util.Random
 import scala.util.control.NonFatal
 
-@RunWith(classOf[JUnitRunner])
 class NameTreeTest extends FunSuite {
   val rng = new Random(1234L)
 
@@ -139,7 +136,7 @@ class NameTreeTest extends FunSuite {
       /foo/bar => /bar/foo;
       /bar/foo => /foo/bar""")
 
-    intercept[IllegalArgumentException] {
+    intercept[NamerExceededMaxDepthException] {
       DefaultInterpreter.bind(dtab, Path.read("/foo/bar")).sample()
     }
   }
@@ -157,16 +154,13 @@ class NameTreeTest extends FunSuite {
       "~ | (~ | $) | /blah" -> Some(Set.empty),
       "(~|$|/foo) & (/bar|/blah) & ~ & /FOO" -> Some(Set("/bar", "/FOO")),
       "! | /ok" -> None,
-      "/ok & !" -> None,
+      "/ok & !" -> Some(Set("/ok")),
+      "! & ! & !" -> None,
       "~ | /ok | !" -> Some(Set("/ok"))
     )
 
     for ((tree, res) <- cases) {
-      val expect = res map { set =>
-        set map { el: String =>
-          Path.read(el)
-        }
-      }
+      val expect = res map { set => set map { el: String => Path.read(el) } }
 
       assert(NameTree.read(tree).eval == expect)
       assert(NameTree.read(tree).simplified.eval == expect)

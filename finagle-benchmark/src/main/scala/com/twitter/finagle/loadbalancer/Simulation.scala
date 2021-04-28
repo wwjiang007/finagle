@@ -1,6 +1,6 @@
 package com.twitter.finagle.loadbalancer
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{param, Stack}
 import com.twitter.finagle.stats.SummarizingStatsReceiver
 import com.twitter.finagle.NoBrokersAvailableException
@@ -16,8 +16,16 @@ private object Simulation extends com.twitter.app.App {
 
   val coldStartBackend = flag("coldstart", false, "Add a cold starting backend")
   val slowMiddleBackend = flag("slowmiddle", false, "Adds a fast-then-slow-then-fast again backend")
-  val temporarilyFailedBackend = flag("temporaryfailure", false, "Adds an unhealthy backend that temporarily fails after 10 seconds for 15 seconds")
-  val permanentlyFailedBackend = flag("permanentfailure", false, "Adds an unhealthy backend that permanently fails after 10 seconds")
+  val temporarilyFailedBackend = flag(
+    "temporaryfailure",
+    false,
+    "Adds an unhealthy backend that temporarily fails after 10 seconds for 15 seconds"
+  )
+  val permanentlyFailedBackend = flag(
+    "permanentfailure",
+    false,
+    "Adds an unhealthy backend that permanently fails after 10 seconds"
+  )
 
   val showProgress = flag("showprogress", false, "Print stats each second")
   val showSummary = flag("showsummary", true, "Print a stats summary at the end of the test")
@@ -50,9 +58,7 @@ private object Simulation extends com.twitter.app.App {
         .toSet
     )
 
-    val activityServers = Activity(servers.map { srvs =>
-      Activity.Ok(srvs.toVector)
-    })
+    val activityServers = Activity(servers.map { srvs => Activity.Ok(srvs.toVector) })
 
     var clientCount: Int = 0
     val genClientId: () => String = () => {
@@ -106,9 +112,7 @@ private object Simulation extends com.twitter.app.App {
 
     val query: () => Future[Unit] = () => {
       Future
-        .collect(clients.map { clnt =>
-          clnt(())
-        })
+        .collect(clients.map { clnt => clnt(()) })
         .unit
     }
 
@@ -183,8 +187,9 @@ private object Simulation extends com.twitter.app.App {
         println("-" * 100)
         println(s"Requests at ${elapsed()}")
 
-        val lines = for ((name, fn) <- stats.gauges.toSeq)
-          yield (name.mkString("/"), fn())
+        val lines =
+          for ((name, fn) <- stats.gauges.toSeq)
+            yield (name.mkString("/"), fn())
         for ((name, value) <- lines.sortBy(_._1))
           println(s"$name $value")
       }

@@ -1,7 +1,7 @@
 package com.twitter.finagle.server
 
 import com.github.benmanes.caffeine.cache.{Cache, Caffeine}
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stats.{Counter, Gauge, StatsReceiver, Verbosity}
 import com.twitter.finagle.{
   Filter,
@@ -25,10 +25,7 @@ import scala.collection.mutable
  *
  * @param statsReceiver normally will be scoped to "srv/$server_name/thread_usage/requests"
  */
-private class ThreadUsage(
-  statsReceiver: StatsReceiver,
-  timer: Timer
-) extends Closable { self =>
+private class ThreadUsage(statsReceiver: StatsReceiver, timer: Timer) extends Closable { self =>
 
   // all thread's current counts.
   //
@@ -43,7 +40,8 @@ private class ThreadUsage(
 
   private[this] val perThreadCounter = new ThreadLocal[Counter] {
     override def initialValue(): Counter =
-      statsReceiver.scope("per_thread")
+      statsReceiver
+        .scope("per_thread")
         .counter(Verbosity.Debug, Thread.currentThread.getName)
   }
 
@@ -115,6 +113,7 @@ private class ThreadUsage(
 
   def close(deadline: Time): Future[Unit] = {
     computeTask.cancel()
+    gauges.foreach(_.remove())
     Future.Done
   }
 }
@@ -123,9 +122,8 @@ object ThreadUsage {
 
   val role: Stack.Role = Stack.Role("ThreadUsage")
 
-  private class ThreadUsageFilter[Req, Rep](
-    threadUsage: ThreadUsage
-  ) extends Filter[Req, Rep, Req, Rep] {
+  private class ThreadUsageFilter[Req, Rep](threadUsage: ThreadUsage)
+      extends Filter[Req, Rep, Req, Rep] {
 
     def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = {
       threadUsage.increment()

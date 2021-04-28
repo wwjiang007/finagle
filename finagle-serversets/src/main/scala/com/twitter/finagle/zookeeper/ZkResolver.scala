@@ -11,13 +11,14 @@ import com.twitter.thrift.{Endpoint, ServiceInstance}
 import com.twitter.util.Var
 import java.net.InetSocketAddress
 import java.util.logging.{Level, Logger}
-import scala.collection.JavaConverters._
 import scala.collection.mutable
+import scala.jdk.CollectionConverters._
 
 /**
  * Indicates that a failure occurred while attempting to resolve a cluster
  * using a [[com.twitter.finagle.zookeeper.ZkAnnouncer]].
  */
+@deprecated("Prefer com.twitter.finagle.serverset2.Zk2Resolver", "2019-02-13")
 class ZkResolverException(msg: String) extends Exception(msg)
 
 // Note: this is still used by finagle-memcached.
@@ -72,6 +73,7 @@ private class ZkOffer(serverSet: ServerSet, path: String)
   def prepare() = inbound.recv.prepare()
 }
 
+@deprecated("Prefer com.twitter.finagle.serverset2.Zk2Resolver", "2019-02-13")
 class ZkResolver(factory: ZkClientFactory) extends Resolver {
   val scheme = "zk"
 
@@ -143,9 +145,7 @@ class ZkResolver(factory: ZkClientFactory) extends Resolver {
     )
 
     val v = Var[Addr](Addr.Pending)
-    stable foreach { newAddr =>
-      v() = newAddr
-    }
+    stable foreach { newAddr => v() = newAddr }
 
     v
   }

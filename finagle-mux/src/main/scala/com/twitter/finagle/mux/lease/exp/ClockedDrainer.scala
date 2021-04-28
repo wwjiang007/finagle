@@ -1,8 +1,8 @@
 package com.twitter.finagle.mux.lease.exp
 
 import com.twitter.app.GlobalFlag
-import com.twitter.conversions.storage.intToStorageUnitableWholeNumber
-import com.twitter.conversions.time._
+import com.twitter.conversions.StorageUnitOps._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stats.{StatsReceiver, NullStatsReceiver, DefaultStatsReceiver}
 import com.twitter.util.{Duration, Stopwatch, StorageUnit, NilStopwatch}
 import java.util.Collections
@@ -38,8 +38,8 @@ private[finagle] class ClockedDrainer(
   log: Logger,
   lr: LogsReceiver = NullLogsReceiver,
   statsReceiver: StatsReceiver = NullStatsReceiver,
-  verbose: Boolean = false
-) extends Thread("GcDrainer")
+  verbose: Boolean = false)
+    extends Thread("GcDrainer")
     with Lessor {
 
   private[this] val lessees =
@@ -77,14 +77,14 @@ private[finagle] class ClockedDrainer(
     val openForGauge = statsReceiver.addGauge("openfor_ms") {
       openFor() match {
         case Duration.Finite(d) => d.inMilliseconds.toFloat
-        case _ => -1F
+        case _ => -1f
       }
     }
 
     val closedForGauge = statsReceiver.addGauge("closedfor_ms") {
       closedFor() match {
         case Duration.Finite(d) => d.inMilliseconds.toFloat
-        case _ => -1F
+        case _ => -1f
       }
     }
 
@@ -142,7 +142,8 @@ private[finagle] class ClockedDrainer(
     upkeep("open", init)
 
     coord.sleepUntilDiscountRemaining(
-      space, { () =>
+      space,
+      { () =>
         if (verbose) {
           log.info(
             "AWAIT-DISCOUNT: discount=" + space.discount() +
@@ -193,12 +194,15 @@ private[finagle] class ClockedDrainer(
       )
     }
 
-    coord.sleepUntilFinishedDraining(space, maxWait, npending, log)
+    coord.sleepUntilFinishedDraining(space, maxWait, npending _, log)
   }
 
   // GC
   // loop until the gc is acknowledged
-  private[lease] def gc(generation: Long, init: () => Duration): Unit = { // private[lease] for testing
+  private[lease] def gc(
+    generation: Long,
+    init: () => Duration
+  ): Unit = { // private[lease] for testing
     val elapsedGc = Stopwatch.start()
 
     forcedGc = 0
@@ -209,10 +213,12 @@ private[finagle] class ClockedDrainer(
       lr.record("byteLeft", coord.counter.info.remaining().inBytes.toString)
 
       forcedGc = 0
-      coord.sleepUntilGc({ () =>
-        forceGc()
-        forcedGc += 1
-      }, 10.milliseconds)
+      coord.sleepUntilGc(
+        { () =>
+          forceGc()
+          forcedGc += 1
+        },
+        10.milliseconds)
 
       stats.pendingAtGc.add(n)
       stats.forcedGcs.incr()

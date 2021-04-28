@@ -5,7 +5,7 @@ import com.twitter.finagle.Filter.TypeAgnostic
 import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.param.ProtocolLibrary
 import com.twitter.finagle.stats.{StatsReceiver, Verbosity}
-import com.twitter.util.{Future, Promise, Time}
+import com.twitter.util.{Future, Time}
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
 import scala.collection.JavaConverters._
 
@@ -37,11 +37,8 @@ private[twitter] object ServerAdmissionControl {
   /**
    * Passed to filter factories to allow behavioral adjustment on a per-service
    * basis rather than globally
-   *
-   * @param onServerClose can be used by filters to close any resources that may linger after the
-   *                      server closes
    */
-  case class ServerParams(protocol: String, onServerClose: Future[Unit])
+  case class ServerParams(protocol: String)
 
   // a map of admission control filters, key by name
   private[this] val acs: ConcurrentMap[String, ServerParams => TypeAgnostic] =
@@ -50,11 +47,15 @@ private[twitter] object ServerAdmissionControl {
   val role = new Stack.Role("Server Admission Controller")
 
   /**
-   * A class eligible for enabling admission control filters in the server Stack.
+   * The class is eligible for enabling admission control filters in the server Stack.
+   *
+   * @param serverAdmissionControlEnabled On/off switch for all admission controllers.
+   *                                      When this is set to `false`, all requests
+   *                                      bypass admission control.
    *
    * @see [[com.twitter.finagle.filter.ServerAdmissionControl]]
    */
-  case class Param(enabled: Boolean)
+  case class Param(serverAdmissionControlEnabled: Boolean)
   object Param {
     implicit val param = new Stack.Param[Param] {
       lazy val default = Param(true)
@@ -67,7 +68,7 @@ private[twitter] object ServerAdmissionControl {
    * This is primarily useful for testing.
    */
   private[finagle] case class Filters(overrides: Option[Seq[ServerParams => TypeAgnostic]])
-  object Filters {
+  private[finagle] object Filters {
     implicit val param: Stack.Param[Filters] = Stack.Param(Filters(None))
   }
 
@@ -115,35 +116,6 @@ private[twitter] object ServerAdmissionControl {
       val role = ServerAdmissionControl.role
       val description = "Proactively reject requests when the server operates beyond its capacity"
 
-      // The `serverACFilter` parameter represents the server-side AC filters which may
-      // potentially nack any request. They have no knowledge of whether a request can
-      // be retried or not, so if we have knowledge that a request cannot be retried, by
-      // the client we don't pass it through the `serverACFilter`.
-      private[this] final class NonretryableFilter(
-        serverACFilter: Filter[Req, Rep, Req, Rep],
-        protocolName: String,
-        statsReceiver: StatsReceiver
-      ) extends SimpleFilter[Req, Rep] {
-
-        private[this] val unRetryableCount = statsReceiver.counter(
-          Verbosity.Debug, "admission_control", protocolName, "nonretryable")
-
-        def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = {
-          // If the marker context element exists we presume the client can't retry the request
-          if (Contexts.local.contains(NonRetryable)) {
-            unRetryableCount.incr()
-            // We clear the value since at this time there is little value for the service to know
-            // whether the request is non-retryable. This could change in the future, especially if
-            // people want this information for their own application level nacking logic.
-            Contexts.local.letClear(NonRetryable) {
-              service(request)
-            }
-          } else {
-            serverACFilter(request, service)
-          }
-        }
-      }
-
       def make(
         _enabled: Param,
         protoLib: ProtocolLibrary,
@@ -153,8 +125,7 @@ private[twitter] object ServerAdmissionControl {
       ): ServiceFactory[Req, Rep] = {
         val Param(enabled) = _enabled
         val ProtocolLibrary(protoString) = protoLib
-        val onServerClose = new Promise[Unit]
-        val conf = ServerParams(protoString, onServerClose)
+        val conf = ServerParams(protoString)
 
         val filters = overrides.overrides match {
           case Some(filters) => filters
@@ -172,11 +143,14 @@ private[twitter] object ServerAdmissionControl {
             }
 
           // Add our predicate filter so we don't reject requests that can't be retried
-          val filter = new NonretryableFilter(typeAgnosticFilters.toFilter, protoLib.name, stats.statsReceiver)
+          val filter = new NonretryableFilter[Req, Rep](
+            typeAgnosticFilters.toFilter,
+            protoLib.name,
+            stats.statsReceiver
+          )
 
           new ServiceFactoryProxy[Req, Rep](filter.andThen(next)) {
             override def close(deadline: Time): Future[Unit] = {
-              onServerClose.setDone()
               self.close(deadline)
             }
           }
@@ -184,5 +158,43 @@ private[twitter] object ServerAdmissionControl {
       }
     }
   }
-}
 
+  /**
+   * It's the job of admission controllers to nack requests, but not all
+   * requests are retryable (e.g. HTTP streams). If we know (by inspecting the
+   * local context) that a request isn't safe to retry, then we bypass
+   * admission control.
+   */
+  def bypassNonRetryable[Req, Rep](
+    serverACFilter: Filter[Req, Rep, Req, Rep],
+    protocolName: String,
+    statsReceiver: StatsReceiver
+  ): SimpleFilter[Req, Rep] =
+    new NonretryableFilter(serverACFilter, protocolName, statsReceiver)
+
+  private final class NonretryableFilter[Req, Rep](
+    serverACFilter: Filter[Req, Rep, Req, Rep],
+    protocolName: String,
+    statsReceiver: StatsReceiver)
+      extends SimpleFilter[Req, Rep] {
+
+    private[this] val unRetryableCount =
+      statsReceiver.counter(Verbosity.Debug, "admission_control", protocolName, "nonretryable")
+
+    def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = {
+      // If the marker context element exists we presume the client can't retry the request
+      if (Contexts.local.contains(NonRetryable)) {
+        unRetryableCount.incr()
+        // We clear the value since at this time there is little value for the service to know
+        // whether the request is non-retryable. This could change in the future, especially if
+        // people want this information for their own application level nacking logic.
+        Contexts.local.letClear(NonRetryable) {
+          service(request)
+        }
+      } else {
+        serverACFilter(request, service)
+      }
+    }
+  }
+
+}

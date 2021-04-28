@@ -1,8 +1,8 @@
 package com.twitter.finagle.http
 
-import com.twitter.collection.RecordSchema
+import com.twitter.finagle.http.collection.RecordSchema
+import com.twitter.finagle.http.util.FailingWriter
 import com.twitter.io.{Buf, Pipe, Reader, Writer}
-import com.twitter.util.Closable
 import java.net.{InetAddress, InetSocketAddress}
 import java.util.{AbstractMap, List => JList, Map => JMap, Set => JSet}
 import scala.beans.BeanProperty
@@ -18,7 +18,7 @@ abstract class Request private extends Message {
 
   /**
    * Arbitrary user-defined context associated with this request object.
-   * [[com.twitter.collection.RecordSchema.Record RecordSchema.Record]] is
+   * [[com.twitter.finagle.http.collection.RecordSchema.Record RecordSchema.Record]] is
    * used here, rather than [[com.twitter.finagle.context.Context Context]] or similar
    * out-of-band mechanisms, to make the connection between the request and its
    * associated context explicit.
@@ -278,8 +278,8 @@ abstract class Request private extends Message {
 object Request {
 
   /**
-   * [[com.twitter.collection.RecordSchema RecordSchema]] declaration, used
-   * to generate [[com.twitter.collection.RecordSchema.Record Record]] instances
+   * [[com.twitter.finagle.http.collection.RecordSchema RecordSchema]] declaration, used
+   * to generate [[com.twitter.finagle.http.collection.RecordSchema.Record Record]] instances
    * for Request.ctx.
    */
   val Schema: RecordSchema = new RecordSchema
@@ -320,7 +320,7 @@ object Request {
     // Since this is a user made `Request` we use a Pipe so they
     // can keep a handle to the writer half and the client implementation can use
     // the reader half.
-    val rw = new Pipe[Buf]()
+    val rw = new Pipe[Chunk]
     val req = new Request.Impl(rw, rw, new InetSocketAddress(0))
 
     req.version = version
@@ -347,13 +347,11 @@ object Request {
    * }
    * }}}
    */
-  def apply(
-    version: Version,
-    method: Method,
-    uri: String,
-    reader: Reader[Buf]
-  ): Request = {
-    val req = new Request.Impl(reader, Writer.FailingWriter, new InetSocketAddress(0))
+  def apply(version: Version, method: Method, uri: String, reader: Reader[Buf]): Request = {
+    val req = new Request.Impl(
+      reader.map(Chunk.apply),
+      new InetSocketAddress(0)
+    )
 
     req.setChunked(true)
     req.version = version
@@ -398,10 +396,11 @@ object Request {
 
     def ctx: Schema.Record = request.ctx
     def remoteSocketAddress: InetSocketAddress = request.remoteSocketAddress
-    def reader: Reader[Buf] = request.reader
-    def writer: Writer[Buf] with Closable = request.writer
+    def chunkReader: Reader[Chunk] = request.chunkReader
+    def chunkWriter: Writer[Chunk] = request.chunkWriter
     override lazy val cookies: CookieMap = request.cookies
     def headerMap: HeaderMap = request.headerMap
+    def trailers: HeaderMap = request.trailers
     override def params: ParamMap = request.params
     override lazy val response: Response = request.response
     def uri: String = request.uri
@@ -418,16 +417,69 @@ object Request {
     final override def setChunked(chunked: Boolean): Unit = request.setChunked(chunked)
   }
 
-  private[finagle] final class Impl(
-    val reader: Reader[Buf],
-    val writer: Writer[Buf] with Closable,
-    val remoteSocketAddress: InetSocketAddress) extends Request {
+  /**
+   * An inbound request (a request received by a server) that could include trailers.
+   */
+  private[finagle] final class Inbound(
+    val chunkReader: Reader[Chunk],
+    val remoteSocketAddress: InetSocketAddress,
+    val trailers: HeaderMap)
+      extends Request {
 
-    private var _method: Method = Method.Get
-    private var _uri: String = ""
+    def chunkWriter: Writer[Chunk] = FailingWriter
+
+    @volatile private var _method: Method = Method.Get
+    @volatile private var _uri: String = ""
 
     val headerMap: HeaderMap = HeaderMap()
-    val ctx: Request.Schema.Record = Request.Schema.newRecord()
+
+    // Lazily created which allows those not using this functionality to not pay for it.
+    @volatile private[this] var _ctx: Request.Schema.Record = _
+    def ctx: Request.Schema.Record = {
+      if (_ctx == null) synchronized {
+        if (_ctx == null) _ctx = Request.Schema.newRecord()
+      }
+      _ctx
+    }
+
+    def method: Method = _method
+    def method_=(method: Method): Unit = {
+      _method = method
+    }
+
+    def uri: String = _uri
+    def uri_=(uri: String): Unit = {
+      _uri = uri
+    }
+  }
+
+  /**
+   * An outbound request (a request sent by a client).
+   */
+  private[finagle] final class Impl(
+    val chunkReader: Reader[Chunk],
+    val chunkWriter: Writer[Chunk],
+    val remoteSocketAddress: InetSocketAddress)
+      extends Request {
+
+    def this(chunkReader: Reader[Chunk], remoteSocketAddress: InetSocketAddress) =
+      this(chunkReader, FailingWriter, remoteSocketAddress)
+
+    @volatile private var _method: Method = Method.Get
+    @volatile private var _uri: String = ""
+
+    val headerMap: HeaderMap = HeaderMap()
+
+    // Lazily created which allows those not using this functionality to not pay for it.
+    @volatile private[this] var _ctx: Request.Schema.Record = _
+    def ctx: Request.Schema.Record = {
+      if (_ctx == null) synchronized {
+        if (_ctx == null) _ctx = Request.Schema.newRecord()
+      }
+      _ctx
+    }
+
+    def trailers: HeaderMap = HeaderMap.Empty
 
     def method: Method = _method
     def method_=(method: Method): Unit = {

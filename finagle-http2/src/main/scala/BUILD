@@ -1,19 +1,21 @@
 scala_library(
-    sources = rglobs("*.scala"),
-    compiler_option_sets = {"fatal_warnings"},
+    sources = ["**/*.scala"],
+    compiler_option_sets = ["fatal_warnings"],
     provides = scala_artifact(
         org = "com.twitter",
         name = "finagle-http2",
         repo = artifactory,
     ),
     dependencies = [
-        "3rdparty/jvm/io/netty",
         "3rdparty/jvm/io/netty:netty4",
         "3rdparty/jvm/io/netty:netty4-codec",
         "3rdparty/jvm/io/netty:netty4-codec-http",
         "3rdparty/jvm/io/netty:netty4-codec-http2",
         "3rdparty/jvm/io/netty:netty4-handler-proxy",
-        "3rdparty/jvm/io/netty:netty4-tcnative-boringssl-static",
+        scoped(
+            "3rdparty/jvm/io/netty:netty4-tcnative-boringssl-static",
+            scope = "runtime",
+        ),
         "finagle/finagle-base-http",
         "finagle/finagle-core",
         "finagle/finagle-netty4",

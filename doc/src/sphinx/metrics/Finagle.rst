@@ -1,3 +1,11 @@
+Tracing
+<<<<<<<
+
+**finagle/tracing/sampled**
+  A counter for the number of times a positive sampling decision is made on an
+  unsampled trace. A sampling decision is made using a client's configured ``Tracer``,
+  using ``Tracer#sampleTrace``.
+
 Aperture
 <<<<<<<<
 
@@ -45,6 +53,39 @@ Scheduler
   implementation. Note that this does not include time spent doing blocking code
   outside of ``com.twitter.util.Await.result``/``Await.ready``. For example,
   ``Future(someSlowSynchronousIO)`` would not be accounted for in this metric.
+
+OffloadFilter
+<<<<<<<<<<<<<
+
+These metrics correspond to the state of the offload filter thread pool when configured. 
+
+**finagle/offload_pool/pool_size**
+  A gauge of the number of threads in the pool.
+
+**finagle/offload_pool/active_tasks**
+  A gauge of the number of tasks actively executing.
+
+**finagle/offload_pool/completed_tasks**
+  A gauge of the number of total tasks that have completed execution.
+
+**finagle/offload_pool/not_offloaded_tasks**
+  A counter of how many tasks weren't offloaded because the queue has grown over a proposed limit
+  (set via a flag `com.twitter.finagle.offload.queueSize`). If a task can't be offloaded it is run
+  the caller thread which is commonly a Netty IO worker.
+
+**finagle/offload_pool/queue_depth**
+  A Gauge of the number of tasks that are waiting to be executed.
+
+**finagle/offload_pool/pending_tasks**
+  A histogram reporting the number of pending tasks in the offload queue. For efficiency reasons,
+  this stat is sampled each `com.twitter.finagle.offload.statsSampleInterval` interval. This stat is
+  only enabled if `statsSampleInterval` is both positive and finite.
+
+**finagle/offload_pool/delay_ms**
+  A histogram reporting offloading delay - how long a task has been sitting in the offload queue
+  before it gets executed. For efficiency reasons, this stat is sampled each
+  `com.twitter.finagle.offload.statsSampleInterval` interval. This stat is  only enabled if
+  `statsSampleInterval` is both positive and finite.
 
 Timer
 <<<<<
@@ -117,6 +158,11 @@ These metrics are exported from Finagle's underlying transport
 implementation, the Netty 4 library and available under `finagle/netty4`
 on any instance running Finagle with Netty 4.
 
+**worker_threads**
+  A gauge for the size of the Netty worker pool. This will only
+  reflect `EventLoopGroup`s constructed by Finagle and not those
+  manually created by the application.
+
 **pooling/allocations/huge** `verbosity:debug`
   A gauge of the total number of HUGE *direct allocations*
   (i.e., unpooled allocations that exceed the current chunk size).
@@ -150,7 +196,8 @@ on any instance running Finagle with Netty 4.
   (i.e., less than 512 bytes).
 
 **pooling/used*** `verbosity:debug`
-  A gauge of the number of bytes used for *direct allocations*.
+  A gauge of the number of bytes used for *direct allocations* (this includes buffers in the
+  thread-local caches).
 
 
 **reference_leaks**

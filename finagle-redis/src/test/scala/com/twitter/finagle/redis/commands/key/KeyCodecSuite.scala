@@ -5,10 +5,7 @@ import com.twitter.finagle.redis.tags.CodecTest
 import com.twitter.io.Buf
 import com.twitter.util.{Duration, Time}
 import java.net.InetSocketAddress
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 final class KeyCodecSuite extends RedisRequestTest {
 
   test("DEL", CodecTest) { checkMultiKey("DEL", Del.apply) }
@@ -20,8 +17,31 @@ final class KeyCodecSuite extends RedisRequestTest {
     val k = Seq(Buf.Utf8("foo"))
     val ks = Seq(Buf.Utf8("foo"), Buf.Utf8("bar"))
     val d = Duration.fromMilliseconds(5000)
-    assert(encodeCommand(Migrate(a, k, d)) == Seq("MIGRATE", "127.0.0.1", "9999", "", "0", "5000", "KEYS", "foo"))
-    assert(encodeCommand(Migrate(a, ks, d)) == Seq("MIGRATE", "127.0.0.1", "9999", "", "0", "5000", "KEYS", "foo", "bar"))
+    assert(
+      encodeCommand(Migrate(a, k, d)) == Seq(
+        "MIGRATE",
+        "127.0.0.1",
+        "9999",
+        "",
+        "0",
+        "5000",
+        "KEYS",
+        "foo"
+      )
+    )
+    assert(
+      encodeCommand(Migrate(a, ks, d)) == Seq(
+        "MIGRATE",
+        "127.0.0.1",
+        "9999",
+        "",
+        "0",
+        "5000",
+        "KEYS",
+        "foo",
+        "bar"
+      )
+    )
   }
   test("MOVE", CodecTest) { checkSingleKeySingleVal("MOVE", Move.apply) }
   test("PERSIST", CodecTest) { checkSingleKey("PERSIST", Persist.apply) }

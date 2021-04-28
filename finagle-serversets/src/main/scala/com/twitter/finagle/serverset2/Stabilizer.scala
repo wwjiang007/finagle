@@ -1,6 +1,6 @@
 package com.twitter.finagle.serverset2
 
-import com.twitter.finagle.serverset2.addr.ZkMetadata
+import com.twitter.finagle.partitioning.zk.ZkMetadata
 import com.twitter.finagle.{Addr, Address}
 import com.twitter.util._
 import java.net.InetSocketAddress
@@ -37,37 +37,38 @@ private object Stabilizer {
   private val InitState = State(Addr.Pending, EmptyBound, EmptyBound)
 
   private def coalesce(addrOrEpoch: Event[Either[Addr, Unit]]): Event[Addr] = {
-    addrOrEpoch.foldLeft(InitState) {
-      // new addr bound – merge it with our buffer.
-      case (State(result, buffer, _), Left(newBound: Addr.Bound)) =>
-        // if `result` is non-bound flush `newBound` immediately (buffer has been reset already)
-        val newResult = result match {
-          case _: Addr.Bound => result
-          case _ => newBound
-        }
-        // We propagate the metadata from `newBound` and replace the
-        // addresses with the merged set.
-        val newBuffer = newBound.copy(addrs = merge(buffer.addrs, newBound.addrs))
-        State(newResult, newBuffer, newBound)
+    addrOrEpoch
+      .foldLeft(InitState) {
+        // new addr bound – merge it with our buffer.
+        case (State(result, buffer, _), Left(newBound: Addr.Bound)) =>
+          // if `result` is non-bound flush `newBound` immediately (buffer has been reset already)
+          val newResult = result match {
+            case _: Addr.Bound => result
+            case _ => newBound
+          }
+          // We propagate the metadata from `newBound` and replace the
+          // addresses with the merged set.
+          val newBuffer = newBound.copy(addrs = merge(buffer.addrs, newBound.addrs))
+          State(newResult, newBuffer, newBound)
 
-      // non-bound address
-      case (state, Left(nonBound)) =>
-        (state.result, nonBound) match {
-          // failure/pending: propagate stale state if we have a previous bound.
-          case (_: Addr.Bound, Addr.Failed(_) | Addr.Pending) => state
-          // This guarantees that `result` is never set to an [[Addr.Failed]].
-          case (_, Addr.Failed(_)) => state.copy(result = Addr.Neg)
-          case (_, Addr.Pending) => state.copy(result = Addr.Pending)
-          // All other non-bound state gets propagated immediately. The state is also reset here.
-          case (_, _) => State(nonBound, EmptyBound, EmptyBound)
-        }
+        // non-bound address
+        case (state, Left(nonBound)) =>
+          (state.result, nonBound) match {
+            // failure/pending: propagate stale state if we have a previous bound.
+            case (_: Addr.Bound, Addr.Failed(_) | Addr.Pending) => state
+            // This guarantees that `result` is never set to an [[Addr.Failed]].
+            case (_, Addr.Failed(_)) => state.copy(result = Addr.Neg)
+            case (_, Addr.Pending) => state.copy(result = Addr.Pending)
+            // All other non-bound state gets propagated immediately. The state is also reset here.
+            case (_, _) => State(nonBound, EmptyBound, EmptyBound)
+          }
 
-      // epoch turned – promote buffer.
-      case (State(_: Addr.Bound, buffer, last), Right(())) => State(buffer, last, last)
-      case (state, Right(())) => state
-    }.map {
-      case State(result, _, _) => result
-    }
+        // epoch turned – promote buffer.
+        case (State(_: Addr.Bound, buffer, last), Right(())) => State(buffer, last, last)
+        case (state, Right(())) => state
+      }.map {
+        case State(result, _, _) => result
+      }
   }
 
   /**
@@ -87,7 +88,7 @@ private object Stabilizer {
         case Address.Inet(inet, md) =>
           inets = inets + inet
           ZkMetadata.fromAddrMetadata(md) match {
-            case Some(ZkMetadata(Some(shardId))) =>
+            case Some(ZkMetadata(Some(shardId), _)) =>
               shards = shards + shardId
             case _ => // nop
           }
@@ -99,7 +100,7 @@ private object Stabilizer {
     val filteredPrev: Set[Address] = prev.filter {
       case Address.Inet(inet, md) =>
         ZkMetadata.fromAddrMetadata(md) match {
-          case Some(ZkMetadata(Some(shardId))) => !shards.contains(shardId)
+          case Some(ZkMetadata(Some(shardId), _)) => !shards.contains(shardId)
           case _ => !inets.contains(inet)
         }
       case _ => true

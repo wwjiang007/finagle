@@ -1,24 +1,25 @@
 package com.twitter.finagle.mysql.integration
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.{IndividualRequestTimeoutException, Mysql}
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.{IndividualRequestTimeoutException, Mysql, mysql}
 import com.twitter.finagle.mysql._
 import com.twitter.finagle.stats.InMemoryStatsReceiver
-import com.twitter.util.{Await, Future}
+import com.twitter.util.{Await, Awaitable, Closable, Future}
 import java.sql.Date
 import org.scalatest.concurrent.Eventually
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
+import scala.collection.mutable.ArrayBuffer
 
 case class SwimmingRecord(
   event: String,
   time: Float,
   name: String,
   nationality: String,
-  date: Date
-) {
+  date: Date) {
   override def toString: String = {
     def q(s: String) = "'" + s + "'"
-    "(" + q(event) + "," + time + "," + q(name) + "," + q(nationality) + "," + q(date.toString) + ")"
+    "(" + q(event) + "," + time + "," + q(name) + "," + q(nationality) + "," + q(
+      date.toString) + ")"
   }
 }
 
@@ -34,26 +35,26 @@ object SwimmingRecord {
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8;"""
 
   val allRecords: List[SwimmingRecord] = List[SwimmingRecord](
-    SwimmingRecord("50 m freestyle", 20.91F, "Cesar Cielo", "Brazil", Date.valueOf("2009-12-18")),
-    SwimmingRecord("100 m freestyle", 46.91F, "Cesar Cielo", "Brazil", Date.valueOf("2009-08-02")),
+    SwimmingRecord("50 m freestyle", 20.91f, "Cesar Cielo", "Brazil", Date.valueOf("2009-12-18")),
+    SwimmingRecord("100 m freestyle", 46.91f, "Cesar Cielo", "Brazil", Date.valueOf("2009-08-02")),
     SwimmingRecord(
       "50 m backstroke",
-      24.04F,
+      24.04f,
       "Liam Tancock",
       "Great Britain",
       Date.valueOf("2009-08-02")
     ),
     SwimmingRecord(
       "100 m backstroke",
-      51.94F,
+      51.94f,
       "Aaron Peirsol",
       "United States",
       Date.valueOf("2009-07-08")
     ),
-    SwimmingRecord("50 m butterfly", 22.43F, "Rafael Munoz", "Spain", Date.valueOf("2009-05-05")),
+    SwimmingRecord("50 m butterfly", 22.43f, "Rafael Munoz", "Spain", Date.valueOf("2009-05-05")),
     SwimmingRecord(
       "100 m butterfly",
-      49.82F,
+      49.82f,
       "Michael Phelps",
       "United States",
       Date.valueOf("2009-07-29")
@@ -61,7 +62,7 @@ object SwimmingRecord {
     // this record is used to check how empty strings are handled.
     SwimmingRecord(
       "",
-      100.0F,
+      100.0f,
       "",
       "",
       Date.valueOf("2009-08-02")
@@ -69,14 +70,10 @@ object SwimmingRecord {
   )
 }
 
-class ClientTest extends FunSuite
-  with IntegrationClient
-  with BeforeAndAfterAll
-  with Eventually {
+class ClientTest extends FunSuite with IntegrationClient with BeforeAndAfterAll with Eventually {
   import SwimmingRecord._
 
-  private[this] def await[T](f: Future[T]): T =
-    Await.result(f, 5.seconds)
+  private[this] def await[T](t: Awaitable[T]): T = Await.result(t, 5.seconds)
 
   private val c: Client with Transactions = client.orNull
 
@@ -123,7 +120,7 @@ class ClientTest extends FunSuite
 
   test("query: insert values") {
     val insertSql =
-       """INSERT INTO `finagle-mysql-test` (`event`, `time`, `name`, `nationality`, `date`)
+      """INSERT INTO `finagle-mysql-test` (`event`, `time`, `name`, `nationality`, `date`)
        VALUES %s;""".format(allRecords.mkString(", "))
     val insertResult = await(c.query(insertSql))
     val ok = insertResult.asInstanceOf[OK]
@@ -163,6 +160,15 @@ class ClientTest extends FunSuite
       assert(allRecords(i) == res)
       i += 1
     }
+  }
+
+  test("can execute more prepared statements than allowed in cache") {
+    val queryStrings = (0 to (maxConcurrentPreparedStatements * 2)).map { i => s"SELECT $i" }
+    val queryResults = Future.collect(queryStrings.map { query =>
+      c.prepare(query)().map(_ => "ok")
+    })
+    val results = await(queryResults)
+    results.map { result => assert(result == "ok") }
   }
 
   test("prepared statement") {
@@ -319,7 +325,7 @@ class ClientTest extends FunSuite
         |begin
         |select *
         |from `finagle-mysql-test`
-        |where `event` = eventName collate utf8_general_ci;
+        |where `event` = convert(eventName using utf8) collate utf8_general_ci;
         |end
       """.stripMargin
 
@@ -333,12 +339,13 @@ class ClientTest extends FunSuite
         |drop procedure if exists getSwimmerByEvent
       """.stripMargin
 
+    // Drop the procedure if it was left over from a previously
+    // failed run.
+    await(c.query(dropProcedure))
     await(c.query(createProcedure))
 
     val result = await(
-      c.select(executeProcedure) { row =>
-        row.stringOrNull("name")
-      }
+      c.select(executeProcedure) { row => row.stringOrNull("name") }
     )
 
     assert(result == List("Cesar Cielo"))
@@ -347,14 +354,21 @@ class ClientTest extends FunSuite
 
   test("mysql server error during handshake is reported with error code") {
     // The default maximum number of connections is 150, so we open 151.
-    val err = intercept[Exception] {
-      for (i <- 0 to 150) {
-        val newClient = configureClient().newRichClient(dest)
-        await(newClient.ping)
+    val clients = new ArrayBuffer[mysql.Client]()
+    try {
+      val err = intercept[Exception] {
+        for (_ <- 0 to 150) {
+          val newClient = configureClient().newRichClient(dest)
+          clients += newClient
+          await(newClient.ping)
+        }
       }
+      val rootErrorMsg = "Exception in MySQL handshake, error code 1040"
+      val nonRootErrorMsg = "Too many connections"
+      assert(err.getMessage.contains(rootErrorMsg) || err.getMessage.contains(nonRootErrorMsg))
+    } finally {
+      Closable.all(clients: _*).close()
     }
-
-    assert(err.getMessage.contains("Exception in MySQL handshake, error code 1040"))
   }
 
 }

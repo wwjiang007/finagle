@@ -17,6 +17,7 @@ class IncludeCode(Directive):
     option_spec = {
         'section':      directives.unchanged_required,
         'comment':      directives.unchanged_required,
+        'endcomment':   directives.unchanged_required,
         'marker':       directives.unchanged_required,
         'include':      directives.unchanged_required,
         'exclude':      directives.unchanged_required,
@@ -53,7 +54,7 @@ class IncludeCode(Directive):
         encoding = self.options.get('encoding', env.config.source_encoding)
         codec_info = codecs.lookup(encoding)
         try:
-            f = codecs.StreamReaderWriter(open(fn, 'U'),
+            f = codecs.StreamReaderWriter(open(fn, 'Ub'),
                     codec_info[2], codec_info[3], 'strict')
             lines = f.readlines()
             f.close()
@@ -68,8 +69,11 @@ class IncludeCode(Directive):
                 (encoding, filename))]
 
         comment = self.options.get('comment', '//')
+        endcomment = self.options.get('endcomment', '')
         marker = self.options.get('marker', comment + '#')
-        lenm = len(marker)
+        len_marker = len(marker)
+        len_end_comment = len(endcomment)
+
         if not section:
             section = self.options.get('section')
         include_sections = self.options.get('include', '')
@@ -85,7 +89,12 @@ class IncludeCode(Directive):
         for line in lines:
             index = line.find(marker)
             if index >= 0:
-                section_name = line[index+lenm:].strip()
+                start_section = index + len_marker
+                if len_end_comment > 0:
+                    end_section = -1 * (len_end_comment + 1) # + 1 for newline
+                    section_name = line[start_section:end_section].strip()
+                else:
+                    section_name = line[start_section:].strip()
                 if section_name in within:
                     within ^= set([section_name])
                     if excluding and not (exclude & within):
@@ -108,12 +117,12 @@ class IncludeCode(Directive):
                 else:
                     return count
 
-        nonempty = filter(lambda l: l.strip(), lines)
-        tabcounts = map(lambda l: countwhile(lambda c: c == ' ', l), nonempty)
+        nonempty = [l for l in lines if l.strip()]
+        tabcounts = [countwhile(lambda c: c == ' ', l) for l in nonempty]
         tabshift = min(tabcounts) if tabcounts else 0
 
         if tabshift > 0:
-            lines = map(lambda l: l[tabshift:] if len(l) > tabshift else l, lines)
+            lines = [l[tabshift:] if len(l) > tabshift else l for l in lines]
 
         prepend = self.options.get('prepend')
         append  = self.options.get('append')

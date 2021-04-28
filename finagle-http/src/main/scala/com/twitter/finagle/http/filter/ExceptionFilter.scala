@@ -12,7 +12,7 @@ import scala.util.control.NonFatal
  * Uncaught exceptions are converted to 500 Internal Server Error. Cancellations
  * are converted to 499 Client Closed Request. 499 is an Nginx extension for
  * exactly this situation, see:
- *   http://trac.nginx.org/nginx/browser/nginx/trunk/src/http/ngx_http_request.h
+ *   https://trac.nginx.org/nginx/browser/nginx/trunk/src/http/ngx_http_request.h
  */
 class ExceptionFilter[REQUEST <: Request] extends SimpleFilter[REQUEST, Response] {
   import ExceptionFilter.ClientClosedRequestStatus
@@ -30,11 +30,11 @@ class ExceptionFilter[REQUEST <: Request] extends SimpleFilter[REQUEST, Response
     case e: CancelledRequestException =>
       // This only happens when ChannelService cancels a reply.
       log.warning("cancelled request: uri:%s", request.uri)
-      respond(request, ClientClosedRequestStatus)
+      respond(ClientClosedRequestStatus)
     case e: Throwable =>
       try {
         log.warning(e, "exception: uri:%s exception:%s", request.uri, e)
-        respond(request, Status.InternalServerError)
+        respond(Status.InternalServerError)
       } catch {
         // logging or internals are broken.  Write static string to console -
         // don't attempt to include request or exception.
@@ -44,13 +44,8 @@ class ExceptionFilter[REQUEST <: Request] extends SimpleFilter[REQUEST, Response
       }
   }
 
-  private def respond(request: REQUEST, responseStatus: Status): Future[Response] = {
-    val response = request.response
-    response.status = responseStatus
-    response.clearContent()
-    response.contentLength = 0
-    Future.value(response)
-  }
+  private def respond(responseStatus: Status): Future[Response] =
+    Future.value(Response(responseStatus))
 }
 
 object ExceptionFilter extends ExceptionFilter[Request] {

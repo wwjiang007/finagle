@@ -1,11 +1,11 @@
 package com.twitter.finagle.service
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.{FailureFlags, Filter, Service}
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Filter.TypeAgnostic
-import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
-import com.twitter.finagle.tracing.Trace
 import com.twitter.finagle.param.HighResTimer
+import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
+import com.twitter.finagle.tracing.{Annotation, Trace, TraceId}
+import com.twitter.finagle.{Backoff, FailureFlags, Filter, Service}
 import com.twitter.util._
 
 object RetryingService {
@@ -40,8 +40,9 @@ class RetryFilter[Req, Rep](
   retryPolicy: RetryPolicy[(Req, Try[Rep])],
   timer: Timer,
   statsReceiver: StatsReceiver,
-  retryBudget: RetryBudget
-) extends Filter[Req, Rep, Req, Rep] {
+  retryBudget: RetryBudget)
+    extends Filter[Req, Rep, Req, Rep] {
+  import RetryFilter.RetriedAnnotation
 
   /**
    * A [[com.twitter.finagle.Filter]] that coordinates retries of subsequent
@@ -52,18 +53,15 @@ class RetryFilter[Req, Rep](
    * @note consider using a [[Timer]] with high resolution so that there is
    * less correlation between retries. For example [[HighResTimer.Default]].
    */
-  def this(
-    retryPolicy: RetryPolicy[(Req, Try[Rep])],
-    timer: Timer,
-    statsReceiver: StatsReceiver
-  ) = this(
-    retryPolicy,
-    timer,
-    statsReceiver,
-    RetryBudget()
-  )
+  def this(retryPolicy: RetryPolicy[(Req, Try[Rep])], timer: Timer, statsReceiver: StatsReceiver) =
+    this(
+      retryPolicy,
+      timer,
+      statsReceiver,
+      RetryBudget()
+    )
 
-  // Respect non-retryablity regardless of which filter is used
+  // Respect non-retryability regardless of which filter is used
   private[this] val filteredPolicy: RetryPolicy[(Req, Try[Rep])] = retryPolicy.filterEach {
     case (_, Throw(f: FailureFlags[_])) if f.isFlagged(FailureFlags.NonRetryable) => false
     case _ => true
@@ -85,19 +83,43 @@ class RetryFilter[Req, Rep](
     } else f
   }
 
-  private[this] def dispatch(
+  private[this] def issueRequest(
     req: Req,
     service: Service[Req, Rep],
     policy: RetryPolicy[(Req, Try[Rep])],
     count: Int = 0
   ): Future[Rep] = {
+    val trace = Trace()
+    val isRetriedRequest = count > 0
+    if (isRetriedRequest && trace.isActivelyTracing) {
+      trace.record(RetriedAnnotation)
+      trace.record("clnt/retry_begin")
+      trace.recordBinary("clnt/retry_attempt", count)
+
+      // we set the rpc name to "retry". The true rpc name can be inferred
+      // via the parent span.
+      trace.recordRpc("retry")
+    }
+
     val svcRep = service(req)
+    if (trace.isActivelyTracing) {
+      // we always trace the exception
+      svcRep.respond {
+        case Throw(cause) =>
+          trace.recordBinary("clnt/retry_exc", s"${cause.getClass.getName}:${cause.getMessage}")
+        case Return(_) => // no-op
+      }
+
+      if (isRetriedRequest) {
+        svcRep.ensure(trace.record("clnt/retry_end"))
+      }
+    }
+
     svcRep.transform { rep =>
       policy((req, rep)) match {
         case Some((howlong, nextPolicy)) =>
           if (retryBudget.tryWithdraw()) {
             schedule(howlong) {
-              Trace.record("finagle.retry")
               dispatch(req, service, nextPolicy, count + 1)
             }
           } else {
@@ -112,6 +134,22 @@ class RetryFilter[Req, Rep](
     }
   }
 
+  private[this] def dispatch(
+    req: Req,
+    service: Service[Req, Rep],
+    policy: RetryPolicy[(Req, Try[Rep])],
+    count: Int = 0
+  ): Future[Rep] = {
+    if (count > 0) {
+      val retryTraceId: TraceId = Trace.nextId
+      Trace.letId(retryTraceId) {
+        issueRequest(req, service, policy, count)
+      }
+    } else {
+      issueRequest(req, service, policy, count)
+    }
+  }
+
   def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = {
     retryBudget.deposit()
     dispatch(request, service, filteredPolicy)
@@ -119,6 +157,7 @@ class RetryFilter[Req, Rep](
 }
 
 object RetryFilter {
+  private val RetriedAnnotation = Annotation.Message("Retried Request")
 
   /**
    * @param backoffs See [[Backoff]] for common backoff patterns.
@@ -127,7 +166,7 @@ object RetryFilter {
    * less correlation between retries. For example [[HighResTimer.Default]].
    */
   def apply[Req, Rep](
-    backoffs: Stream[Duration],
+    backoffs: Backoff,
     statsReceiver: StatsReceiver = NullStatsReceiver
   )(
     shouldRetry: PartialFunction[(Req, Try[Rep]), Boolean]
@@ -157,8 +196,8 @@ final class RetryExceptionsFilter[Req, Rep](
   retryPolicy: RetryPolicy[Try[Nothing]],
   timer: Timer,
   statsReceiver: StatsReceiver,
-  retryBudget: RetryBudget
-) extends RetryFilter[Req, Rep](
+  retryBudget: RetryBudget)
+    extends RetryFilter[Req, Rep](
       RetryPolicy.convertExceptionPolicy(retryPolicy),
       timer,
       statsReceiver,
@@ -198,7 +237,7 @@ object RetryExceptionsFilter {
    * less correlation between retries. For example [[HighResTimer.Default]].
    */
   def apply[Req, Rep](
-    backoffs: Stream[Duration],
+    backoffs: Backoff,
     statsReceiver: StatsReceiver = NullStatsReceiver
   )(
     shouldRetry: PartialFunction[Try[Nothing], Boolean]

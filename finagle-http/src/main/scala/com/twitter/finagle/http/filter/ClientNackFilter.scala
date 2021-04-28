@@ -1,10 +1,10 @@
 package com.twitter.finagle.http.filter
 
-import com.twitter.finagle.{Failure, Service, ServiceFactory, SimpleFilter, Stack, Stackable}
+import com.twitter.finagle._
 import com.twitter.finagle.http.{Request, Response}
 import com.twitter.io.{Buf, Reader}
 import com.twitter.logging.Logger
-import com.twitter.util.{Future, Try}
+import com.twitter.util.{Future, Return, Throw, Try}
 
 /**
  * Filter for converting the HTTP nack representation to a [[Failure]]
@@ -15,10 +15,7 @@ import com.twitter.util.{Future, Try}
 private[http] final class ClientNackFilter extends SimpleFilter[Request, Response] {
   import ClientNackFilter._
 
-  def apply(
-    request: Request,
-    service: Service[Request, Response]
-  ): Future[Response] = {
+  def apply(request: Request, service: Service[Request, Response]): Future[Response] = {
     // If the request was chunked, we likely consume some of the body during an initial
     // dispatch so it's not generally safe to retry even if the server says it is.
     if (request.isChunked) {
@@ -26,14 +23,14 @@ private[http] final class ClientNackFilter extends SimpleFilter[Request, Respons
       // could happen if, for example, the same request gets reused but with a different
       // body representation.
       request.headerMap.remove(HttpNackFilter.RetryableRequestHeader)
-      service(request).flatMap(convertChunkedReqNackFn)
+      service(request).transform(convertChunkedReqNackFn)
     } else {
       if (!request.content.isEmpty) {
         // We add the `CanRetryWithBodyHeader` to signal to the server that we're able
         // to retry this request with a body.
-        request.headerMap.set(HttpNackFilter.RetryableRequestHeader, "")
+        request.headerMap.setUnsafe(HttpNackFilter.RetryableRequestHeader, "")
       }
-      service(request).flatMap(convertNackFn)
+      service(request).transform(convertNackFn)
     }
   }
 }
@@ -52,25 +49,27 @@ object ClientNackFilter {
   // note: in the nack case we use `transform` since we've already
   // decided it's a nack response regardless of if we succeed in
   // swallowing the body.
-  private val convertNackFn: Response => Future[Response] = {
-    case res if HttpNackFilter.isRetryableNack(res) =>
+  private val convertNackFn: Try[Response] => Future[Response] = {
+    case Return(res) if HttpNackFilter.isRetryableNack(res) =>
       swallowNackResponse(res).transform(respondRetryableFailure)
 
-    case res if HttpNackFilter.isNonRetryableNack(res) =>
+    case Return(res) if HttpNackFilter.isNonRetryableNack(res) =>
       swallowNackResponse(res).transform(respondNonRetryableFailure)
 
-    // Clean responses pass through
-    case res => Future.value(res)
+    case t => Future.const(t)
   }
 
   // It's likely unsafe to retry this request based on request body being chunked so
   // we don't mark it retryable even if the server thinks it's safe.
-  private val convertChunkedReqNackFn: Response => Future[Response] = {
-    case res if HttpNackFilter.isNack(res) =>
+  private val convertChunkedReqNackFn: Try[Response] => Future[Response] = {
+    case Return(res) if HttpNackFilter.isNack(res) =>
       swallowNackResponse(res).transform(respondNonRetryableFailure)
 
-    // Clean responses pass through
-    case res => Future.value(res)
+    case Throw(ex: FailureFlags[_]) =>
+      Future.exception(ex.asNonRetryable)
+
+    // Everything else passes through
+    case t => Future.const(t)
   }
 
   /**
@@ -102,10 +101,8 @@ object ClientNackFilter {
     }
   }
 
-  private[this] def swallowNackBody(reader: Reader[Buf], maxRead: Int): Future[Unit] = {
-    // We add 1 to `readMax` in order to detect large responses earlier
-    // and avoid falling into an infinite loop of `read(0)` calls.
-    reader.read(maxRead + 1).flatMap {
+  private[this] def swallowNackBody(reader: Reader[Buf], maxRead: Int): Future[Unit] =
+    reader.read().flatMap {
       case Some(chunk) if chunk.length <= maxRead =>
         swallowNackBody(reader, maxRead - chunk.length)
 
@@ -116,5 +113,4 @@ object ClientNackFilter {
 
       case None => Future.Done
     }
-  }
 }

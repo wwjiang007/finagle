@@ -1,7 +1,7 @@
 package com.twitter.finagle.client
 
-import com.twitter.conversions.percent._
-import com.twitter.conversions.time._
+import com.twitter.conversions.PercentOps._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.service.{ReqRep, ResponseClass, ResponseClassifier, RetryBudget}
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
@@ -12,15 +12,16 @@ import org.mockito.Matchers.any
 import org.mockito.Mockito._
 import org.scalatest.{FunSuite, Matchers, OneInstancePerTest}
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 import scala.util.Random
 
-class BackupRequestFilterTest extends FunSuite
-  with OneInstancePerTest
-  with MockitoSugar
-  with Matchers
-  with Eventually
-  with IntegrationPatience {
+class BackupRequestFilterTest
+    extends FunSuite
+    with OneInstancePerTest
+    with MockitoSugar
+    with Matchers
+    with Eventually
+    with IntegrationPatience {
 
   private[this] val wp = new MockWindowedPercentileHistogram()
 
@@ -37,9 +38,9 @@ class BackupRequestFilterTest extends FunSuite
   private[this] val statsReceiver = new InMemoryStatsReceiver
 
   private[this] val classifier: ResponseClassifier = {
-    case ReqRep(_ , Return(rep)) if rep == "failure" => ResponseClass.RetryableFailure
+    case ReqRep(_, Return(rep)) if rep == "failure" => ResponseClass.RetryableFailure
     case ReqRep(_, Throw(_)) => ResponseClass.RetryableFailure
-    case ReqRep(_ , Return(rep)) if rep == "ok" => ResponseClass.Success
+    case ReqRep(_, Return(rep)) if rep == "ok" => ResponseClass.Success
   }
 
   private[this] val clientRetryBudget = RetryBudget(5.seconds, 10, 20.percent, Stopwatch.timeMillis)
@@ -49,8 +50,8 @@ class BackupRequestFilterTest extends FunSuite
   private[this] val newBackupRequestRetryBudget: (Double, () => Long) => RetryBudget =
     (_, _) => backupRequestRetryBudget
 
-  private[this] val maxExtraLoadTunable: Tunable.Mutable[Double] = Tunable.mutable[Double](
-    "brfTunable", 1.percent)
+  private[this] val maxExtraLoadTunable: Tunable.Mutable[Double] =
+    Tunable.mutable[Double]("brfTunable", 1.percent)
 
   private[this] def newBrf: BackupRequestFilter[String, String] =
     new BackupRequestFilter[String, String](
@@ -62,7 +63,8 @@ class BackupRequestFilterTest extends FunSuite
       Stopwatch.timeMillis,
       statsReceiver,
       timer,
-      () => wp)
+      () => wp
+    )
 
   private[this] def newService(
     brf: BackupRequestFilter[String, String] = newBrf
@@ -71,19 +73,20 @@ class BackupRequestFilterTest extends FunSuite
 
   private[this] val rng = new Random(123)
 
-  private[this] val WarmupRequestLatency = 2.seconds
+  private[this] val WarmupRequestLatency = 1.second
 
   private[this] def warmFilterForBackup(
     tc: TimeControl,
     service: Service[String, String],
-    brf: BackupRequestFilter[String, String]
+    brf: BackupRequestFilter[String, String],
+    requestLatency: Duration
   ): Unit = {
     assert(numBackupTimerTasks == 0)
     (0 until 100).foreach { _ =>
       val p = new Promise[String]
       when(underlying("ok")).thenReturn(p)
       val f = service("ok")
-      tc.advance(WarmupRequestLatency)
+      tc.advance(requestLatency)
       p.setValue("ok")
     }
 
@@ -192,7 +195,7 @@ class BackupRequestFilterTest extends FunSuite
       when(underlying("ok")).thenReturn(p)
       val rep = service("ok")
       tc.advance(100.millis)
-      p.setValue("ok back")   // 100 ms latency added to WindowedPercentile
+      p.setValue("ok back") // 100 ms latency added to WindowedPercentile
       tc.advance(3.seconds) // trigger update of send_backup_after
       timer.tick()
       eventually {
@@ -228,7 +231,7 @@ class BackupRequestFilterTest extends FunSuite
     Time.withCurrentTimeFrozen { tc =>
       val brf = newBrf
       val service = newService(brf)
-      warmFilterForBackup(tc, service, brf)
+      warmFilterForBackup(tc, service, brf, WarmupRequestLatency)
 
       val p = new Promise[String]
       when(underlying("b")).thenReturn(p)
@@ -263,7 +266,7 @@ class BackupRequestFilterTest extends FunSuite
       val brf = newBrf
       val service = newService(brf)
       val exc = new Exception("boom")
-      warmFilterForBackup(tc, service, brf)
+      warmFilterForBackup(tc, service, brf, WarmupRequestLatency)
 
       val p = new Promise[String]
       when(underlying("b")).thenReturn(p)
@@ -309,11 +312,12 @@ class BackupRequestFilterTest extends FunSuite
       Stopwatch.timeMillis,
       statsReceiver,
       timer,
-      () => wp))
+      () => wp
+    ))
 
     val service = brf.andThen(underlying)
 
-    warmFilterForBackup(tc, service, brf)
+    warmFilterForBackup(tc, service, brf, WarmupRequestLatency)
 
     when(underlying("a")).thenReturn(origPromise)
     verify(underlying, times(0)).apply("a")
@@ -497,7 +501,7 @@ class BackupRequestFilterTest extends FunSuite
     }
   }
 
-  test(s"Backup request completes unsuccessfully first") {
+  test("Backup request completes unsuccessfully first") {
     Time.withCurrentTimeFrozen { tc =>
       val origPromise, backupPromise = new Promise[String]
       val f = sendBackup(origPromise, backupPromise, tc, sendInterrupts = false)
@@ -524,7 +528,7 @@ class BackupRequestFilterTest extends FunSuite
       assert(wp.percentile(50.percent) == (WarmupRequestLatency + 1.second).inMillis)
 
       assert(statsReceiver.counters(Seq("backups_sent")) == 1)
-      assert(statsReceiver.counters(Seq("backups_won")) == 1)
+      assert(statsReceiver.counters(Seq("backups_won")) == 0)
     }
   }
 
@@ -555,9 +559,7 @@ class BackupRequestFilterTest extends FunSuite
     when(underlying.close(any[Time]())).thenReturn(Future.Done)
     val filter = mock[BackupRequestFilter[String, String]]
     when(filter.close(any[Time]())).thenReturn(Future.Done)
-    val factory = new BackupRequestFactory[String, String](
-      underlying,
-      filter)
+    val factory = new BackupRequestFactory[String, String](underlying, filter)
     Await.result(factory.close(Duration.Top), 2.seconds)
     verify(underlying, times(1)).close(any[Time]())
     verify(filter, times(1)).close(any[Time]())
@@ -568,7 +570,7 @@ class BackupRequestFilterTest extends FunSuite
       Time.withCurrentTimeFrozen { tc =>
         val brf = newBrf
         val service = newService(brf)
-        warmFilterForBackup(tc, service, brf)
+        warmFilterForBackup(tc, service, brf, WarmupRequestLatency)
 
         val p = new Promise[String]
         when(underlying("a")).thenReturn(p)
@@ -627,9 +629,10 @@ class BackupRequestFilterTest extends FunSuite
         Stopwatch.timeMillis,
         statsReceiver,
         timer,
-        () => wp)
+        () => wp
+      )
       val service = newService(brf)
-      warmFilterForBackup(tc, service, brf)
+      warmFilterForBackup(tc, service, brf, WarmupRequestLatency)
       assert(currentRetryBudget.balance == 100)
 
       // Set filter to send no backups; advance 3 seconds so we see the change
@@ -676,9 +679,10 @@ class BackupRequestFilterTest extends FunSuite
         Stopwatch.timeMillis,
         statsReceiver,
         timer,
-        () => wp)
+        () => wp
+      )
       val service = newService(brf)
-      warmFilterForBackup(tc, service, brf)
+      warmFilterForBackup(tc, service, brf, WarmupRequestLatency)
       assert(newRetryBudgetCalls == 1)
       maxExtraLoadTunable.set(1.percent)
       // we refresh the budget every 3 seconds if the Tunable value has changed
@@ -708,7 +712,8 @@ class BackupRequestFilterTest extends FunSuite
         Stopwatch.timeMillis,
         statsReceiver,
         timer,
-        () => new WindowedPercentileHistogram(5, 3.seconds, timer))
+        () => new WindowedPercentileHistogram(5, 3.seconds, timer)
+      )
       val service = newService(brf)
       assert(currentRetryBudget.balance == 100)
       (0 until 90).foreach { _ =>
@@ -728,8 +733,10 @@ class BackupRequestFilterTest extends FunSuite
       tc.advance(3.seconds)
       timer.tick()
       assert(brf.sendBackupAfterDuration == 100.millis)
-      assert(currentRetryBudget.toString ==
-        "TokenRetryBudget(deposit=1000, withdraw=100000, balance=101)")
+      assert(
+        currentRetryBudget.toString ==
+          "TokenRetryBudget(deposit=1000, withdraw=100000, balance=101)"
+      )
 
       // Set filter to send 10% backups; advance the time to see the change
       maxExtraLoadTunable.set(10.percent)
@@ -739,8 +746,10 @@ class BackupRequestFilterTest extends FunSuite
 
       // note that new budget does not get balance from old budget.
       eventually {
-        assert(currentRetryBudget.toString ==
-          "TokenRetryBudget(deposit=1000, withdraw=10000, balance=100)")
+        assert(
+          currentRetryBudget.toString ==
+            "TokenRetryBudget(deposit=1000, withdraw=10000, balance=100)"
+        )
       }
     }
   }
@@ -786,5 +795,33 @@ class BackupRequestFilterTest extends FunSuite
     val expected =
       "Failure(Request was superseded by another in BackupRequestFilter, flags=0x20) with NoSources"
     assert(BackupRequestFilter.SupersededRequestFailureToString == expected)
+  }
+
+  test("Percentile latency exceeds measurable latency") {
+    Time.withCurrentTimeFrozen { tc =>
+      val brf = newBrf
+      val service = newService(brf)
+      warmFilterForBackup(tc, service, brf, wp.highestTrackableValue.millis)
+
+      val p = new Promise[String]
+      when(underlying("b")).thenReturn(p)
+      val f = service("b")
+      verify(underlying).apply("b")
+      assert(numBackupTimerTasks == 0)
+      tc.advance(brf.sendBackupAfterDuration / 2)
+      p.setValue("orig")
+      timer.tick()
+
+      // ensure latency recorded
+      assert(wp.percentile(50.percent) == (brf.sendBackupAfterDuration / 2).inMillis)
+
+      // ensure timer cancelled
+      assert(numBackupTimerTasks == 0)
+
+      // ensure result of original request returned
+      assert(f.poll == Some(Return("orig")))
+
+      assert(statsReceiver.counters(Seq("backups_sent")) == 0)
+    }
   }
 }

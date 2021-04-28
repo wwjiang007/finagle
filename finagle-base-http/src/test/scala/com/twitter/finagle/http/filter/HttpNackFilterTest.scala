@@ -3,7 +3,7 @@ package com.twitter.finagle.http.filter
 import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.filter.ServerAdmissionControl
 import com.twitter.finagle.{Failure, Service}
-import com.twitter.finagle.http.{Method, Request, Response, Status}
+import com.twitter.finagle.http.{Fields, Method, Request, Response, Status}
 import com.twitter.finagle.stats.NullStatsReceiver
 import com.twitter.util.{Await, Awaitable, Duration, Future}
 import java.util.concurrent.atomic.AtomicBoolean
@@ -49,7 +49,9 @@ class HttpNackFilterTest extends FunSuite {
     assert(!couldBeNacked.get)
   }
 
-  test("HttpNackFilter signals that a request may be nacked if it has a non-chunked body and the magic header") {
+  test(
+    "HttpNackFilter signals that a request may be nacked if it has a non-chunked body and the magic header"
+  ) {
     val stats = new NullStatsReceiver
     val service = new HttpNackFilter(stats) andThen Service.mk { req: Request =>
       // header should have been stripped
@@ -102,6 +104,7 @@ class HttpNackFilterTest extends FunSuite {
       val rep = await(service(request))
       assert(rep.status == Status.ServiceUnavailable)
       assert(rep.headerMap.get(HttpNackFilter.RetryableNackHeader) == Some("true"))
+      assert(rep.headerMap.get(Fields.RetryAfter) == Some("0"))
       assert(rep.headerMap.get(HttpNackFilter.NonRetryableNackHeader) == None)
       assert(!rep.content.isEmpty)
     }
@@ -119,6 +122,7 @@ class HttpNackFilterTest extends FunSuite {
     val rep = await(service(request))
     assert(rep.status == Status.ServiceUnavailable)
     assert(rep.headerMap.get(HttpNackFilter.RetryableNackHeader) == Some("true"))
+    assert(rep.headerMap.get(Fields.RetryAfter) == Some("0"))
     assert(rep.headerMap.get(HttpNackFilter.NonRetryableNackHeader) == None)
     assert(rep.content.isEmpty)
   }

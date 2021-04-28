@@ -1,26 +1,33 @@
 package com.twitter.finagle.dispatch
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Service
-import com.twitter.util._
 import com.twitter.finagle.context.{Contexts, RemoteInfo}
-import com.twitter.finagle.transport.Transport
+import com.twitter.finagle.ssl.session.{NullSslSessionInfo, SslSessionInfo}
+import com.twitter.finagle.transport.{Transport, TransportContext}
+import com.twitter.util._
 import java.net.SocketAddress
 import java.security.cert.X509Certificate
-import org.junit.runner.RunWith
-import org.mockito.Mockito.{atLeastOnce, never, times, verify, when}
 import org.mockito.Matchers.any
+import org.mockito.Mockito
+import org.mockito.Mockito.{atLeastOnce, never, times, verify}
+import org.mockito.stubbing.OngoingStubbing
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 import scala.language.reflectiveCalls
 
-@RunWith(classOf[JUnitRunner])
 class SerialServerDispatcherTest extends FunSuite with MockitoSugar {
 
+  // Don't let the Scala compiler get confused about which `thenReturn`
+  // method we want to use.
+  private[this] def when[T](o: T) =
+    Mockito.when(o).asInstanceOf[{ def thenReturn[RT](s: RT): OngoingStubbing[RT] }]
+
   trait Ctx {
+    val context = mock[TransportContext]
+    when(context.sslSessionInfo).thenReturn(NullSslSessionInfo)
     val trans = mock[Transport[String, String]]
-    when(trans.peerCertificate).thenReturn(None)
+    when(trans.context).thenReturn(context)
     when(trans.onClose).thenReturn(Future.never)
     val readp = new Promise[String]
     when(trans.read()).thenReturn(readp)
@@ -57,10 +64,13 @@ class SerialServerDispatcherTest extends FunSuite with MockitoSugar {
 
   test("Inject the transport certificate if present")(new Ctx {
     val mockCert = mock[X509Certificate]
-    when(trans.peerCertificate).thenReturn(Some(mockCert))
+    val mockSslSessionInfo = mock[SslSessionInfo]
+    when(context.sslSessionInfo).thenReturn(mockSslSessionInfo)
+    when(mockSslSessionInfo.peerCertificates).thenReturn(Seq(mockCert))
     val service = new Service[String, String] {
-      override def apply(request: String): Future[String] = Future.value {
-        if (Contexts.local.get(Transport.peerCertCtx) == Some(mockCert)) "ok" else "not ok"
+      def apply(request: String): Future[String] = {
+        val responseBody = if (Transport.peerCertificate == Some(mockCert)) "ok" else "not ok"
+        Future.value(responseBody)
       }
     }
 
@@ -72,7 +82,7 @@ class SerialServerDispatcherTest extends FunSuite with MockitoSugar {
 
   test("Inject the transport remote address")(new Ctx {
     val mockAddr = mock[SocketAddress]
-    when(trans.remoteAddress).thenReturn(mockAddr)
+    when(trans.context.remoteAddress).thenReturn(mockAddr)
     val service = new Service[String, String] {
       override def apply(request: String): Future[String] = Future.value {
         if (Contexts.local.get(RemoteInfo.Upstream.AddressCtx) == Some(mockAddr)) "ok" else "not ok"
@@ -107,13 +117,18 @@ class SerialServerDispatcherTest extends FunSuite with MockitoSugar {
     verify(trans).write("undefined")
   })
 
-  def getMockTrans(onClose: Promise[Throwable], writep: Promise[Unit]): Transport[String, String] = {
+  def getMockTrans(
+    onClose: Promise[Throwable],
+    writep: Promise[Unit]
+  ): Transport[String, String] = {
     val trans = mock[Transport[String, String]]
+    val context = mock[TransportContext]
     when(trans.write(any[String])).thenReturn(writep)
     when(trans.onClose).thenReturn(onClose)
     when(trans.close).thenReturn(onClose.unit)
     when(trans.close(any[Time])).thenReturn(onClose.unit)
-    when(trans.peerCertificate).thenReturn(None)
+    when(context.sslSessionInfo).thenReturn(NullSslSessionInfo)
+    when(trans.context).thenReturn(context)
     trans
   }
 

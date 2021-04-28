@@ -221,6 +221,31 @@ sealed trait Stack[T] {
   def +:(stk: Stackable[T]): Stack[T] =
     stk.toStack(this)
 
+  /**
+   * Drops the leading elements of the stack while the stack matches the
+   * supplied predicate.
+   *
+   * If the entire stack matches the predicate, returns the leaf node.
+   */
+  @tailrec
+  final def dropWhile(pred: Stack[T] => Boolean): Stack[T] =
+    if (!pred(this)) {
+      this
+    } else {
+      this match {
+        case Node(_, _, next) => next.dropWhile(pred)
+        case leaf @ Leaf(_, _) => leaf
+      }
+    }
+
+  /**
+   * Returns the next entry in the Stack, or [[None]] if it's a Leaf.
+   */
+  def tailOption: Option[Stack[T]] = this match {
+    case Node(_, _, next) => Some(next)
+    case Leaf(_, _) => None
+  }
+
   override def toString: String = {
     val elems = tails map {
       case Node(hd, _, _) => s"Node(role = ${hd.role}, description = ${hd.description})"
@@ -271,7 +296,8 @@ object Stack {
   }
 
   private case class Leaf[T](head: Stack.Head, t: T) extends Stack[T]
-  private case class Node[T](head: Stack.Head, mk: (Params, Stack[T]) => Stack[T], next: Stack[T]) extends Stack[T]
+  private case class Node[T](head: Stack.Head, mk: (Params, Stack[T]) => Stack[T], next: Stack[T])
+      extends Stack[T]
 
   /**
    * Nodes materialize by transforming the underlying stack in
@@ -312,7 +338,7 @@ object Stack {
    *
    * {{{
    * case class Multiplier(i: Int) {
-   *   def mk(): (Multipler, Stack.Param[Multipler]) =
+   *   def mk(): (Multiplier, Stack.Param[Multiplier]) =
    *     (this, Multiplier.param)
    * }
    * object Multiplier {
@@ -327,8 +353,8 @@ object Stack {
     def default: P
 
     /**
-      * Compatibility method so the Param value is accessible from Java.
-      */
+     * Compatibility method so the Param value is accessible from Java.
+     */
     final def getDefault: P = default
 
     /**
@@ -337,7 +363,7 @@ object Stack {
      * public member variables in the class. The function `() => value` is invoked to display the
      * current value of a member variable.
      *
-     * This should be overriden by param classes that do not implement [[scala.Product]]
+     * This should be overridden by param classes that do not implement [[scala.Product]]
      */
     def show(p: P): Seq[(String, () => String)] = Seq.empty
   }
@@ -475,6 +501,13 @@ object Stack {
    */
   trait Transformer {
     def apply[Req, Rep](stack: Stack[ServiceFactory[Req, Rep]]): Stack[ServiceFactory[Req, Rep]]
+  }
+
+  /**
+   * Encodes parameter injection for [[Stack.Params]]
+   */
+  trait ParamsInjector {
+    def apply(params: Stack.Params): Stack.Params
   }
 
   trait Transformable[+T] {
@@ -617,7 +650,47 @@ object Stack {
           Leaf(
             this,
             make(prms[P1], prms[P2], prms[P3], prms[P4], prms[P5], prms[P6], next.make(prms))
-        ),
+          ),
+        next
+      )
+  }
+
+  /** A module of 7 parameters. */
+  abstract class Module7[
+    P1: Param,
+    P2: Param,
+    P3: Param,
+    P4: Param,
+    P5: Param,
+    P6: Param,
+    P7: Param,
+    T] extends Stackable[T] {
+    final val parameters: Seq[Stack.Param[_]] = Seq(
+      implicitly[Param[P1]],
+      implicitly[Param[P2]],
+      implicitly[Param[P3]],
+      implicitly[Param[P4]],
+      implicitly[Param[P5]],
+      implicitly[Param[P6]],
+      implicitly[Param[P7]]
+    )
+    def make(p1: P1, p2: P2, p3: P3, p4: P4, p5: P5, p6: P6, p7: P7, next: T): T
+    def toStack(next: Stack[T]): Stack[T] =
+      Node(
+        this,
+        (prms, next) =>
+          Leaf(
+            this,
+            make(
+              prms[P1],
+              prms[P2],
+              prms[P3],
+              prms[P4],
+              prms[P5],
+              prms[P6],
+              prms[P7],
+              next.make(prms))
+          ),
         next
       )
   }
@@ -635,6 +708,7 @@ object Stack {
  * discouraged. Modifying params via transformers creates subtle dependencies
  * between modules and makes it difficult to reason about the value of
  * params, as it may change depending on the module's placement in the stack.
+ * Whenever possible, [[ClientParamsInjector]] should be used instead.
  */
 abstract class StackTransformer extends Stack.Transformer {
   def name: String
@@ -642,9 +716,21 @@ abstract class StackTransformer extends Stack.Transformer {
 }
 
 /**
+ * ClientsParamsInjector is the standard mechanism for injecting params into
+ * the client.  It is a ``Stack.ParamsInjector`` with a name.  The injection
+ * will run at materialization time for Finagle clients, so that the parameters
+ * for a Stack will be injected in a consistent way.
+ */
+abstract class ClientParamsInjector extends Stack.ParamsInjector {
+  def name: String
+  override def toString: String = s"ClientParamsInjector(name=$name)"
+}
+
+/**
  * `Stack.Params` forwarder to provide a clean Java API.
  */
 object StackParams {
+
   /**
    * Same as [[Stack.Params.empty]].
    */

@@ -149,8 +149,8 @@ case class Set(
   value: Buf,
   ttl: Option[TimeToLive] = None,
   nx: Boolean = false,
-  xx: Boolean = false
-) extends StrictKeyCommand
+  xx: Boolean = false)
+    extends StrictKeyCommand
     with StrictValueCommand {
 
   def name: Buf = Command.SET
@@ -218,5 +218,5 @@ trait MultiSet extends KeysCommand {
   def kv: Map[Buf, Buf]
   def keys: Seq[Buf] = kv.keys.toSeq
   override def body: Seq[Buf] =
-    kv.flatMap({ case (k, v) => k :: v :: Nil })(collection.breakOut)
+    kv.iterator.flatMap { case (k, v) => k :: v :: Nil }.toSeq
 }

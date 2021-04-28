@@ -5,7 +5,7 @@
 // you may not use this work except in compliance with the License.
 // You may obtain a copy of the License in the LICENSE file, or at:
 //
-//  http://www.apache.org/licenses/LICENSE-2.0
+//  https://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -34,7 +34,7 @@ public class TruncatedBinaryBackoff implements BackoffStrategy {
    * which point shouldContinue() will return false and any future backoffs will always wait for
    * that amount of time.
    *
-   * @param initialBackoff the intial amount of time to backoff
+   * @param initialBackoff the initial amount of time to backoff
    * @param maxBackoff the maximum amount of time to backoff
    * @param stopAtMax whether shouldContinue() returns false when the max is reached
    */
@@ -56,7 +56,7 @@ public class TruncatedBinaryBackoff implements BackoffStrategy {
   /**
    * Same as main constructor, but this will always return true from shouldContinue().
    *
-   * @param initialBackoff the intial amount of time to backoff
+   * @param initialBackoff the initial amount of time to backoff
    * @param maxBackoff the maximum amount of time to backoff
    */
   public TruncatedBinaryBackoff(Duration initialBackoff, Duration maxBackoff) {

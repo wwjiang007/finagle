@@ -1,17 +1,18 @@
 package com.twitter.finagle.redis
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.redis.protocol._
 import com.twitter.finagle.redis.util._
 import com.twitter.finagle.Redis
 import com.twitter.io.Buf
 import com.twitter.util.{Await, Awaitable, Duration, Future, Try}
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
 import org.scalatest.{BeforeAndAfterAll, FunSuite, Tag}
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 import org.scalacheck.{Arbitrary, Gen}
 import java.net.InetSocketAddress
 import org.scalactic.source.Position
 import scala.language.implicitConversions
+import java.lang.{Long => JLong}
 
 trait RedisTest extends FunSuite {
 
@@ -22,10 +23,10 @@ trait RedisTest extends FunSuite {
   protected val bufMoo = Buf.Utf8("moo")
   protected val bufNum = Buf.Utf8("num")
 
-  def result[T](awaitable: Awaitable[T], timeout: Duration = 1.second): T =
+  def result[T](awaitable: Awaitable[T], timeout: Duration = 5.second): T =
     Await.result(awaitable, timeout)
 
-  def ready[T <: Awaitable[_]](awaitable: T, timeout: Duration = 1.second): T =
+  def ready[T <: Awaitable[_]](awaitable: T, timeout: Duration = 5.second): T =
     Await.ready(awaitable, timeout)
 
   def waitUntil(message: String, countDown: Int = 10)(ready: => Boolean): Unit = {
@@ -60,6 +61,14 @@ trait MissingInstances {
     } yield b
 
   implicit val arbitraryBuf: Arbitrary[Buf] = Arbitrary(genBuf)
+
+  def genOptionalJLong: Gen[Option[JLong]] =
+    for {
+      i <- Gen.choose(-1000L, 1000L)
+      o <- Option(new JLong(i))
+    } yield o
+
+  implicit val arbitraryOptionJLong: Arbitrary[Option[JLong]] = Arbitrary(genOptionalJLong)
 
   def genStatusReply: Gen[StatusReply] = genNonEmptyString.map(StatusReply.apply)
   def genErrorReply: Gen[ErrorReply] = genNonEmptyString.map(ErrorReply.apply)
@@ -108,7 +117,10 @@ trait MissingInstances {
   implicit def arbitraryReply: Arbitrary[Reply] = Arbitrary(genReply)
 }
 
-trait RedisResponseTest extends RedisTest with GeneratorDrivenPropertyChecks with MissingInstances {
+trait RedisResponseTest
+    extends RedisTest
+    with ScalaCheckDrivenPropertyChecks
+    with MissingInstances {
 
   private[this] def chunk(buf: Buf): Gen[Seq[Buf]] =
     if (buf.isEmpty) Gen.const(Seq.empty[Buf])
@@ -158,7 +170,7 @@ trait RedisResponseTest extends RedisTest with GeneratorDrivenPropertyChecks wit
   }
 }
 
-trait RedisRequestTest extends RedisTest with GeneratorDrivenPropertyChecks with MissingInstances {
+trait RedisRequestTest extends RedisTest with ScalaCheckDrivenPropertyChecks with MissingInstances {
 
   def genZMember: Gen[ZMember] =
     for {
@@ -216,9 +228,7 @@ trait RedisRequestTest extends RedisTest with GeneratorDrivenPropertyChecks with
   }
 
   def checkSingleKey(c: String, f: Buf => Command): Unit = {
-    forAll { key: Buf =>
-      assert(encodeCommand(f(key)) == c +: Seq(key.asString))
-    }
+    forAll { key: Buf => assert(encodeCommand(f(key)) == c.split(" ").toSeq ++ Seq(key.asString)) }
 
     intercept[ClientError](f(Buf.Empty))
   }
@@ -226,7 +236,7 @@ trait RedisRequestTest extends RedisTest with GeneratorDrivenPropertyChecks with
   def checkMultiKey(c: String, f: Seq[Buf] => Command): Unit = {
     forAll(Gen.nonEmptyListOf(genBuf)) { keys =>
       assert(
-        encodeCommand(f(keys)) == c +: keys.map(_.asString)
+        encodeCommand(f(keys)) == c.split(" ").toSeq ++ keys.map(_.asString)
       )
     }
 
@@ -237,8 +247,11 @@ trait RedisRequestTest extends RedisTest with GeneratorDrivenPropertyChecks with
   def checkSingleKeyMultiVal(c: String, f: (Buf, Seq[Buf]) => Command): Unit = {
     forAll(genBuf, Gen.nonEmptyListOf(genBuf)) { (key, vals) =>
       assert(
-        encodeCommand(f(key, vals)) == c +: key.asString +: vals.map(_.asString)
+        encodeCommand(f(key, vals)) == c.split(" ").toSeq ++ Seq(key.asString) ++ vals.map(
+          _.asString
+        )
       )
+
     }
 
     intercept[ClientError](encodeCommand(f(Buf.Empty, Seq.empty)))
@@ -248,12 +261,45 @@ trait RedisRequestTest extends RedisTest with GeneratorDrivenPropertyChecks with
   def checkSingleKeySingleVal(c: String, f: (Buf, Buf) => Command): Unit = {
     forAll { (key: Buf, value: Buf) =>
       assert(
-        encodeCommand(f(key, value)) == c +: Seq(key.asString, value.asString)
+        encodeCommand(f(key, value)) == c.split(" ").toSeq ++ Seq(key.asString, value.asString)
       )
     }
 
     intercept[ClientError](encodeCommand(f(Buf.Empty, Buf.Empty)))
     intercept[ClientError](encodeCommand(f(Buf.Utf8("x"), Buf.Empty)))
+  }
+
+  def checkSingleKeyOptionCount(c: String, f: (Buf, Option[JLong]) => Command): Unit = {
+    forAll { (key: Buf, count: Option[JLong]) =>
+      count match {
+        case Some(_) =>
+          assert(
+            encodeCommand(f(key, count)) == c.split(" ").toSeq ++
+              Seq(key.asString, count.get.toString)
+          )
+        case None =>
+          assert(
+            encodeCommand(f(key, count)) == c.split(" ").toSeq ++ Seq(key.asString)
+          )
+      }
+    }
+  }
+
+  def checkSingleKeyDoubleVal(c: String, f: (Buf, Buf, Buf) => Command): Unit = {
+    forAll { (key: Buf, value: Buf, value2: Buf) =>
+      assert(
+        encodeCommand(f(key, value, value2)) == c.split(" ").toSeq ++ Seq(
+          key.asString,
+          value.asString,
+          value2.asString
+        )
+      )
+    }
+
+    intercept[ClientError](encodeCommand(f(Buf.Empty, Buf.Empty, Buf.Empty)))
+    intercept[ClientError](encodeCommand(f(Buf.Utf8("x"), Buf.Empty, Buf.Empty)))
+    intercept[ClientError](encodeCommand(f(Buf.Empty, Buf.Utf8("x"), Buf.Empty)))
+    intercept[ClientError](encodeCommand(f(Buf.Empty, Buf.Empty, Buf.Utf8("x"))))
   }
 
   def checkSingleKeyArbitraryVal[A: Arbitrary](c: String, f: (Buf, A) => Command): Unit = {
@@ -286,7 +332,7 @@ trait RedisRequestTest extends RedisTest with GeneratorDrivenPropertyChecks with
 
 trait RedisClientTest extends RedisTest with BeforeAndAfterAll {
 
-  override def test(
+  override protected def test(
     testName: String,
     testTags: Tag*
   )(
@@ -310,7 +356,8 @@ trait RedisClientTest extends RedisTest with BeforeAndAfterAll {
   protected def withRedisClient(testCode: Client => Any): Unit = {
     val client = Redis.newRichClient(RedisCluster.hostAddresses())
     Await.result(client.flushAll())
-    try { testCode(client) } finally { client.close() }
+    try { testCode(client) }
+    finally { client.close() }
   }
 
   protected def assertMBulkReply(
@@ -354,14 +401,7 @@ trait RedisClientTest extends RedisTest with BeforeAndAfterAll {
 
 trait SentinelClientTest extends RedisTest with BeforeAndAfterAll {
 
-  override def test(
-    testName: String,
-    testTags: Tag*
-  )(
-    f: => Any
-  )(
-    implicit pos: Position
-  ): Unit = {
+  override def test(testName: String, testTags: Tag*)(f: => Any)(implicit pos: Position): Unit = {
     if (RedisTestHelper.redisServerExists) {
       super.test(testName, testTags: _*)(f)(pos)
     } else {
@@ -405,14 +445,15 @@ trait SentinelClientTest extends RedisTest with BeforeAndAfterAll {
 
   protected def withRedisClient(from: Int, until: Int)(testCode: TransactionalClient => Any) = {
     val client = Redis.newTransactionalClient(RedisCluster.hostAddresses(from, until))
-    try { testCode(client) } finally { client.close() }
+    try { testCode(client) }
+    finally { client.close() }
   }
 
   protected def withSentinelClient(index: Int)(testCode: SentinelClient => Any): Unit = {
     val client = SentinelClient(
       Redis.client.newClient(RedisCluster.hostAddresses(from = index, until = index + 1))
     )
-    try { testCode(client) } finally { client.close() }
+    try { testCode(client) }
+    finally { client.close() }
   }
 }
-

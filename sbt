@@ -1,8 +1,8 @@
 #!/bin/bash
 
-sbtver=1.1.4
+sbtver=1.3.10
 sbtjar=sbt-launch.jar
-sbtsha128=ac6b13b709e3c0e3a8b2b3bf3031ec57660cb813
+sbtsha128=f49861befe36746728182ea7efb30096c724b0d7
 
 sbtrepo="https://repo1.maven.org/maven2/org/scala-sbt/sbt-launch"
 
@@ -25,18 +25,5 @@ fi
 java -ea                          \
   $SBT_OPTS                       \
   $JAVA_OPTS                      \
-  -Djava.net.preferIPv4Stack=true \
-  -XX:+AggressiveOpts             \
-  -XX:+UseParNewGC                \
-  -XX:+UseConcMarkSweepGC         \
-  -XX:+CMSParallelRemarkEnabled   \
-  -XX:+CMSClassUnloadingEnabled   \
-  -XX:ReservedCodeCacheSize=128m  \
-  -XX:SurvivorRatio=128           \
-  -XX:MaxTenuringThreshold=0      \
-  -Xss8M                          \
-  -Xms512M                        \
-  -Xmx2G                          \
   -DSKIP_SBT=1                    \
-  -server                         \
   -jar $sbtjar "$@"

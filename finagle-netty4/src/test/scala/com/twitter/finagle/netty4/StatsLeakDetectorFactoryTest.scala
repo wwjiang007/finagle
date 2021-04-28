@@ -3,7 +3,7 @@ package com.twitter.finagle.netty4
 import io.netty.buffer.ByteBuf
 import io.netty.util.{ResourceLeakDetector, ResourceLeakDetectorFactory}
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 import org.mockito.Mockito._
 import org.mockito.Matchers._
 
@@ -13,9 +13,8 @@ class StatsLeakDetectorFactoryTest extends FunSuite with MockitoSugar {
 
     val fac = new StatsLeakDetectorFactory(
       mock[ResourceLeakDetectorFactory], // not actually used
-      { () =>
-      leaks += 1
-    })
+      { () => leaks += 1 }
+    )
     val detector = fac.newResourceLeakDetector(classOf[ByteBuf])
 
     // netty's leak detection relies on references getting collected so rather than

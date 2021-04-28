@@ -2,11 +2,11 @@ package com.twitter.finagle.mux.pushsession
 
 import com.twitter.finagle.{CancelledRequestException, Mux, Service, Stack, Status, param}
 import com.twitter.finagle.context.{Contexts, RemoteInfo}
-import com.twitter.finagle.mux.{Request, Response, gracefulShutdownEnabled}
 import com.twitter.finagle.mux.lease.exp.Lessor
 import com.twitter.finagle.mux.transport.Message
-import com.twitter.finagle.pushsession.{PushChannelHandle, PushSession}
 import com.twitter.finagle.mux.transport.Message.Tags
+import com.twitter.finagle.mux.{Request, Response}
+import com.twitter.finagle.pushsession.{PushChannelHandle, PushSession}
 import com.twitter.finagle.param.Label
 import com.twitter.finagle.tracing.Trace
 import com.twitter.finagle.transport.Transport
@@ -22,31 +22,42 @@ private[finagle] final class MuxServerSession(
   params: Stack.Params,
   h_decoder: MuxMessageDecoder,
   h_messageWriter: MessageWriter,
-  handle: PushChannelHandle[ByteReader, Buf], // Maybe we should refine into a PushClientConnection...
-  service: Service[Request, Response]
-) extends PushSession[ByteReader, Buf](handle) {
+  handle: PushChannelHandle[
+    ByteReader,
+    Buf
+  ], // Maybe we should refine into a PushClientConnection...
+  service: Service[Request, Response])
+    extends PushSession[ByteReader, Buf](handle) {
   import MuxServerSession._
 
   // These are the locals we need to have set on each dispatch
-  private[this] val locals: () => Local.Context = () => Local.letClear {
-    val remoteAddressLocal = Contexts.local
-      .KeyValuePair(RemoteInfo.Upstream.AddressCtx, handle.remoteAddress)
-    val peerCertLocal = handle.peerCertificate.map(
-      Contexts.local.KeyValuePair(Transport.peerCertCtx, _))
+  private[this] val locals: () => Local.Context = () =>
+    Local.letClear {
+      val remoteAddressLocal = Contexts.local
+        .KeyValuePair(RemoteInfo.Upstream.AddressCtx, handle.remoteAddress)
+      val peerCertLocal = Contexts.local
+        .KeyValuePair(Transport.sslSessionInfoCtx, handle.sslSessionInfo)
 
-    Trace.letTracer(params[param.Tracer].tracer) {
-      Contexts.local.let(Seq(remoteAddressLocal) ++ peerCertLocal) {
-        Local.save()
+      Trace.letTracer(params[param.Tracer].tracer) {
+        Contexts.local.let(Seq(remoteAddressLocal, peerCertLocal)) {
+          Local.save()
+        }
       }
     }
-  }
 
   private[this] val exec = handle.serialExecutor
   private[this] val lessor = params[Lessor.Param].lessor
   private[this] val statsReceiver = params[param.Stats].statsReceiver
   private[this] val h_pingManager = params[Mux.param.PingManager].builder(exec, h_messageWriter)
   private[this] val h_tracker = new ServerTracker(
-    exec, locals, service, h_messageWriter, lessor, statsReceiver, handle.remoteAddress)
+    exec,
+    locals,
+    service,
+    h_messageWriter,
+    lessor,
+    statsReceiver,
+    handle.remoteAddress
+  )
 
   // Must only be modified from within the session executor, but can be
   // observed concurrently via status.
@@ -68,8 +79,9 @@ private[finagle] final class MuxServerSession(
     try {
       val message = h_decoder.decode(reader)
       if (message != null) handleMessage(message)
-    } catch { case NonFatal(t) =>
-      handleShutdown(Throw(t))
+    } catch {
+      case NonFatal(t) =>
+        handleShutdown(Throw(t))
     }
   }
 
@@ -115,24 +127,27 @@ private[finagle] final class MuxServerSession(
     if (h_dispatchState == State.Open) {
       h_dispatchState = State.Draining
 
-      if (!gracefulShutdownEnabled()) handleShutdown(Return.Unit)
-      else {
-        log.debug("Draining session")
-        statsReceiver.counter("draining").incr()
+      log.debug("Draining session")
 
-        h_messageWriter.write(Message.Tdrain(Tags.ControlTag))
+      // This stat is intentionally created on-demand as this event is infrequent enough to
+      // outweigh the benefit of a persistent counter.
+      statsReceiver.counter("draining").incr()
 
-        // We set a timer to make sure we've drained within the allotted amount of time
-        h_tracker.drained.by(params[param.Timer].timer, deadline).respond {
-          case Throw(_: TimeoutException) =>
-            exec.execute(new Runnable { def run(): Unit = {
+      h_messageWriter.write(Message.Tdrain(Tags.ControlTag))
+
+      // We set a timer to make sure we've drained within the allotted amount of time
+      h_tracker.drained.by(params[param.Timer].timer, deadline).respond {
+        case Throw(_: TimeoutException) =>
+          exec.execute(new Runnable {
+            def run(): Unit = {
               val t = new TimeoutException(
-                s"Failed to drain within the deadline $deadline. Tracker state: ${h_tracker.currentState}")
+                s"Failed to drain within the deadline $deadline. Tracker state: ${h_tracker.currentState}"
+              )
               handleShutdown(Throw(t))
-            } })
+            }
+          })
 
-          case _ => // nop: didn't timeout, so it should have already been handled
-        }
+        case _ => // nop: didn't timeout, so it should have already been handled
       }
     }
   }

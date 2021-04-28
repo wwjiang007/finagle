@@ -20,6 +20,9 @@ import io.netty.channel.ChannelHandler.Sharable
 @Sharable
 private[finagle] object BufCodec extends ChannelDuplexHandler {
 
+  // The key to use when inserting `BufCodec` into a Netty `ChannelPipeline`.
+  val Key: String = "bufCodec"
+
   override def write(ctx: ChannelHandlerContext, msg: Any, p: ChannelPromise): Unit =
     msg match {
       // We bypass Java NIO byte buffers if they're already direct.
@@ -59,7 +62,7 @@ private[finagle] object BufCodec extends ChannelDuplexHandler {
     msg match {
       case bb: ByteBuf =>
         val result =
-          try ByteBufConversion.copyByteBufToBuf(bb)
+          try ByteBufConversion.readByteBufToBuf(bb)
           finally bb.release()
 
         ctx.fireChannelRead(result)

@@ -1,16 +1,22 @@
 package com.twitter.finagle.memcached.integration
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.{Address, Memcached, Name}
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.{Address, Memcached, Name, param}
 import com.twitter.finagle.memcached.Client
 import com.twitter.finagle.memcached.integration.external.TestMemcachedServer
 import com.twitter.finagle.memcached.protocol._
+import com.twitter.finagle.partitioning.zk.ZkMetadata
 import com.twitter.finagle.stats.SummarizingStatsReceiver
+import com.twitter.finagle.tracing._
 import com.twitter.io.Buf
 import com.twitter.util.registry.{Entry, GlobalRegistry, SimpleRegistry}
 import com.twitter.util.{Await, Awaitable}
 import java.net.InetSocketAddress
+import org.mockito.ArgumentCaptor
+import org.mockito.Matchers.any
+import org.mockito.Mockito.{atLeastOnce, spy, verify, when}
 import org.scalatest.{BeforeAndAfter, FunSuite, Outcome}
+import scala.collection.JavaConverters._
 
 class SimpleClientTest extends FunSuite with BeforeAndAfter {
 
@@ -28,19 +34,27 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
 
   before {
     testServer = TestMemcachedServer.start()
-    if (testServer.isDefined) {
-      val address = Address(testServer.get.address.asInstanceOf[InetSocketAddress])
-      val service = baseClient
-        .withStatsReceiver(stats)
-        .connectionsPerEndpoint(1)
-        .newService(Name.bound(address), "memcache")
-      client = Client(service)
-    }
+    if (testServer.isDefined)
+      client = newClient(baseClient)
   }
 
   after {
     if (testServer.isDefined)
       testServer map { _.stop() }
+  }
+
+  def newClient(baseClient: Memcached.Client): Client = {
+    // we add zk metadata to with a shard_id 0
+    val address = Address.Inet(
+      testServer.get.address.asInstanceOf[InetSocketAddress],
+      ZkMetadata.toAddrMetadata(ZkMetadata(Some(0)))
+    )
+
+    val service = baseClient
+      .withStatsReceiver(stats)
+      .connectionsPerEndpoint(1)
+      .newService(Name.bound(address), "memcache")
+    Client(service)
   }
 
   override def withFixture(test: NoArgTest): Outcome = {
@@ -49,6 +63,19 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
       info("Cannot start memcached. Skipping test...")
       cancel()
     }
+  }
+
+  def withExpectedTraces(f: Client => Unit, expected: Seq[Annotation]): Unit = {
+    val tracer = spy(new NullTracer)
+    when(tracer.isActivelyTracing(any[TraceId])).thenReturn(true)
+    when(tracer.isNull).thenReturn(false)
+    val captor: ArgumentCaptor[Record] = ArgumentCaptor.forClass(classOf[Record])
+
+    val client = newClient(baseClient.configured(param.Tracer(tracer)))
+    f(client)
+    verify(tracer, atLeastOnce()).record(captor.capture())
+    val annotations = captor.getAllValues.asScala collect { case Record(_, _, a, _) => a }
+    assert(expected.filterNot(annotations.contains(_)).isEmpty)
   }
 
   test("set & get") {
@@ -84,7 +111,12 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
 
       assert(
         result == Map(
-          "foos" -> (("xyz", "1")), // the "cas unique" values are predictable from a fresh memcached
+          "foos" -> (
+            (
+              "xyz",
+              "1"
+            )
+          ), // the "cas unique" values are predictable from a fresh memcached
           "bazs" -> (("zyx", "3"))
         )
       )
@@ -138,9 +170,7 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
       val stats = awaitResult(client.stats())
       assert(stats != null)
       assert(!stats.isEmpty)
-      stats.foreach { stat =>
-        assert(stat.startsWith("STAT"))
-      }
+      stats.foreach { stat => assert(stat.startsWith("STAT")) }
     }
   }
 
@@ -155,7 +185,8 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
     intercept[ClientError] { awaitResult(client.set(null: String, Buf.Utf8("bar"))) }
     intercept[ClientError] { awaitResult(client.set("    ", Buf.Utf8("bar"))) }
 
-    try { awaitResult(client.set("\t", Buf.Utf8("bar"))) } catch {
+    try { awaitResult(client.set("\t", Buf.Utf8("bar"))) }
+    catch {
       case _: ClientError => fail("\t is allowed")
     }
 
@@ -193,8 +224,38 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
       val client = Memcached.client.newService(Name.bound(address), "memcache")
       client(Quit())
       val entries = simple.toSet
-      assert(entries.contains(
-        Entry(Seq("client", "memcached", "memcache", "Transporter"), "Netty4PushTransporter")))
+      assert(
+        entries.contains(
+          Entry(Seq("client", "memcached", "memcache", "Transporter"), "Netty4PushTransporter")
+        )
+      )
     }
+  }
+
+  test("annotates the total number of hits and misses") {
+    awaitResult(client.set("foo", Buf.Utf8("bar")))
+    awaitResult(client.set("bar", Buf.Utf8("baz")))
+    withExpectedTraces(
+      c => {
+        // add a missing key
+        awaitResult(c.getResult(Seq("foo", "bar", "themissingkey")))
+      },
+      Seq(
+        Annotation.BinaryAnnotation("clnt/memcached.hits", 2),
+        Annotation.BinaryAnnotation("clnt/memcached.misses", 1)
+      )
+    )
+  }
+
+  test("annotates the shard id of the endpoint") {
+    awaitResult(client.set("foo", Buf.Utf8("bar")))
+    withExpectedTraces(
+      c => {
+        awaitResult(c.get("foo"))
+      },
+      Seq(
+        Annotation.BinaryAnnotation("clnt/memcached.shard_id", 0)
+      )
+    )
   }
 }

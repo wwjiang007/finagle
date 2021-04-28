@@ -20,8 +20,8 @@ private[loadbalancer] class HeapLeastLoaded[Req, Rep](
   factories: Activity[IndexedSeq[ServiceFactory[Req, Rep]]],
   statsReceiver: StatsReceiver,
   emptyException: Throwable,
-  rng: Random
-) extends ServiceFactory[Req, Rep] {
+  rng: Random)
+    extends ServiceFactory[Req, Rep] {
 
   import HeapBalancer._
 
@@ -38,13 +38,12 @@ private[loadbalancer] class HeapLeastLoaded[Req, Rep](
     factory: ServiceFactory[Req, Rep],
     var load: Int,
     var index: Int,
-    var downq: Node = null
-  )
+    var downq: Node = null)
 
   // Linked list of downed nodes.
   private[this] var downq: Node = null
 
-  private[this] val HeapOps = Heap[Node](
+  private[this] val HeapOps: Heap[Node] = Heap[Node](
     Ordering.by(_.load),
     new Heap.Indexer[Node] {
       def apply(node: Node, i: Int): Unit = {
@@ -194,9 +193,7 @@ private[loadbalancer] class HeapLeastLoaded[Req, Rep](
       n
     }
 
-    node.factory(conn) map { new Wrapped(node, _) } onFailure { _ =>
-      put(node)
-    }
+    node.factory(conn) map { new Wrapped(node, _) } onFailure { _ => put(node) }
   }
 
   def close(deadline: Time): Future[Unit] = {

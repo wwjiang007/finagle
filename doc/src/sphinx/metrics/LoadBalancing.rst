@@ -28,6 +28,10 @@ All Balancers
   a fresh instance of the client's load balancer and receives traffic proportional
   to its weight.
 
+**busy_weight_classes**
+  A counter of the number of times a weight class in the loadbalancer was found busy or
+  closed.
+
 **adds**
   A counter of the number of hosts added to the loadbalancer.
 
@@ -84,10 +88,6 @@ Aperture Based Load Balancers
 **coordinate_updates**
   A counter of the number of times the Aperture implementation receives
   updates from the `ProcessCoordinate` process global.
-
-**rebuild_no_coordinate**
-  A counter which tracks the number of rebuilds without a `coordinate` set
-  when `use_deterministic_ordering` is 1.
 
 **expired**
   A counter of the number of endpoints which have been closed because they

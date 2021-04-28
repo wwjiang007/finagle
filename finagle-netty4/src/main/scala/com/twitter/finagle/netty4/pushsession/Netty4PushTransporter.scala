@@ -14,7 +14,9 @@ object Netty4PushTransporter {
     protocolInit: ChannelPipeline => Unit,
     addr: SocketAddress,
     params: Stack.Params
-  )(implicit mOut: Manifest[Out]): PushTransporter[In, Out] =
+  )(
+    implicit mOut: Manifest[Out]
+  ): PushTransporter[In, Out] =
     new Netty4PushTransporter[In, Out](_ => (), protocolInit, addr, params)
 
   /**
@@ -28,7 +30,9 @@ object Netty4PushTransporter {
     protocolInit: ChannelPipeline => Unit,
     addr: SocketAddress,
     params: Stack.Params
-  )(implicit mOut: Manifest[Out]): PushTransporter[In, Out] = {
+  )(
+    implicit mOut: Manifest[Out]
+  ): PushTransporter[In, Out] = {
     build[In, Out](protocolInit, addr, params)
   }
 }
@@ -37,8 +41,8 @@ class Netty4PushTransporter[In, Out](
   transportInit: ChannelPipeline => Unit,
   protocolInit: ChannelPipeline => Unit,
   val remoteAddress: SocketAddress,
-  params: Stack.Params
-) extends PushTransporter[In, Out] {
+  params: Stack.Params)
+    extends PushTransporter[In, Out] {
 
   private[this] val builder = new ConnectionBuilder(
     new RawNetty4ClientChannelInitializer(transportInit, params),
@@ -55,11 +59,16 @@ class Netty4PushTransporter[In, Out](
   protected def initSession[T <: PushSession[In, Out]](
     channel: Channel,
     protocolInit: ChannelPipeline => Unit,
-    sessionBuilder: PushChannelHandle[In, Out] => Future[T]): Future[T] = {
+    sessionBuilder: PushChannelHandle[In, Out] => Future[T]
+  ): Future[T] = {
     val statsReceiver = params[param.Stats].statsReceiver
     val (_, sessionF) =
       Netty4PushChannelHandle.install[In, Out, T](
-        channel, protocolInit, sessionBuilder, statsReceiver)
+        channel,
+        protocolInit,
+        sessionBuilder,
+        statsReceiver
+      )
     sessionF
   }
 

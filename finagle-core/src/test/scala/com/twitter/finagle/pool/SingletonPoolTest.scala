@@ -1,13 +1,13 @@
 package com.twitter.finagle.pool
 
 import com.twitter.finagle._
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stats.NullStatsReceiver
 import com.twitter.util.{Await, Awaitable, Future, Promise, Return, Throw, Time}
 import org.mockito.Matchers.any
 import org.mockito.Mockito.{never, times, verify, when}
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 object SingletonPoolTest {
   private def await[T](t: Awaitable[T]): T = Await.result(t, 1.second)
@@ -41,6 +41,37 @@ object SingletonPoolTest {
 
 class SingletonPoolTest extends FunSuite {
   import SingletonPoolTest._
+
+  test("doesn't leak connections on interruption with (allowInterrupts=false)") {
+    val ctx = new Ctx(allowInterrupts = false)
+    import ctx._
+
+    when(underlying.status).thenReturn(Status.Open)
+
+    val ex = new Exception("Impatient.")
+
+    // We do it twice, just to make sure there are no surprises.
+    val service1 = pool()
+    assert(!service1.isDefined)
+    service1.raise(ex)
+    assert(service1.poll == Some(Throw(ex)))
+
+    val service2 = pool()
+    assert(!service2.isDefined)
+    service2.raise(ex)
+    assert(service2.poll == Some(Throw(ex)))
+
+    val underlyingService = mock[Service[Int, Int]]
+    when(underlyingService.status).thenReturn(Status.Open)
+    when(underlyingService.close()).thenReturn(Future.Done)
+    underlyingP.setValue(underlyingService)
+
+    assert(pool.isAvailable)
+    pool.close()
+    assert(!pool.isAvailable)
+    verify(underlyingService, times(1)).close()
+    verify(underlying, times(1)).close()
+  }
 
   test("available when underlying is; unavailable when closed") {
     val ctx = new Ctx

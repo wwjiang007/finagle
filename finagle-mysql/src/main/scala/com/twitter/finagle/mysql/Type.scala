@@ -4,7 +4,7 @@ object Type {
 
   /**
    * MySQL type codes as enumerated here:
-   * http://dev.mysql.com/doc/internals/en/com-query-response.html#column-type
+   * https://dev.mysql.com/doc/internals/en/com-query-response.html#column-type
    */
   val Decimal: Short = 0x00
   val Tiny: Short = 0x01
@@ -23,6 +23,7 @@ object Type {
   val NewDate: Short = 0x0e
   val VarChar: Short = 0x0f
   val Bit: Short = 0x10
+  val Json: Short = 0xf5
   val NewDecimal: Short = 0xf6
   val Enum: Short = 0xf7
   val Set: Short = 0xf8
@@ -100,5 +101,6 @@ object Type {
     case VarString => "VarString"
     case String => "String"
     case Geometry => "Geometry"
+    case Json => "Json"
   }
 }

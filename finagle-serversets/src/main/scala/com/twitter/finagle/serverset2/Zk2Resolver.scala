@@ -1,12 +1,11 @@
 package com.twitter.finagle.serverset2
 
 import com.twitter.app.GlobalFlag
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.addr.WeightedAddress
+import com.twitter.finagle.partitioning.zk.ZkMetadata
 import com.twitter.finagle.serverset2.ServiceDiscoverer.ClientHealth
-import com.twitter.finagle.serverset2.addr.ZkMetadata
-import com.twitter.finagle.{Addr, FixedInetResolver, InetResolver, Resolver}
-import com.twitter.finagle.service.Backoff
+import com.twitter.finagle.{Addr, Backoff, FixedInetResolver, InetResolver, Resolver}
 import com.twitter.finagle.stats.{DefaultStatsReceiver, StatsReceiver}
 import com.twitter.finagle.util.DefaultTimer
 import com.twitter.logging.Logger
@@ -63,8 +62,8 @@ class Zk2Resolver(
   stabilizerWindow: Duration,
   unhealthyWindow: Duration,
   inetResolver: InetResolver,
-  timer: Timer
-) extends Resolver {
+  timer: Timer)
+    extends Resolver {
   import Zk2Resolver._
 
   def this(
@@ -86,11 +85,7 @@ class Zk2Resolver(
       timer
     )
 
-  def this(
-    statsReceiver: StatsReceiver,
-    stabilizerWindow: Duration,
-    unhealthyWindow: Duration
-  ) =
+  def this(statsReceiver: StatsReceiver, stabilizerWindow: Duration, unhealthyWindow: Duration) =
     this(statsReceiver, stabilizerWindow, unhealthyWindow, DefaultTimer)
 
   def this(statsReceiver: StatsReceiver) =
@@ -168,15 +163,15 @@ class Zk2Resolver(
           case Activity.Ok(weightedEntries) =>
             val endpoint = endpointOption.orNull
             val hosts: Seq[(String, Int, Addr.Metadata)] = weightedEntries.collect {
-              case (Endpoint(names, host, port, shardId, Endpoint.Status.Alive, _), weight)
+              case (
+                    Endpoint(names, host, port, shardId, Endpoint.Status.Alive, _, metadata),
+                    weight)
                   if names.contains(endpoint) &&
                     host != null &&
-                    shardOption.forall { s =>
-                      s == shardId && shardId != Int.MinValue
-                    } =>
+                    shardOption.forall { s => s == shardId && shardId != Int.MinValue } =>
                 val shardIdOpt = if (shardId == Int.MinValue) None else Some(shardId)
-                val metadata = ZkMetadata.toAddrMetadata(ZkMetadata(shardIdOpt))
-                (host, port, metadata + (WeightedAddress.weightKey -> weight))
+                val zkMetadata = ZkMetadata.toAddrMetadata(ZkMetadata(shardIdOpt, metadata))
+                (host, port, zkMetadata + (WeightedAddress.weightKey -> weight))
             }
 
             if (chatty()) {
@@ -195,8 +190,7 @@ class Zk2Resolver(
         // Finally we output `State`s, which are always nonpending
         // address coupled with metadata from the stabilization
         // process.
-        val addrWithMetadata = stabilizedServerSetAddr
-          .changes
+        val addrWithMetadata = stabilizedServerSetAddr.changes
           .joinLast(rawServerSetAddr.changes)
           .collect {
             case (stable, unstable) if stable != Addr.Pending =>
@@ -213,26 +207,25 @@ class Zk2Resolver(
           val finalAddr = discoverer.health.changes
             .joinLast(addrWithMetadata)
             .map {
-              case (clientHealth, state) => 
+              case (clientHealth, state) =>
+                if (chatty()) {
+                  logger.info(
+                    "New state for %s!%s: %s\n",
+                    path,
+                    endpointOption getOrElse "default",
+                    state
+                  )
+                }
 
-              if (chatty()) {
-                logger.info(
-                  "New state for %s!%s: %s\n",
-                  path,
-                  endpointOption getOrElse "default",
-                  state
-                )
-              }
+                // update gauges based on the metadata
+                val State(addr, _nlimbo, _size) = state
+                nlimbo = _nlimbo
+                size = _size
 
-              // update gauges based on the metadata
-              val State(addr, _nlimbo, _size) = state
-              nlimbo = _nlimbo
-              size = _size
-
-              if (clientHealth == ClientHealth.Unhealthy) {
-                logger.info("ZkResolver reports unhealthy. resolution moving to Addr.Pending")
-                Addr.Pending
-              } else addr
+                if (clientHealth == ClientHealth.Unhealthy) {
+                  logger.info("ZkResolver reports unhealthy. resolution moving to Addr.Pending")
+                  Addr.Pending
+                } else addr
             }
             .dedup // avoid updating if there is no change
             .register(Witness(u))

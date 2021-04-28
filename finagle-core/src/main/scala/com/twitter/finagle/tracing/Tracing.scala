@@ -1,6 +1,8 @@
 package com.twitter.finagle.tracing
 
-import com.twitter.util.{Duration, Time}
+import com.twitter.finagle.Init
+import com.twitter.finagle.stats.FinagleStatsReceiver
+import com.twitter.util.{Duration, Future, Stopwatch, Time}
 import java.net.InetSocketAddress
 import scala.annotation.tailrec
 import scala.util.Random
@@ -8,6 +10,7 @@ import scala.util.Random
 object Tracing {
 
   private val Rng = new Random
+  private[tracing] val sampled = FinagleStatsReceiver.counter("tracing", "sampled")
 
   private val DefaultId = TraceId(
     None,
@@ -19,7 +22,7 @@ object Tracing {
   )
 
   /**
-   * Some tracing systems such as Amazon X-Ray encode the orginal timestamp in
+   * Some tracing systems such as Amazon X-Ray encode the original timestamp in
    * order to enable even partitions in the backend. As sampling only occurs on
    * low 64-bits anyway, we encode epoch seconds into high-bits to support
    * downstreams who have a timestamp requirement.
@@ -35,7 +38,7 @@ object Tracing {
 
   // A collection of methods to work with tracers stored in the local context.
   // Structured as an implicit syntax for ergonomics.
-  private implicit class Tracers(val ts: List[Tracer]) extends AnyVal {
+  private implicit class Tracers(val ts: Seq[Tracer]) extends AnyVal {
 
     @tailrec
     final def isActivelyTracing(id: TraceId): Boolean =
@@ -100,7 +103,7 @@ abstract class Tracing {
   /**
    * @return the current list of tracers
    */
-  def tracers: List[Tracer]
+  def tracers: Seq[Tracer]
 
   /**
    * Get the current identifier, if it exists.
@@ -162,11 +165,17 @@ abstract class Tracing {
    */
   final def isTerminal: Boolean = id.terminal
 
+  // The underlying tracing format allows us to add annotations to
+  // traces with microsecond resolution. Unfortunately Time.now only
+  // gives us millisecond resolution so we need to use a higher
+  // precision clock for our timestamps. We use a nanosecond clock,
+  // which will allow us to truncate to microseconds when
+  // we finally persist this trace.
   final def record(ann: Annotation): Unit =
-    record(Record(id, Time.now, ann, None))
+    record(Record(id, Time.nowNanoPrecision, ann, None))
 
   final def record(ann: Annotation, duration: Duration): Unit =
-    record(Record(id, Time.now, ann, Some(duration)))
+    record(Record(id, Time.nowNanoPrecision, ann, Some(duration)))
 
   final def recordWireSend(): Unit =
     record(Annotation.WireSend)
@@ -195,7 +204,7 @@ abstract class Tracing {
   final def recordServerSendError(error: String): Unit =
     record(Annotation.ServerSendError(error))
 
-  final def recordClientSendFrargmet(): Unit =
+  final def recordClientSendFragment(): Unit =
     record(Annotation.ClientSendFragment)
 
   final def recordClientRecvFragment(): Unit =
@@ -210,6 +219,8 @@ abstract class Tracing {
   final def record(message: String): Unit =
     record(Annotation.Message(message))
 
+  // NOTE: This API is broken and silently discards the duration
+  @deprecated("Use Trace#traceLocal instead", "2019-20-10")
   final def record(message: String, duration: Duration): Unit =
     record(Annotation.Message(message), duration)
 
@@ -235,5 +246,145 @@ abstract class Tracing {
     for ((key, value) <- annotations) {
       recordBinary(key, value)
     }
+  }
+
+  private[this] def serviceName: String = {
+    TraceServiceName() match {
+      case Some(name) => name
+      case None => "local"
+    }
+  }
+
+  val LocalBeginAnnotation: String = "local/begin"
+  val LocalEndAnnotation: String = "local/end"
+
+  /**
+   * Convenience method for event loops in services.  Put your
+   * service handling code inside this to get proper tracing with all
+   * the correct fields filled in.
+   */
+  def traceService[T](
+    service: String,
+    rpc: String,
+    hostOpt: Option[InetSocketAddress] = None
+  )(
+    f: => T
+  ): T = Trace.letId(nextId) {
+    if (isActivelyTracing) {
+      recordBinary("finagle.version", Init.finagleVersion)
+      recordServiceName(service)
+      recordRpc(rpc)
+
+      hostOpt match {
+        case Some(addr) => recordServerAddr(addr)
+        case None =>
+      }
+
+      record(Annotation.ServerRecv)
+      try f
+      finally record(Annotation.ServerSend)
+    } else f
+  }
+
+  /**
+   * Create a span that begins right before the function is called
+   * and ends immediately after the function completes. This
+   * span will never have a corresponding remote component and is contained
+   * completely within the process it is created.
+   */
+  def traceLocal[T](name: String)(f: => T): T = {
+    Trace.letId(nextId) {
+      if (isActivelyTracing) {
+        val timestamp = Time.nowNanoPrecision
+        try f
+        finally {
+          val duration = Time.nowNanoPrecision - timestamp
+          recordSpan(name, timestamp, duration)
+        }
+      } else f
+    }
+  }
+
+  /**
+   * Create a span that begins right before the function is called
+   * and ends immediately after the async operation completes. This span will
+   * never have a corresponding remote component and is contained
+   * completely within the process it is created.
+   */
+  def traceLocalFuture[T](name: String)(f: => Future[T]): Future[T] = {
+    Trace.letId(nextId) {
+      if (isActivelyTracing) {
+        val timestamp = Time.nowNanoPrecision
+        f.ensure {
+          val duration = Time.nowNanoPrecision - timestamp
+          recordSpan(name, timestamp, duration)
+        }
+      } else f
+    }
+  }
+
+  /**
+   * Create a span with the given name and Duration, with the end of the span at `Time.now`.
+   */
+  def traceLocalSpan(name: String, duration: Duration): Unit = {
+    Trace.letId(nextId) {
+      if (isActivelyTracing) {
+        recordSpan(name, Time.nowNanoPrecision - duration, duration)
+      }
+    }
+  }
+
+  /**
+   * Create a span with the given name, timestamp and Duration. This is useful for debugging, or
+   * if you do not have complete control over the whole execution, e.g. you can not use
+   * [[traceLocalFuture]].
+   */
+  def traceLocalSpan(name: String, timestamp: Time, duration: Duration): Unit = {
+    Trace.letId(nextId) {
+      if (isActivelyTracing) {
+        recordSpan(name, timestamp, duration)
+      }
+    }
+  }
+
+  private[this] def recordSpan(name: String, timestamp: Time, duration: Duration): Unit = {
+    if (isActivelyTracing) {
+      // these annotations are necessary to get the
+      // zipkin ui to properly display the span.
+      record(Record(id, timestamp, Annotation.Rpc(name)))
+      record(Record(id, timestamp, Annotation.ServiceName(serviceName)))
+      record(Record(id, timestamp, Annotation.BinaryAnnotation("lc", name)))
+      record(Record(id, timestamp, Annotation.Message(LocalBeginAnnotation)))
+      record(Record(id, timestamp + duration, Annotation.Message(LocalEndAnnotation)))
+    }
+  }
+
+  /**
+   * Time an operation and add a binary annotation to the current span
+   * with the duration.
+   *
+   * @param message The message describing the operation
+   * @param f operation to perform
+   * @tparam T return type
+   * @return return value of the operation
+   */
+  def time[T](message: String)(f: => T): T = {
+    if (isActivelyTracing) {
+      val elapsed = Stopwatch.start()
+      val rv = f
+      recordBinary(message, elapsed())
+      rv
+    } else f
+  }
+
+  /**
+   * Time an async operation and add a binary annotation to the current span
+   * with the duration.
+   */
+  def timeFuture[T](message: String)(f: Future[T]): Future[T] = {
+    if (isActivelyTracing) {
+      val elapsed = Stopwatch.start()
+      f.ensure(recordBinary(message, elapsed()))
+    } else f
   }
 }

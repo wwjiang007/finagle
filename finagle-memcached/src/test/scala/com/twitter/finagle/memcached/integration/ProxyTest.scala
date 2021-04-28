@@ -1,6 +1,6 @@
 package com.twitter.finagle.memcached.integration
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.memcached.Client
 import com.twitter.finagle.memcached.integration.external.TestMemcachedServer
@@ -8,11 +8,8 @@ import com.twitter.finagle.memcached.protocol.{Command, Response}
 import com.twitter.io.Buf
 import com.twitter.util.{Await, Awaitable}
 import java.net.{InetAddress, InetSocketAddress}
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.{BeforeAndAfter, FunSuite}
 
-@RunWith(classOf[JUnitRunner])
 class ProxyTest extends FunSuite with BeforeAndAfter {
 
   val TimeOut = 15.seconds
@@ -96,9 +93,7 @@ class ProxyTest extends FunSuite with BeforeAndAfter {
         val stats = awaitResult(externalClient.stats(arg))
         assert(stats != null)
         assert(!stats.isEmpty)
-        stats.foreach { line =>
-          assert(line.startsWith("STAT"))
-        }
+        stats.foreach { line => assert(line.startsWith("STAT")) }
       }
       awaitResult(externalClient.close())
     }
@@ -116,12 +111,8 @@ class ProxyTest extends FunSuite with BeforeAndAfter {
       val stats = awaitResult(externalClient.stats(Some("cachedump " + n + " 100")))
       assert(stats != null)
       assert(!stats.isEmpty)
-      stats.foreach { stat =>
-        assert(stat.startsWith("ITEM"))
-      }
-      assert(stats.find { stat =>
-        stat.contains("foo")
-      }.isDefined)
+      stats.foreach { stat => assert(stat.startsWith("ITEM")) }
+      assert(stats.find { stat => stat.contains("foo") }.isDefined)
       awaitResult(externalClient.close())
     }
   }

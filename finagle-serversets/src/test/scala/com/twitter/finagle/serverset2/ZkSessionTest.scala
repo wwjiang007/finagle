@@ -1,15 +1,13 @@
 package com.twitter.finagle.serverset2
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.serverset2.client._
 import com.twitter.finagle.stats.NullStatsReceiver
 import com.twitter.io.Buf
 import com.twitter.util._
 import java.util.concurrent.atomic.AtomicReference
-import org.junit.runner.RunWith
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 import scala.collection.immutable
 
 sealed private trait ZkOp { type Res; val res = new Promise[Res] }
@@ -62,8 +60,8 @@ private object ZkOp {
 private class OpqueueZkReader(
   val sessionId: Long,
   val sessionPasswd: Buf,
-  val sessionTimeout: Duration
-) extends ZooKeeperReader {
+  val sessionTimeout: Duration)
+    extends ZooKeeperReader {
 
   import ZkOp._
 
@@ -98,7 +96,6 @@ private class OpqueueZkReader(
   def getACL(path: String): Future[Node.ACL] = Future.never
 }
 
-@RunWith(classOf[JUnitRunner])
 class ZkSessionTest extends FunSuite with Eventually with IntegrationPatience {
 
   import ZkOp._
@@ -167,6 +164,56 @@ class ZkSessionTest extends FunSuite with Eventually with IntegrationPatience {
       val Seq(`ew`, `ew2`, `gw`, ew3 @ ExistsWatch("/foo/bar")) = watchedZk.value.opq
       ew3.res() = Return(Watched(None, Var.value(WatchState.Pending)))
       assert(ref.get == Activity.Ok(Set.empty))
+    }
+  }
+
+  test("factory retries when ZK session fails to initialize") {
+    Time.withCurrentTimeFrozen { tc =>
+      val identity = Identities.get().head
+      val authInfo = "%s:%s".format(identity, identity)
+      implicit val timer = new MockTimer
+
+      // A normal `ZkSession` with updatable state.
+      val zkState: Var[WatchState] with Updatable[WatchState] = Var(WatchState.Pending)
+      val watchedZk = Watched(new OpqueueZkReader(), zkState)
+
+      // A failed `ZkSession`.
+      val failedZk = Watched(
+        new OpqueueZkReader(),
+        Var(WatchState.FailedToInitialize(new Exception("failed")))
+      )
+
+      // Return failed session on the first invocation.
+      var failed = true
+      val zk = ZkSession.retrying(
+        retryStream,
+        () => {
+          if (failed) {
+            failed = false
+            new ZkSession(retryStream, failedZk, NullStatsReceiver)
+          } else new ZkSession(retryStream, watchedZk, NullStatsReceiver)
+        }
+      )
+
+      zk.changes.respond {
+        case _ => ()
+      }
+
+      // The underlying session is in a failed state here. Ensure we haven't updated the `Var` yet.
+      assert(zk.sample() == ZkSession.nil)
+
+      // Advance the timer to allow `reconnect` to run.
+      tc.advance(10.seconds)
+      timer.tick()
+
+      // The underlying `ZkSession` should be set to `watchedZk` now.
+      // Update the session state to connected -- we should receive auth info.
+      zkState() = WatchState.SessionState(SessionState.SyncConnected)
+      eventually {
+        assert(
+          watchedZk.value.opq == Seq(AddAuthInfo("digest", Buf.Utf8(authInfo)))
+        )
+      }
     }
   }
 

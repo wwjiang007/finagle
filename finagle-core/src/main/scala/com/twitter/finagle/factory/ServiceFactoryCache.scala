@@ -1,6 +1,6 @@
 package com.twitter.finagle.factory
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
 import com.twitter.util._
@@ -8,7 +8,6 @@ import java.util
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.StampedLock
 import scala.collection.JavaConverters._
-import scala.collection.mutable.ListBuffer
 
 /**
  * A service factory that keeps track of idling times to implement
@@ -75,8 +74,8 @@ class ServiceFactoryCache[Key, Req, Rep](
   timer: Timer,
   statsReceiver: StatsReceiver = NullStatsReceiver,
   maxCacheSize: Int = 8,
-  tti: Duration = 10.minutes
-) extends Closable {
+  tti: Duration = 10.minutes)
+    extends Closable {
   assert(maxCacheSize > 0)
 
   private[this] val cache = new util.HashMap[Key, IdlingFactory[Req, Rep]]()
@@ -102,6 +101,7 @@ class ServiceFactoryCache[Key, Req, Rep](
         } else {
           expired
         }
+
         evictees.foreach {
           case (key, _) =>
             val removed = cache.remove(key)
@@ -185,9 +185,7 @@ class ServiceFactoryCache[Key, Req, Rep](
     factory(conn).map { service =>
       new ServiceProxy(service) {
         override def close(deadline: Time): Future[Unit] =
-          super.close(deadline).transform { _ =>
-            factory.close(deadline)
-          }
+          super.close(deadline).transform { _ => factory.close(deadline) }
       }
     }
 
@@ -211,22 +209,23 @@ class ServiceFactoryCache[Key, Req, Rep](
 
   def close(deadline: Time): Future[Unit] = {
     val writeStamp = lock.writeLock()
-    val svcFacs = try {
-      val values = ListBuffer.empty[Closable]
-      val it = cache.values.iterator
-      // Clear the cache to avoid racing with the timer task. If the
-      // task is invoked after releasing this lock but before it has
-      // a chance to close, it will be a noop.
-      while (it.hasNext) {
-        values += it.next()
-        it.remove()
+    val svcFacs =
+      try {
+        val values = List.newBuilder[Closable]
+        val it = cache.values.iterator
+        // Clear the cache to avoid racing with the timer task. If the
+        // task is invoked after releasing this lock but before it has
+        // a chance to close, it will be a noop.
+        while (it.hasNext) {
+          values += it.next()
+          it.remove()
+        }
+        values
+      } finally {
+        lock.unlockWrite(writeStamp)
       }
-      values
-    } finally {
-      lock.unlockWrite(writeStamp)
-    }
-    val closables = svcFacs :+ expiryTask
-    Closable.all(closables: _*).close(deadline)
+    svcFacs += expiryTask
+    Closable.all(svcFacs.result: _*).close(deadline)
   }
 
   private[finagle] def status(key: Key): Status = {

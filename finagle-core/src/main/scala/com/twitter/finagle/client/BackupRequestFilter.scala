@@ -1,10 +1,12 @@
 package com.twitter.finagle.client
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Stack.Params
 import com.twitter.finagle._
+import com.twitter.finagle.context.BackupRequest
 import com.twitter.finagle.service.{ReqRep, ResponseClass, ResponseClassifier, Retries, RetryBudget}
 import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.tracing.{Annotation, Trace, TraceId, Tracing}
 import com.twitter.finagle.util.WindowedPercentileHistogram
 import com.twitter.logging.Logger
 import com.twitter.util._
@@ -18,6 +20,15 @@ object BackupRequestFilter {
    * Sentinel [[Throwable]] when the original request does not complete within the timeout
    */
   private val OrigRequestTimeout = Failure("Original request did not complete in time")
+
+  private val IssuedAnnotation =
+    Annotation.Message("Client Backup Request Issued")
+
+  private val WonAnnotation =
+    Annotation.Message("Client Backup Request Won")
+
+  private val LostAnnotation =
+    Annotation.Message("Client Backup Request Lost")
 
   /**
    * Use a minimum non-zero delay to prevent sending unnecessary backup requests
@@ -41,9 +52,9 @@ object BackupRequestFilter {
 
   private def getAndValidateMaxExtraLoad(maxExtraLoad: Tunable[Double]): Double =
     maxExtraLoad() match {
-      case Some(maxExtraLoad) if (maxExtraLoad >= 0.0 && maxExtraLoad < 1.0) => maxExtraLoad
-      case Some(invalidMaxExtraLoad) => log.error(
-        s"maxExtraLoad must be between 0.0 and 1.0, was $invalidMaxExtraLoad. Using 0.0")
+      case Some(mel) if mel >= 0.0 && mel < 1.0 => mel
+      case Some(invalidMaxExtraLoad) =>
+        log.error(s"maxExtraLoad must be between 0.0 and 1.0, was $invalidMaxExtraLoad. Using 0.0")
         0.0
       case None => 0.0
     }
@@ -55,7 +66,8 @@ object BackupRequestFilter {
         ttl = RetryBudget.DefaultTtl,
         minRetriesPerSec = RetryBudget.DefaultMinRetriesPerSec,
         percentCanRetry = maxExtraLoad,
-        nowMillis)
+        nowMillis
+      )
 
   sealed trait Param {
     def mk(): (Param, Stack.Param[Param]) = (this, Param.param)
@@ -63,10 +75,8 @@ object BackupRequestFilter {
 
   object Param {
 
-    private[client] case class Configured(
-        maxExtraLoad: Tunable[Double],
-        sendInterrupts: Boolean)
-      extends Param
+    private[client] case class Configured(maxExtraLoad: Tunable[Double], sendInterrupts: Boolean)
+        extends Param
     case object Disabled extends Param
     implicit val param: Stack.Param[BackupRequestFilter.Param] = Stack.Param(Disabled)
   }
@@ -88,9 +98,12 @@ object BackupRequestFilter {
     def mk(): (Histogram, Stack.Param[Histogram]) = (this, Histogram.param)
   }
   object Histogram {
-    implicit val param: Stack.Param[Histogram] = Stack.Param(Histogram(
-      WindowedPercentileHistogram.DefaultLowestDiscernibleValue,
-      WindowedPercentileHistogram.DefaultHighestTrackableValue))
+    implicit val param: Stack.Param[Histogram] = Stack.Param(
+      Histogram(
+        WindowedPercentileHistogram.DefaultLowestDiscernibleValue,
+        WindowedPercentileHistogram.DefaultHighestTrackableValue
+      )
+    )
   }
 
   /**
@@ -107,7 +120,8 @@ object BackupRequestFilter {
   def Configured(maxExtraLoad: Double, sendInterrupts: Boolean): Param = {
     require(
       maxExtraLoad >= 0 && maxExtraLoad < 1.0,
-      s"maxExtraLoad must be between 0.0 and 1.0, was $maxExtraLoad")
+      s"maxExtraLoad must be between 0.0 and 1.0, was $maxExtraLoad"
+    )
     Param.Configured(Tunable.const(role.name, maxExtraLoad), sendInterrupts)
   }
 
@@ -138,10 +152,7 @@ object BackupRequestFilter {
    * Users should only use this method for filtering generic services; otherwise,
    * usage through the `idempotent` method on [[MethodBuilder]] implementations is preferred.
    */
-  def filterService[Req, Rep](
-    params: Stack.Params,
-    service: Service[Req, Rep]
-  ): Service[Req, Rep] =
+  def filterService[Req, Rep](params: Stack.Params, service: Service[Req, Rep]): Service[Req, Rep] =
     params[BackupRequestFilter.Param] match {
       case BackupRequestFilter.Param.Configured(maxExtraLoad, sendInterrupts) =>
         val brf = mkFilterFromParams[Req, Rep](maxExtraLoad, sendInterrupts, params)
@@ -155,8 +166,8 @@ object BackupRequestFilter {
 
   def module[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
     new Stack.ModuleParams[ServiceFactory[Req, Rep]] {
-      val role = BackupRequestFilter.role
-      val description = BackupRequestFilter.description
+      val role: Stack.Role = BackupRequestFilter.role
+      val description: String = BackupRequestFilter.description
 
       override def parameters: Seq[Stack.Param[_]] = Seq(
         implicitly[Stack.Param[param.Stats]],
@@ -181,12 +192,11 @@ object BackupRequestFilter {
 }
 
 private[client] class BackupRequestFactory[Req, Rep](
-    underlying: ServiceFactory[Req, Rep],
-    filter: BackupRequestFilter[Req, Rep])
-  extends ServiceFactoryProxy[Req, Rep](underlying) {
+  underlying: ServiceFactory[Req, Rep],
+  filter: BackupRequestFilter[Req, Rep])
+    extends ServiceFactoryProxy[Req, Rep](underlying) {
 
-  private[this] val applyBrf: Service[Req, Rep] => Service[Req, Rep] = svc =>
-    filter.andThen(svc)
+  private[this] val applyBrf: Service[Req, Rep] => Service[Req, Rep] = svc => filter.andThen(svc)
 
   override def apply(conn: ClientConnection): Future[Service[Req, Rep]] =
     underlying(conn).map(applyBrf)
@@ -226,16 +236,17 @@ private[client] class BackupRequestFactory[Req, Rep](
  *       request latency stats.
  */
 private[finagle] class BackupRequestFilter[Req, Rep](
-    maxExtraLoadTunable: Tunable[Double],
-    sendInterrupts: Boolean,
-    responseClassifier: ResponseClassifier,
-    newRetryBudget: (Double, () => Long) => RetryBudget,
-    clientRetryBudget: RetryBudget,
-    nowMs: () => Long,
-    statsReceiver: StatsReceiver,
-    timer: Timer,
-    windowedPercentileHistogramFac: () => WindowedPercentileHistogram)
-  extends SimpleFilter[Req, Rep] with Closable {
+  maxExtraLoadTunable: Tunable[Double],
+  sendInterrupts: Boolean,
+  responseClassifier: ResponseClassifier,
+  newRetryBudget: (Double, () => Long) => RetryBudget,
+  clientRetryBudget: RetryBudget,
+  nowMs: () => Long,
+  statsReceiver: StatsReceiver,
+  timer: Timer,
+  windowedPercentileHistogramFac: () => WindowedPercentileHistogram)
+    extends SimpleFilter[Req, Rep]
+    with Closable {
   import BackupRequestFilter._
 
   def this(
@@ -245,16 +256,18 @@ private[finagle] class BackupRequestFilter[Req, Rep](
     clientRetryBudget: RetryBudget,
     statsReceiver: StatsReceiver,
     timer: Timer
-  ) = this(
-    maxExtraLoadTunable,
-    sendInterrupts,
-    responseClassifier,
-    newRetryBudget = BackupRequestFilter.newRetryBudget,
-    clientRetryBudget = clientRetryBudget,
-    Stopwatch.systemMillis,
-    statsReceiver,
-    timer,
-    () => new WindowedPercentileHistogram(timer))
+  ) =
+    this(
+      maxExtraLoadTunable,
+      sendInterrupts,
+      responseClassifier,
+      newRetryBudget = BackupRequestFilter.newRetryBudget,
+      clientRetryBudget = clientRetryBudget,
+      Stopwatch.systemMillis,
+      statsReceiver,
+      timer,
+      () => new WindowedPercentileHistogram(timer)
+    )
 
   def this(
     maxExtraLoadTunable: Tunable[Double],
@@ -265,23 +278,25 @@ private[finagle] class BackupRequestFilter[Req, Rep](
     highestTrackableMsValue: Int,
     statsReceiver: StatsReceiver,
     timer: Timer
-  ) = this(
-    maxExtraLoadTunable,
-    sendInterrupts,
-    responseClassifier,
-    newRetryBudget = BackupRequestFilter.newRetryBudget,
-    clientRetryBudget = clientRetryBudget,
-    Stopwatch.systemMillis,
-    statsReceiver,
-    timer,
-    () => new WindowedPercentileHistogram(
-      WindowedPercentileHistogram.DefaultNumBuckets,
-      WindowedPercentileHistogram.DefaultBucketSize,
-      lowestDiscernibleMsValue,
-      highestTrackableMsValue,
-      timer))
-
-
+  ) =
+    this(
+      maxExtraLoadTunable,
+      sendInterrupts,
+      responseClassifier,
+      newRetryBudget = BackupRequestFilter.newRetryBudget,
+      clientRetryBudget = clientRetryBudget,
+      Stopwatch.systemMillis,
+      statsReceiver,
+      timer,
+      () =>
+        new WindowedPercentileHistogram(
+          WindowedPercentileHistogram.DefaultNumBuckets,
+          WindowedPercentileHistogram.DefaultBucketSize,
+          lowestDiscernibleMsValue,
+          highestTrackableMsValue,
+          timer
+        )
+    )
   @volatile private[this] var backupRequestRetryBudget: RetryBudget =
     newRetryBudget(getAndValidateMaxExtraLoad(maxExtraLoadTunable), nowMs)
 
@@ -292,11 +307,19 @@ private[finagle] class BackupRequestFilter[Req, Rep](
     windowedPercentileHistogramFac()
 
   // Prevent sending a backup on the first request
-  @volatile private[this] var sendBackupAfter: Int = Int.MaxValue
+  @volatile private[this] var sendBackupAfterMillis: Int = Int.MaxValue
 
   // For testing
   private[client] def sendBackupAfterDuration: Duration =
-    Duration.fromMilliseconds(sendBackupAfter)
+    Duration.fromMilliseconds(sendBackupAfterMillis)
+
+  private[this] val sendAfterStat = statsReceiver.stat("send_backup_after_ms")
+  private[this] val backupsSent = statsReceiver.counter("backups_sent")
+
+  // Indicates that the backup request returned first, regardless of whether it succeeded.
+  private[this] val backupsWon = statsReceiver.counter("backups_won")
+
+  private[this] val budgetExhausted = statsReceiver.counter("budget_exhausted")
 
   // schedule timer to refresh `sendBackupAfter`, and refresh `backupRequestRetryBudget` in response
   // to changes to the value of `maxExtraLoadTunable`,
@@ -310,23 +333,17 @@ private[finagle] class BackupRequestFilter[Req, Rep](
         percentile = percentileFromMaxExtraLoad(curMaxExtraLoad)
         backupRequestRetryBudget = newRetryBudget(curMaxExtraLoad, nowMs)
       }
-      sendBackupAfter = Math.max(MinSendBackupAfterMs, windowedPercentile.percentile(percentile))
-      sendAfterStat.add(sendBackupAfter)
+      sendBackupAfterMillis =
+        Math.max(MinSendBackupAfterMs, windowedPercentile.percentile(percentile))
+      sendAfterStat.add(sendBackupAfterMillis)
     }
   }
-
-  private[this] val sendAfterStat = statsReceiver.stat("send_backup_after_ms")
-  private[this] val backupsSent = statsReceiver.counter("backups_sent")
-
-  // Indicates that the backup request returned first, regardless of whether it succeeded.
-  private[this] val backupsWon = statsReceiver.counter("backups_won")
-
-  private[this] val budgetExhausted = statsReceiver.counter("budget_exhausted")
 
   private[this] def isSuccess(reqRep: ReqRep): Boolean =
     responseClassifier.applyOrElse(reqRep, ResponseClassifier.Default) match {
       case ResponseClass.Successful(_) => true
       case ResponseClass.Failed(_) => false
+      case ResponseClass.Ignorable => false
     }
 
   // Record latency for successful responses, timeouts, and those we interrupted with
@@ -339,9 +356,9 @@ private[finagle] class BackupRequestFilter[Req, Rep](
     case _ => false
   }
 
-  private[this] def record(req: Req, f: Future[Rep]): Future[Rep] = {
+  private[this] def record(req: Req, rep: Future[Rep]): Future[Rep] = {
     val start = nowMs()
-    f.respond { response =>
+    rep.respond { response =>
       if (shouldRecord(response)) {
         val latency = (nowMs() - start).toInt
         windowedPercentile.add(latency)
@@ -356,44 +373,85 @@ private[finagle] class BackupRequestFilter[Req, Rep](
   private[this] def canIssueBackup(): Boolean =
     backupRequestRetryBudget.tryWithdraw() && clientRetryBudget.tryWithdraw()
 
+  private[this] def issueBackup(
+    req: Req,
+    service: Service[Req, Rep],
+    tracing: Tracing,
+    backupTraceId: TraceId
+  ): Future[Rep] = {
+    if (tracing.isActivelyTracing) {
+      tracing.record(IssuedAnnotation)
+      tracing.recordBinary("clnt/backup_request_threshold_ms", sendBackupAfterMillis)
+      tracing.recordBinary("clnt/backup_request_span_id", backupTraceId.spanId)
+    }
+    val rep =
+      Trace.letId(backupTraceId) {
+        BackupRequest.let {
+          service(req)
+        }
+      }
+    record(req, rep)
+  }
+
+  private[this] def pickWinner(
+    req: Req,
+    orig: Future[Rep],
+    backup: Future[Rep],
+    trace: Tracing
+  ): Future[Rep] = {
+    val (winner, loser) = if (orig.isDefined) (orig, backup) else (backup, orig)
+    winner.transform { response =>
+      val wasSuccess = isSuccess(ReqRep(req, response))
+      val backupWon = wasSuccess && (backup eq winner)
+      if (backupWon) backupsWon.incr()
+
+      if (trace.isActivelyTracing) {
+        val annotation = if (backupWon) WonAnnotation else LostAnnotation
+        trace.record(annotation)
+      }
+      if (wasSuccess) {
+        if (sendInterrupts) {
+          loser.raise(SupersededRequestFailure)
+        }
+        winner
+      } else {
+        loser
+      }
+    }
+  }
+
   def apply(req: Req, service: Service[Req, Rep]): Future[Rep] = {
     backupRequestRetryBudget.deposit()
     val orig = record(req, service(req))
-    val howLong = sendBackupAfter
+    val howLong = sendBackupAfterMillis
 
-    orig.within(
-      timer,
-      Duration.fromMilliseconds(howLong),
-      OrigRequestTimeout
-    ).transform {
-      case Throw(OrigRequestTimeout) =>
-        // If we've waited long enough to fire the backup normally, do so and
-        // pass on the first successful result we get back.
-        if (canIssueBackup()) {
-          backupsSent.incr()
-          val backup = record(req, service(req))
-          orig.select(backup).transform { _ =>
-            val winner = if (orig.isDefined) orig else backup
-            val loser = if (winner eq orig) backup else orig
-            winner.transform { response =>
-              if (backup eq winner) backupsWon.incr()
-              if (isSuccess(ReqRep(req, response))) {
-                if (sendInterrupts) {
-                  loser.raise(SupersededRequestFailure)
-                }
-                Future.const(response)
-              } else {
-                loser
-              }
+    // once our percentile exceeds how high we can track, we should stop sending backups.
+    if (howLong >= windowedPercentile.highestTrackableValue) {
+      orig
+    } else {
+      orig
+        .within(
+          timer,
+          Duration.fromMilliseconds(howLong),
+          OrigRequestTimeout
+        ).transform {
+          case Throw(OrigRequestTimeout) =>
+            // If we've waited long enough to fire the backup normally, do so and
+            // pass on the first successful result we get back.
+            if (canIssueBackup()) {
+              backupsSent.incr()
+              val tracing = Trace()
+              val backupTraceId = tracing.nextId
+              val backup = issueBackup(req, service, tracing, backupTraceId)
+              orig.select(backup).transform { _ => pickWinner(req, orig, backup, tracing) }
+            } else {
+              budgetExhausted.incr()
+              orig
             }
-          }
-        } else {
-          budgetExhausted.incr()
-          orig
+          case _ =>
+            // Return the original request when it completed first (regardless of success)
+            orig
         }
-      case _ =>
-        // Return the original request when it completed first (regardless of success)
-        orig
     }
   }
 

@@ -60,7 +60,7 @@ private object RowBenchmark {
       origTable = "table",
       name = columnName,
       origName = columnName,
-      charset = Charset.Utf8_general_ci,
+      charset = MysqlCharset.Utf8_general_ci,
       displayLength = 10,
       fieldType = fieldType,
       flags = 0.toShort,
@@ -69,13 +69,11 @@ private object RowBenchmark {
 
   // In order to avoid decoding the mysql row we replicate the essence of
   // StringEncodedRow and BinaryEncodedRow
-  class SimpleRow(
-    val fields: IndexedSeq[Field],
-    val values: IndexedSeq[Value]
-  ) extends Row {
+  class SimpleRow(val fields: IndexedSeq[Field], val values: IndexedSeq[Value]) extends Row {
     private[this] val indexMap: Map[String, Int] =
-      fields.zipWithIndex.map { case (field, i) =>
-        field.id -> i
+      fields.zipWithIndex.map {
+        case (field, i) =>
+          field.id -> i
       }.toMap
 
     def indexOf(columnName: String): Option[Int] = indexMap.get(columnName)

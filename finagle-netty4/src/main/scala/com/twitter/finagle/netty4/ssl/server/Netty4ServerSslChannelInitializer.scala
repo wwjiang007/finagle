@@ -3,7 +3,11 @@ package com.twitter.finagle.netty4.ssl.server
 import com.twitter.finagle.netty4.ssl.{Alpn, Netty4SslHandler}
 import com.twitter.finagle.param.Stats
 import com.twitter.finagle.ssl.{ApplicationProtocols, Engine}
-import com.twitter.finagle.ssl.server.{SslServerConfiguration, SslServerEngineFactory, SslServerSessionVerifier}
+import com.twitter.finagle.ssl.server.{
+  SslServerConfiguration,
+  SslServerEngineFactory,
+  SslServerSessionVerifier
+}
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.{Address, Stack}
 import io.netty.channel.{Channel, ChannelInitializer, ChannelPipeline}
@@ -16,6 +20,8 @@ import java.net.InetSocketAddress
  */
 final private[finagle] class Netty4ServerSslChannelInitializer(params: Stack.Params)
     extends ChannelInitializer[Channel] {
+
+  import Netty4ServerSslChannelInitializer._
 
   /**
    * Read the configured `SslServerEngineFactory` out of the stack param.
@@ -66,8 +72,9 @@ final private[finagle] class Netty4ServerSslChannelInitializer(params: Stack.Par
     sslHandler: SslHandler,
     sslConnectHandler: SslServerVerificationHandler
   ): Unit = {
-    pipeline.addFirst("sslConnect", sslConnectHandler)
-    pipeline.addFirst("ssl", sslHandler)
+    val name = pipeline.context(this).name
+    pipeline.addBefore(name, SslHandlerName, sslHandler)
+    pipeline.addBefore(name, SslConnectHandlerName, sslConnectHandler)
   }
 
   /**
@@ -82,8 +89,7 @@ final private[finagle] class Netty4ServerSslChannelInitializer(params: Stack.Par
         Address.failing
       else Address(ch.remoteAddress.asInstanceOf[InetSocketAddress])
 
-
-    val Transport.ServerSsl(configuration) = params[Transport.ServerSsl]
+    val configuration = params[Transport.ServerSsl].sslServerConfiguration
 
     for (config <- configuration) {
       val factory: SslServerEngineFactory = selectEngineFactory(ch)
@@ -92,8 +98,20 @@ final private[finagle] class Netty4ServerSslChannelInitializer(params: Stack.Par
       val sslHandler: SslHandler = createSslHandler(engine)
       val sslConnectHandler: SslServerVerificationHandler =
         createSslConnectHandler(sslHandler, remoteAddress, combined)
+
       addHandlersToPipeline(ch.pipeline, sslHandler, sslConnectHandler)
     }
   }
+}
 
+private[finagle] object Netty4ServerSslChannelInitializer {
+
+  /** Name that should be used when inserting this handler into a Netty pipeline */
+  val HandlerName: String = "tlsInit"
+
+  /** Name of the Netty SslHandler */
+  private val SslHandlerName: String = "ssl"
+
+  /** Name of the Connection handler */
+  private val SslConnectHandlerName: String = "sslConnect"
 }

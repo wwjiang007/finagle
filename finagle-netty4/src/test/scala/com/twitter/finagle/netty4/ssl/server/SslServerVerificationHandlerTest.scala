@@ -9,16 +9,13 @@ import io.netty.util.concurrent.DefaultPromise
 import javax.net.ssl.{SSLEngine, SSLSession}
 import org.mockito.Mockito.when
 import org.scalatest.{FunSuite, OneInstancePerTest}
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 class SslServerVerificationHandlerTest extends FunSuite with MockitoSugar with OneInstancePerTest {
 
   class TestVerifier(result: => Boolean) extends SslServerSessionVerifier {
-    def apply(
-      address: Address,
-      config: SslServerConfiguration,
-      session: SSLSession
-    ): Boolean = result
+    def apply(address: Address, config: SslServerConfiguration, session: SSLSession): Boolean =
+      result
   }
 
   val channel = new EmbeddedChannel()
@@ -33,7 +30,12 @@ class SslServerVerificationHandlerTest extends FunSuite with MockitoSugar with O
   test("handler removes itself on successful verification") {
     val pipeline = channel.pipeline
     pipeline.addFirst(
-      new SslServerVerificationHandler(sslHandler, Address.failing, sslConfig, new TestVerifier(true))
+      new SslServerVerificationHandler(
+        sslHandler,
+        Address.failing,
+        sslConfig,
+        new TestVerifier(true)
+      )
     )
 
     val before = pipeline.get(classOf[SslServerVerificationHandler])
@@ -53,7 +55,12 @@ class SslServerVerificationHandlerTest extends FunSuite with MockitoSugar with O
   test("closes channel when verification fails") {
     val pipeline = channel.pipeline
     pipeline.addFirst(
-      new SslServerVerificationHandler(sslHandler, Address.failing, sslConfig, new TestVerifier(false))
+      new SslServerVerificationHandler(
+        sslHandler,
+        Address.failing,
+        sslConfig,
+        new TestVerifier(false)
+      )
     )
 
     pipeline.fireChannelActive()
@@ -86,7 +93,12 @@ class SslServerVerificationHandlerTest extends FunSuite with MockitoSugar with O
   test("closes channel when verification fails without channel active") {
     val pipeline = channel.pipeline
     pipeline.addFirst(
-      new SslServerVerificationHandler(sslHandler, Address.failing, sslConfig, new TestVerifier(false))
+      new SslServerVerificationHandler(
+        sslHandler,
+        Address.failing,
+        sslConfig,
+        new TestVerifier(false)
+      )
     )
 
     handshakePromise.setSuccess(channel)

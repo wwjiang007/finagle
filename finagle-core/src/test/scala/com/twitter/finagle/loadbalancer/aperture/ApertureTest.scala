@@ -1,13 +1,12 @@
 package com.twitter.finagle.loadbalancer.aperture
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Address.Inet
 import com.twitter.finagle._
-import com.twitter.finagle.loadbalancer.{EndpointFactory, FailingEndpointFactory, NodeT}
+import com.twitter.finagle.loadbalancer.{EndpointFactory, NodeT}
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver, StatsReceiver}
-import com.twitter.finagle.toggle
 import com.twitter.finagle.util.Rng
-import com.twitter.util.{Activity, Await, Duration, NullTimer}
+import com.twitter.util.{Activity, Await, Duration, NullTimer, Var}
 import java.net.InetSocketAddress
 import org.scalactic.source.Position
 import org.scalatest.{FunSuite, Tag}
@@ -26,15 +25,21 @@ class ApertureTest extends FunSuite with ApertureSuite {
    * us avoid down nodes with the important caveat that we only select over a subset.
    */
   private class Bal extends TestBal {
+
+    protected def nodeLoad: Double = 0.0
+
     protected def statsReceiver: StatsReceiver = NullStatsReceiver
-    protected class Node(val factory: EndpointFactory[Unit, Unit])
+    class Node(val factory: EndpointFactory[Unit, Unit])
         extends ServiceFactoryProxy[Unit, Unit](factory)
         with NodeT[Unit, Unit]
-        with ApertureNode {
+        with ApertureNode[Unit, Unit] {
+
+      override def tokenRng: Rng = rng
+
       // We don't need a load metric since this test only focuses on
       // the internal behavior of aperture.
       def id: Int = 0
-      def load: Double = 0
+      def load: Double = nodeLoad
       def pending: Int = 0
       override val token: Int = 0
     }
@@ -42,13 +47,23 @@ class ApertureTest extends FunSuite with ApertureSuite {
     protected def newNode(factory: EndpointFactory[Unit, Unit]): Node =
       new Node(factory)
 
-    protected def failingNode(cause: Throwable): Node =
-      new Node(new FailingEndpointFactory[Unit, Unit](cause))
+    var rebuilds: Int = 0
+    override def rebuild(): Unit = {
+      rebuilds += 1
+      super.rebuild()
+    }
   }
 
   // Ensure the flag value is 12 since many of the tests depend on it.
-  override protected def test(testName: String,testTags: Tag*)(testFun: => Any)(implicit pos: Position): Unit =
-    super.test(testName, testTags:_*) {
+  override protected def test(
+    testName: String,
+    testTags: Tag*
+  )(
+    testFun: => Any
+  )(
+    implicit pos: Position
+  ): Unit =
+    super.test(testName, testTags: _*) {
       minDeterminsticAperture.let(12) {
         testFun
       }
@@ -68,27 +83,55 @@ class ApertureTest extends FunSuite with ApertureSuite {
         label = "",
         timer = new NullTimer,
         emptyException = new NoBrokersAvailableException,
-        useDeterministicOrdering = None
+        useDeterministicOrdering = None,
+        eagerConnections = false
       )
     }
   }
 
+  test("dapertureActive does not create LoadBand metrics") {
+    ProcessCoordinate.setCoordinate(1, 4)
+    val stats = new InMemoryStatsReceiver
+    val aperture = new ApertureLeastLoaded[Unit, Unit](
+      // we need to hydrate the endpoints to avoid the `EmptyVector` Distributor.
+      endpoints = Activity.value(IndexedSeq(new Factory(0))),
+      smoothWin = Duration.Bottom,
+      lowLoad = 0,
+      highLoad = 0,
+      minAperture = 10,
+      maxEffort = 0,
+      rng = Rng.threadLocal,
+      statsReceiver = stats,
+      label = "",
+      timer = new NullTimer,
+      emptyException = new NoBrokersAvailableException,
+      useDeterministicOrdering = Some(true),
+      eagerConnections = false
+    )
+
+    assert(!stats.gauges.contains(Seq("loadband", "offered_load_ema")))
+    assert(!stats.counters.contains(Seq("loadband", "widen")))
+    assert(!stats.counters.contains(Seq("loadband", "narrow")))
+    ProcessCoordinate.unsetCoordinate()
+  }
+
   test("closing ApertureLeastLoaded removes the loadband ema gauge") {
     val stats = new InMemoryStatsReceiver
-      val aperture = new ApertureLeastLoaded[Unit, Unit](
-        endpoints = Activity.pending,
-        smoothWin = Duration.Bottom,
-        lowLoad = 0,
-        highLoad = 0,
-        minAperture = 10,
-        maxEffort = 0,
-        rng = Rng.threadLocal,
-        statsReceiver = stats,
-        label = "",
-        timer = new NullTimer,
-        emptyException = new NoBrokersAvailableException,
-        useDeterministicOrdering = None
-      )
+    val aperture = new ApertureLeastLoaded[Unit, Unit](
+      endpoints = Activity.pending,
+      smoothWin = Duration.Bottom,
+      lowLoad = 0,
+      highLoad = 0,
+      minAperture = 10,
+      maxEffort = 0,
+      rng = Rng.threadLocal,
+      statsReceiver = stats,
+      label = "",
+      timer = new NullTimer,
+      emptyException = new NoBrokersAvailableException,
+      useDeterministicOrdering = Some(false),
+      eagerConnections = false
+    )
 
     assert(stats.gauges.contains(Seq("loadband", "offered_load_ema")))
     Await.result(aperture.close(), 10.seconds)
@@ -111,7 +154,8 @@ class ApertureTest extends FunSuite with ApertureSuite {
       label = "",
       timer = new NullTimer,
       emptyException = new NoBrokersAvailableException,
-      useDeterministicOrdering = None
+      useDeterministicOrdering = Some(false),
+      eagerConnections = false
     )
 
     assert(stats.gauges.contains(Seq("loadband", "offered_load_ema")))
@@ -119,10 +163,100 @@ class ApertureTest extends FunSuite with ApertureSuite {
     assert(!stats.gauges.contains(Seq("loadband", "offered_load_ema")))
   }
 
+  test("eagerly connects to only new endpoints in the aperture") {
+    val factories = IndexedSeq(new Factory(0), new Factory(1))
+    val endpoints = Var(Activity.Ok(factories))
+
+    ProcessCoordinate.setCoordinate(instanceId = 0, totalInstances = 1)
+    val aperture = new ApertureLeastLoaded[Unit, Unit](
+      endpoints = Activity(endpoints),
+      smoothWin = Duration.Bottom,
+      lowLoad = 0,
+      highLoad = 0,
+      minAperture = 10,
+      maxEffort = 0,
+      rng = Rng.threadLocal,
+      statsReceiver = NullStatsReceiver,
+      label = "",
+      timer = new NullTimer,
+      emptyException = new NoBrokersAvailableException,
+      useDeterministicOrdering = Some(true),
+      eagerConnections = true
+    )
+    assert(factories.forall(_.total == 1))
+
+    val newEndpoint = new Factory(2)
+    endpoints.update(Activity.Ok(factories :+ newEndpoint))
+    assert(newEndpoint.total == 1)
+    assert(factories.forall(_.total == 1))
+  }
+
+  test("daperture does not rebuild on max effort exhausted") {
+    val factory = new Factory(0)
+    ProcessCoordinate.setCoordinate(1, 4)
+    val stats = new InMemoryStatsReceiver
+    val aperture = new ApertureLeastLoaded[Unit, Unit](
+      endpoints = Activity.value(IndexedSeq(factory)),
+      smoothWin = Duration.Bottom,
+      lowLoad = 0,
+      highLoad = 0,
+      minAperture = 10,
+      maxEffort = 0,
+      rng = Rng.threadLocal,
+      statsReceiver = stats,
+      label = "",
+      timer = new NullTimer,
+      emptyException = new NoBrokersAvailableException,
+      useDeterministicOrdering = Some(true),
+      eagerConnections = false
+    )
+    assert(stats.counters(Seq("rebuilds")) == 1)
+
+    factory.status = Status.Busy
+    assert(stats.gauges(Seq("size"))() == 1)
+    assert(stats.gauges(Seq("busy"))() == 1)
+    aperture.apply()
+    assert(stats.counters(Seq("max_effort_exhausted")) == 1)
+    assert(stats.counters(Seq("rebuilds")) == 1)
+
+    ProcessCoordinate.unsetCoordinate()
+  }
+
+  test("daperture only rebuilds on coordinate changes") {
+    val factory = new Factory(0)
+    ProcessCoordinate.setCoordinate(1, 4)
+    val stats = new InMemoryStatsReceiver
+    val aperture = new ApertureLeastLoaded[Unit, Unit](
+      endpoints = Activity.value(IndexedSeq(factory)),
+      smoothWin = Duration.Bottom,
+      lowLoad = 0,
+      highLoad = 0,
+      minAperture = 10,
+      maxEffort = 0,
+      rng = Rng.threadLocal,
+      statsReceiver = stats,
+      label = "",
+      timer = new NullTimer,
+      emptyException = new NoBrokersAvailableException,
+      useDeterministicOrdering = Some(true),
+      eagerConnections = false
+    )
+    assert(stats.counters(Seq("rebuilds")) == 1)
+
+    ProcessCoordinate.setCoordinate(1, 4)
+    assert(stats.counters(Seq("rebuilds")) == 1)
+
+    // rebuild only on new change
+    ProcessCoordinate.setCoordinate(1, 5)
+    assert(stats.counters(Seq("rebuilds")) == 2)
+
+    ProcessCoordinate.unsetCoordinate()
+  }
+
   test("minAperture <= vector.size") {
     val min = 100
     val bal = new Bal {
-      override protected val minAperture = min
+      override private[aperture] val minAperture = min
     }
 
     val counts = new Counts
@@ -138,7 +272,7 @@ class ApertureTest extends FunSuite with ApertureSuite {
   test("aperture <= vector.size") {
     val min = 100
     val bal = new Bal {
-      override protected val minAperture = min
+      override private[aperture] val minAperture = min
     }
 
     val counts = new Counts
@@ -187,12 +321,12 @@ class ApertureTest extends FunSuite with ApertureSuite {
   test("min aperture size is not > the number of active nodes") {
     val counts = new Counts
     val bal = new Bal {
-      override protected val minAperture = 4
+      override private[aperture] val minAperture = 4
     }
 
     bal.update(counts.range(10))
 
-    // Sanity check custom minAperture enforced.
+    // Check that the custom minAperture is enforced.
     bal.adjustx(-100)
     bal.applyn(1000)
     assert(counts.nonzero.size == 4)
@@ -263,6 +397,8 @@ class ApertureTest extends FunSuite with ApertureSuite {
     for (f <- counts)
       f.status = Status.Closed
 
+    assert(bal.status == Status.Closed)
+
     bal.applyn(1000)
     assert(bal.aperturex == 1)
     // since our status sort is stable, we know that
@@ -275,6 +411,54 @@ class ApertureTest extends FunSuite with ApertureSuite {
     counts.clear()
     bal.applyn(1000)
     assert(counts.nonzero == Set(goodkey))
+    assert(bal.status == Status.Open)
+  }
+
+  test("status, unavailable endpoints in the aperture") {
+    val counts = new Counts
+    val bal = new Bal {
+      override protected val useDeterministicOrdering = Some(true)
+    }
+
+    ProcessCoordinate.setCoordinate(instanceId = 0, totalInstances = 12)
+    bal.update(counts.range(24))
+    bal.rebuildx()
+    assert(bal.isDeterministicAperture)
+    assert(bal.minUnitsx == 12)
+
+    // mark all endpoints within the aperture as busy
+    for (i <- 0 until 12) {
+      counts(i).status = Status.Busy
+    }
+
+    assert(bal.status == Status.Busy)
+
+    // one endpoint in the aperture that's open
+    counts(0).status = Status.Open
+    assert(bal.status == Status.Open)
+  }
+
+  test("status, respects vector order in random aperture") {
+    val counts = new Counts
+    val bal = new Bal {
+      override protected val useDeterministicOrdering = Some(false)
+    }
+
+    bal.update(counts.range(2))
+    assert(bal.aperturex == 1)
+    assert(bal.isRandomAperture)
+
+    // last endpoint outside the aperture is open.
+    counts(0).status = Status.Busy
+
+    // should be available due to the single endpoint
+    assert(bal.status == Status.Open)
+
+    // should be moved forward on rebuild
+    val svc = Await.result(bal(ClientConnection.nil))
+    assert(bal.rebuilds == 1)
+    assert(bal.status == Status.Open)
+    assert(svc.status == Status.Open)
   }
 
   test("useDeterministicOrdering, clients evenly divide servers") {
@@ -330,16 +514,12 @@ class ApertureTest extends FunSuite with ApertureSuite {
     val order = bal.distx.vector
     for (_ <- 0 to 100) {
       bal.rebuildx()
-      assert(order.indices.forall { i =>
-        order(i) == bal.distx.vector(i)
-      })
+      assert(order.indices.forall { i => order(i) == bal.distx.vector(i) })
     }
   }
 
   test("order maintained when status flaps") {
-    val bal = new Bal {
-      override protected val useDeterministicOrdering = Some(true)
-    }
+    val bal = new Bal
 
     ProcessCoordinate.unsetCoordinate()
 
@@ -371,29 +551,67 @@ class ApertureTest extends FunSuite with ApertureSuite {
   }
 
   test("daperture toggle") {
-    toggle.flag.overrides.let(Aperture.dapertureToggleKey, 1.0) {
-      val bal = new Bal {
-        override val minAperture = 150
-      }
-      ProcessCoordinate.setCoordinate(0, 150)
-      bal.update(Vector.tabulate(150)(Factory))
-      bal.rebuildx()
-      assert(bal.isDeterministicAperture)
-      // ignore 150, since we are using d-aperture and instead
-      // default to 12.
-      assert(bal.minUnitsx == 12)
+    val bal = new Bal {
+      override val minAperture = 150
+    }
+    ProcessCoordinate.setCoordinate(0, 150)
+    bal.update(Vector.tabulate(150)(Factory))
+    bal.rebuildx()
+    assert(bal.isDeterministicAperture)
+    // ignore 150, since we are using d-aperture and instead
+    // default to 12.
+    assert(bal.minUnitsx == 12)
+
+    // Now unset the coordinate which should send us back to random aperture
+    ProcessCoordinate.unsetCoordinate()
+    assert(bal.isRandomAperture)
+    bal.update(Vector.tabulate(150)(Factory))
+    bal.rebuildx()
+    assert(bal.minUnitsx == 150)
+  }
+
+  test("d-aperture with equally loaded nodes doesn't unduly bias due to rounding errors") {
+    val counts = new Counts
+    val bal = new Bal {
+      override val minAperture = 12
+      override protected def nodeLoad: Double = 1.0
+    }
+    ProcessCoordinate.setCoordinate(0, 1)
+    bal.update(counts.range(3))
+    bal.rebuildx()
+    assert(bal.isDeterministicAperture)
+    assert(bal.minUnitsx == 3)
+    bal.applyn(3000)
+
+    ProcessCoordinate.unsetCoordinate()
+
+    val requests = counts.toIterator.map(_._total).toVector
+    val avg = requests.sum.toDouble / requests.size
+    val relativeDiffs = requests.map { i => math.abs(avg - i) / avg }
+    relativeDiffs.foreach { i => assert(i < 0.05) }
+  }
+
+  test("'p2c' d-aperture doesn't unduly bias") {
+    val counts = new Counts
+    val bal = new Bal {
+      override val minAperture = 1
+      override protected def nodeLoad: Double = 1.0
+      override val useDeterministicOrdering: Option[Boolean] = Some(true)
     }
 
-    toggle.flag.overrides.let(Aperture.dapertureToggleKey, 0.0) {
-      val bal = new Bal {
-        override val minAperture = 150
-      }
-      ProcessCoordinate.setCoordinate(0, 150)
-      bal.update(Vector.tabulate(150)(Factory))
-      bal.rebuildx()
-      assert(bal.isRandomAperture)
-      assert(bal.minUnitsx == 150)
-    }
+    // If no ProcessCoordinate is set but useDeterministicOrdering is true, we should fall back
+    // to the p2c-style deterministic aperture (one instance, no peers)
+    ProcessCoordinate.unsetCoordinate()
+    bal.update(counts.range(3))
+    bal.rebuildx()
+    assert(bal.isDeterministicAperture)
+    assert(bal.minUnitsx == 3)
+    bal.applyn(3000)
+
+    val requests = counts.toIterator.map(_._total).toVector
+    val avg = requests.sum.toDouble / requests.size
+    val relativeDiffs = requests.map { i => math.abs(avg - i) / avg }
+    relativeDiffs.foreach { i => assert(i < 0.05) }
   }
 
   test("vectorHash") {
@@ -410,9 +628,10 @@ class ApertureTest extends FunSuite with ApertureSuite {
       override protected def statsReceiver = sr
     }
 
-    def updateWithIps(ips: Vector[String]): Unit = bal.update(ips.map { addr =>
-      new WithAddressFactory(addr.##, new InetSocketAddress(addr, 80))
-    })
+    def updateWithIps(ips: Vector[String]): Unit =
+      bal.update(ips.map { addr =>
+        new WithAddressFactory(addr.##, new InetSocketAddress(addr, 80))
+      })
 
     updateWithIps(Vector("1.1.1.1", "1.1.1.2"))
     val hash1 = getVectorHash
@@ -428,7 +647,9 @@ class ApertureTest extends FunSuite with ApertureSuite {
 
     assert(hash1 == hash3)
 
-    // Permutations have different hash codes
+    // Permutations have different hash codes. First update
+    // with a different list so the rebuild occurs
+    updateWithIps(Vector("1.1.1.1", "1.1.1.3"))
     updateWithIps(Vector("1.1.1.2", "1.1.1.1"))
     val hash4 = getVectorHash
 

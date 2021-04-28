@@ -2,17 +2,15 @@ package com.twitter.finagle.tracing
 
 import com.twitter.finagle.{Filter, Dtab, Service}
 import com.twitter.util.{Await, Future}
-import org.junit.runner.RunWith
 import org.mockito.ArgumentCaptor
 import org.mockito.Mockito.{spy, verify, when, atLeastOnce}
 import org.mockito.Matchers.any
 import org.scalactic.source.Position
-import org.scalatest.junit.{AssertionsForJUnit, JUnitRunner}
-import org.scalatest.mockito.MockitoSugar
 import org.scalatest.{BeforeAndAfter, FunSuite, Tag}
+import org.scalatestplus.junit.AssertionsForJUnit
+import org.scalatestplus.mockito.MockitoSugar
 import scala.collection.JavaConverters._
 
-@RunWith(classOf[JUnitRunner])
 class TracingFilterTest
     extends FunSuite
     with MockitoSugar
@@ -21,9 +19,7 @@ class TracingFilterTest
 
   val serviceName = "bird"
   val service = Service.mk[Int, Int](Future.value)
-  val exceptingService = Service.mk[Int, Int]({ x =>
-    Future.exception(new Exception("bummer"))
-  })
+  val exceptingService = Service.mk[Int, Int]({ x => Future.exception(new Exception("bummer")) })
 
   var tracer: Tracer = _
   var captor: ArgumentCaptor[Record] = _
@@ -41,14 +37,14 @@ class TracingFilterTest
     val composed = filter andThen service
     Await.result(composed(4))
     verify(tracer, atLeastOnce()).record(captor.capture())
-    captor.getAllValues.asScala
+    captor.getAllValues.asScala.toSeq
   }
 
   def recordException(filter: Filter[Int, Int, Int, Int]): Seq[Record] = {
     val composed = filter andThen exceptingService
     intercept[Exception] { Await.result(composed(4)) }
     verify(tracer, atLeastOnce()).record(captor.capture())
-    captor.getAllValues.asScala
+    captor.getAllValues.asScala.toSeq
   }
 
   def testAnnotatingTracingFilter(
@@ -111,7 +107,18 @@ class TracingFilterTest
    * Client tracing
    */
 
-  def mkClient(v: String = "") = ClientTracingFilter.TracingFilter[Int, Int](serviceName, () => v)
+  def mkClient(v: String = "") =
+    ClientTracingFilter
+      .TracingFilter[Int, Int](serviceName, () => v).andThen(
+        WireTracingFilter.TracingFilter[Int, Int](
+          serviceName,
+          "srv",
+          Annotation.WireRecv,
+          Annotation.WireSend,
+          traceMetadata = false,
+          () => v
+        )
+      )
 
   testAnnotatingTracingFilter("clnt", mkClient)
 
@@ -142,7 +149,18 @@ class TracingFilterTest
    * Server tracing
    */
 
-  def mkServer(v: String = "") = ServerTracingFilter.TracingFilter[Int, Int](serviceName, () => v)
+  def mkServer(v: String = "") =
+    ServerTracingFilter
+      .TracingFilter[Int, Int](serviceName, () => v).andThen(
+        WireTracingFilter.TracingFilter[Int, Int](
+          serviceName,
+          "srv",
+          Annotation.WireRecv,
+          Annotation.WireSend,
+          traceMetadata = true,
+          () => v
+        )
+      )
 
   testAnnotatingTracingFilter("srv", mkServer)
 

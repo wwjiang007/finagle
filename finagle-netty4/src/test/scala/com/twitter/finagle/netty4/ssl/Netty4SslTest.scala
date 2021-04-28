@@ -1,6 +1,6 @@
 package com.twitter.finagle.netty4.ssl
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.netty4.ssl.Netty4SslTestComponents._
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.finagle.transport.Transport
@@ -31,21 +31,23 @@ class Netty4SslTest extends FunSuite with Eventually with IntegrationPatience {
   private[this] def assertGaugeIsZero(
     statsReceiver: InMemoryStatsReceiver,
     name: Array[String]
-  ): Unit = statsReceiver.gauges.get(name) match {
+  ): Unit = statsReceiver.gauges.get(name.toIndexedSeq) match {
     case Some(f) => assert(f() == 0.0)
     case None => // all good
   }
 
-  private[this] def assertGaugeIsNonZero(value: Float)(
+  private[this] def assertGaugeIsNonZero(
+    value: Float
+  )(
     statsReceiver: InMemoryStatsReceiver,
     name: Array[String]
-  ): Unit = statsReceiver.gauges.get(name) match {
+  ): Unit = statsReceiver.gauges.get(name.toIndexedSeq) match {
     case Some(f) => assert(f() == value)
     case None => fail()
   }
 
-  private[this] val assertGaugeIsOne = assertGaugeIsNonZero(1.0F) _
-  private[this] val assertGaugeIsTwo = assertGaugeIsNonZero(2.0F) _
+  private[this] val assertGaugeIsOne = assertGaugeIsNonZero(1.0f) _
+  private[this] val assertGaugeIsTwo = assertGaugeIsNonZero(2.0f) _
 
   private[this] def mkSuccessfulHelloRequest(client: Service[String, String]): Unit = {
     val response = Await.result(client("hello"), timeout)
@@ -95,7 +97,8 @@ class Netty4SslTest extends FunSuite with Eventually with IntegrationPatience {
     Await.result(server.close(), timeout)
   }
 
-  test("Multiple clients and server results in server TLS connections incremented and decremented") {
+  test(
+    "Multiple clients and server results in server TLS connections incremented and decremented") {
     val serverStats = new InMemoryStatsReceiver
 
     val server = mkTlsServer(worldService, "server", serverStats)
@@ -120,7 +123,9 @@ class Netty4SslTest extends FunSuite with Eventually with IntegrationPatience {
     eventually { assertGaugeIsZero(serverStats, serverTlsConnections) }
   }
 
-  test("Multiple clients and server results in separate client TLS connections incremented and decremented") {
+  test(
+    "Multiple clients and server results in separate client TLS connections incremented and decremented"
+  ) {
     val client1Stats = new InMemoryStatsReceiver
     val client2Stats = new InMemoryStatsReceiver
 

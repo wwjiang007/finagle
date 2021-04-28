@@ -1,13 +1,13 @@
 package com.twitter.finagle.liveness
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Status
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.util._
 import java.util.concurrent.atomic.AtomicInteger
 import org.scalatest.FunSuite
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.junit.AssertionsForJUnit
+import org.scalatestplus.junit.AssertionsForJUnit
 
 class ThresholdFailureDetectorTest
     extends FunSuite
@@ -33,10 +33,10 @@ class ThresholdFailureDetectorTest
 
     val timer = new MockTimer
     val d = new ThresholdFailureDetector(
-      ping,
+      ping _,
       minPeriod = 10.milliseconds,
       closeTimeout = closeTimeout,
-      nanoTime = nanoTime,
+      nanoTime = nanoTime _,
       statsReceiver = sr,
       timer = timer
     )
@@ -114,10 +114,10 @@ class ThresholdFailureDetectorTest
     }
 
     val d = new ThresholdFailureDetector(
-      ping,
+      ping _,
       minPeriod = 10.milliseconds,
       closeTimeout = Duration.Top,
-      nanoTime = nanoTime,
+      nanoTime = nanoTime _,
       timer = timer,
       statsReceiver = sr
     )

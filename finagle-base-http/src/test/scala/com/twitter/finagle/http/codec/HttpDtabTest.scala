@@ -5,7 +5,7 @@ import com.twitter.finagle.{Dentry, Dtab, Failure, NameTree}
 import java.nio.charset.StandardCharsets.{US_ASCII, UTF_8}
 import java.util.Base64
 import org.scalatest.FunSuite
-import org.scalatest.junit.AssertionsForJUnit
+import org.scalatestplus.junit.AssertionsForJUnit
 
 class HttpDtabTest extends FunSuite with AssertionsForJUnit {
   val okDests = Vector("/$/inet/10.0.0.1/9000", "/foo/bar", "/")
@@ -116,8 +116,8 @@ class HttpDtabTest extends FunSuite with AssertionsForJUnit {
 
   test("X-Dtab: Invalid: non-ASCII encoding") {
     val m = newMsg()
-    m.headerMap.set("X-Dtab-01-A", "☺")
-    m.headerMap.set("X-Dtab-01-B", "☹")
+    m.headerMap.setUnsafe("X-Dtab-01-A", "☺")
+    m.headerMap.setUnsafe("X-Dtab-01-B", "☹")
     val result = HttpDtab.read(m)
     val failure = intercept[Failure] { result.get() }
     assert(failure.why == "Value not b64-encoded: ☺")

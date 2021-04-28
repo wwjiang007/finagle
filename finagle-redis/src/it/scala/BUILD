@@ -1,15 +1,15 @@
 junit_tests(
-    sources = rglobs("*.scala"),
-    compiler_option_sets = {"fatal_warnings"},
+    sources = ["**/*.scala"],
+    compiler_option_sets = ["fatal_warnings"],
     dependencies = [
-        "3rdparty/jvm/io/netty",
         "3rdparty/jvm/junit",
         "3rdparty/jvm/org/scalacheck",
         "3rdparty/jvm/org/scalatest",
-        "finagle/finagle-core/src/main/scala",
+        "3rdparty/jvm/org/scalatestplus:junit",
+        "finagle/finagle-core/src/main",
         "finagle/finagle-redis",
         "finagle/finagle-redis/src/test/scala",
-        "util/util-core/src/main/scala",
+        "util/util-core:scala",
         "util/util-logging/src/main/scala",
     ],
 )

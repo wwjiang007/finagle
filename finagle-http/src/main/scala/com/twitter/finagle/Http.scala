@@ -1,18 +1,16 @@
 package com.twitter.finagle
 
+import com.twitter.finagle
 import com.twitter.finagle.client._
-import com.twitter.finagle.context.Contexts
-import com.twitter.finagle.dispatch.GenSerialClientDispatcher
-import com.twitter.finagle.filter.{NackAdmissionFilter, PayloadSizeFilter}
+import com.twitter.finagle.filter.NackAdmissionFilter
 import com.twitter.finagle.http._
-import com.twitter.finagle.http.codec.{HttpClientDispatcher, HttpServerDispatcher}
+import com.twitter.finagle.http.codec.HttpServerDispatcher
 import com.twitter.finagle.http.exp.StreamTransport
 import com.twitter.finagle.http.filter._
+import com.twitter.finagle.http.param.{ClientKerberosConfiguration, ServerKerberosConfiguration}
 import com.twitter.finagle.http.service.HttpResponseClassifier
-import com.twitter.finagle.http2.transport.MultiplexTransporter
-import com.twitter.finagle.http2.{Http2Listener, Http2Transporter}
-import com.twitter.finagle.netty4.http.{Netty4HttpListener, Netty4HttpTransporter}
-import com.twitter.finagle.netty4.http.{Netty4ClientStreamTransport, Netty4ServerStreamTransport}
+import com.twitter.finagle.http2.Http2Listener
+import com.twitter.finagle.netty4.http.{Netty4HttpListener, Netty4ServerStreamTransport}
 import com.twitter.finagle.server._
 import com.twitter.finagle.service.{ResponseClassifier, RetryBudget}
 import com.twitter.finagle.ssl.ApplicationProtocols
@@ -20,8 +18,9 @@ import com.twitter.finagle.stats.{ExceptionStatsHandler, StatsReceiver}
 import com.twitter.finagle.toggle.Toggle
 import com.twitter.finagle.tracing._
 import com.twitter.finagle.transport.{Transport, TransportContext}
-import com.twitter.util.{Duration, Future, Monitor, StorageUnit, Time}
-import java.net.{InetSocketAddress, SocketAddress}
+import com.twitter.util.{Duration, Future, FuturePool, Monitor, StorageUnit}
+import java.net.SocketAddress
+import java.util.concurrent.ExecutorService
 
 /**
  * A rich HTTP/1.1 client with a *very* basic URL fetcher. (It does not handle
@@ -36,9 +35,7 @@ trait HttpRichClient { self: Client[Request, Response] =>
     }
     val req = http.RequestBuilder().url(url).buildGet()
     val service = newService(Name.bound(addr), "")
-    service(req) ensure {
-      service.close()
-    }
+    service(req).respond { _ => service.close() }
   }
 }
 
@@ -49,73 +46,70 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
 
   // Toggles transport implementation to Http/2.
   private[this] object useH2 {
-    private[this] val underlying: Toggle[Int] = Toggles("com.twitter.finagle.http.UseH2")
+    private[this] val underlying: Toggle = Toggles("com.twitter.finagle.http.UseH2")
     def apply(): Boolean = underlying(ServerInfo().id.hashCode)
   }
-  private[this] object useH2CClients {
-    private[this] val underlying: Toggle[Int] = Toggles("com.twitter.finagle.http.UseH2CClients")
+  object useH2CClients {
+    private[twitter] val underlying: Toggle = Toggles("com.twitter.finagle.http.UseH2CClients2")
     def apply(): Boolean = underlying(ServerInfo().id.hashCode)
   }
   private[this] object useH2CServers {
-    private[this] val underlying: Toggle[Int] = Toggles("com.twitter.finagle.http.UseH2CServers")
+    private[this] val underlying: Toggle = Toggles("com.twitter.finagle.http.UseH2CServers")
     def apply(): Boolean = underlying(ServerInfo().id.hashCode)
   }
 
   /**
    * configure alternative http 1.1 implementations
    *
-   * @param clientTransport client [[StreamTransport]] factory
+   * @param clientEndpointer client `Stackable[ServiceFactory]`
    * @param serverTransport server [[StreamTransport]] factory
-   * @param transporter [[Transporter]] factory
    * @param listener [[Listener]] factory
    */
-  case class HttpImpl(
-    clientTransport: Transport[Any, Any] => StreamTransport[Request, Response],
-    serverTransport: Transport[Any, Any] => StreamTransport[Response, Request],
-    transporter: Stack.Params => SocketAddress => Transporter[Any, Any, TransportContext],
-    listener: Stack.Params => Listener[Any, Any, TransportContext],
-    implName: String
-  ) {
+  final class HttpImpl private (
+    private[finagle] val clientEndpointer: Stackable[ServiceFactory[Request, Response]],
+    private[finagle] val serverTransport: Transport[Any, Any] => StreamTransport[Response, Request],
+    private[finagle] val listener: Stack.Params => Listener[Any, Any, TransportContext],
+    private[finagle] val implName: String) {
 
     def mk(): (HttpImpl, Stack.Param[HttpImpl]) = (this, HttpImpl.httpImplParam)
   }
 
   object HttpImpl {
     implicit val httpImplParam: Stack.Param[HttpImpl] = Stack.Param(Netty4Impl)
-  }
 
-  val Netty4Impl: Http.HttpImpl = Http.HttpImpl(
-    new Netty4ClientStreamTransport(_),
-    new Netty4ServerStreamTransport(_),
-    Netty4HttpTransporter,
-    Netty4HttpListener,
-    "Netty4"
-  )
-
-  val Http2: Stack.Params = Stack.Params.empty +
-    Http.HttpImpl(
-      new Netty4ClientStreamTransport(_),
+    val Netty4Impl: Http.HttpImpl = new Http.HttpImpl(
+      ClientEndpointer.HttpEndpointer,
       new Netty4ServerStreamTransport(_),
-      Http2Transporter.apply _,
+      Netty4HttpListener,
+      "Netty4"
+    )
+
+    val Http2Impl: Http.HttpImpl = new Http.HttpImpl(
+      ClientEndpointer.Http2Endpointer,
+      new Netty4ServerStreamTransport(_),
       Http2Listener.apply _,
       "Netty4"
-    ) +
-    param.ProtocolLibrary("http/2") +
-    netty4.ssl.Alpn(ApplicationProtocols.Supported(Seq("h2", "http/1.1")))
+    )
+  }
 
-  private val protocolLibrary = param.ProtocolLibrary("http")
+  val Netty4Impl: Http.HttpImpl = HttpImpl.Netty4Impl
+
+  val Http2: Stack.Params = Stack.Params.empty +
+    HttpImpl.Http2Impl +
+    com.twitter.finagle.param.ProtocolLibrary("http/2") +
+    com.twitter.finagle.netty4.ssl.Alpn(ApplicationProtocols.Supported(Seq("h2", "http/1.1")))
+
+  private val protocolLibrary = com.twitter.finagle.param.ProtocolLibrary("http")
 
   private[this] def treatServerErrorsAsFailures: Boolean = serverErrorsAsFailures()
 
   /** exposed for testing */
-  private[finagle] val responseClassifierParam: param.ResponseClassifier = {
-    def filtered[A, B](
-      predicate: () => Boolean,
-      pf: PartialFunction[A, B]
-    ): PartialFunction[A, B] = new PartialFunction[A, B] {
-      def isDefinedAt(a: A): Boolean = predicate() && pf.isDefinedAt(a)
-      def apply(a: A): B = pf(a)
-    }
+  private[finagle] val responseClassifierParam: finagle.param.ResponseClassifier = {
+    def filtered[A, B](predicate: () => Boolean, pf: PartialFunction[A, B]): PartialFunction[A, B] =
+      new PartialFunction[A, B] {
+        def isDefinedAt(a: A): Boolean = predicate() && pf.isDefinedAt(a)
+        def apply(a: A): B = pf(a)
+      }
 
     val srvErrsAsFailures =
       filtered(() => treatServerErrorsAsFailures, HttpResponseClassifier.ServerErrorsAsFailures)
@@ -124,29 +118,8 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
       srvErrsAsFailures.orElse(ResponseClassifier.Default)
     }
 
-    param.ResponseClassifier(rc)
+    finagle.param.ResponseClassifier(rc)
   }
-
-  // Only record payload sizes when streaming is disabled.
-  private[finagle] val nonChunkedPayloadSize: Stackable[ServiceFactory[Request, Response]] =
-    new Stack.Module2[http.param.Streaming, param.Stats, ServiceFactory[Request, Response]] {
-      override def role: Stack.Role = PayloadSizeFilter.Role
-      override def description: String = PayloadSizeFilter.Description
-
-      override def make(
-        streaming: http.param.Streaming,
-        stats: param.Stats,
-        next: ServiceFactory[Request, Response]
-      ): ServiceFactory[Request, Response] = {
-        if (!streaming.enabled)
-          new PayloadSizeFilter[Request, Response](
-            stats.statsReceiver,
-            _.content.length,
-            _.content.length
-          ).andThen(next)
-        else next
-      }
-    }
 
   object Client {
     private val stack: Stack[ServiceFactory[Request, Response]] =
@@ -156,76 +129,60 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
         // We insert the ClientNackFilter close to the bottom of the stack to
         // eagerly transform the HTTP nack representation to a `Failure`.
         .insertBefore(StackClient.Role.prepConn, ClientNackFilter.module)
+        // We add a DelayedRelease module at the bottom of the stack to ensure
+        // that the pooling levels above don't discard an active session.
+        .replace(StackClient.Role.prepConn, DelayedRelease.module(StackClient.Role.prepConn))
         // Since NackAdmissionFilter should operate on all requests sent over
         // the wire including retries, it must be below `Retries`. Since it
         // aggregates the status of the entire cluster, it must be above
         // `LoadBalancerFactory` (not part of the endpoint stack).
-        .insertBefore(
+        .replace(
           StackClient.Role.prepFactory,
           NackAdmissionFilter.module[http.Request, http.Response]
         )
-        // We add a DelayedRelease module at the bottom of the stack to ensure
-        // that the pooling levels above don't discard an active session.
-        .replace(StackClient.Role.prepConn, DelayedRelease.module)
         // Ensure that FactoryToService doesn't release the connection to the layers
         // below when the response body hasn't been fully consumed.
-        .replace(StackClient.Role.prepFactory, DelayedRelease.module)
+        .replace(
+          StackClient.Role.requestDraining,
+          DelayedRelease.module(StackClient.Role.requestDraining))
         .replace(TraceInitializerFilter.role, new HttpClientTraceInitializer[Request, Response])
         .prepend(http.TlsFilter.module)
-        .prepend(nonChunkedPayloadSize)
+        // Because the payload filter also traces the sizes, it's important that we do so
+        // after the tracing context is initialized.
+        .insertAfter(
+          TraceInitializerFilter.role,
+          PayloadSizeFilter.module(PayloadSizeFilter.clientTraceKeyPrefix)
+        )
+        .replace(StackClient.Role.protoTracing, HttpTracingFilter.module)
+        // The pooling strategy depends on whether we're using H2, and if so, what variant.
+        // We use a custom module to isolate the selection logic.
+        .replace(DefaultPool.Role, HttpPool)
         .prepend(
           new Stack.NoOpModule(http.filter.StatsFilter.role, http.filter.StatsFilter.description)
         )
+        .insertAfter(http.filter.StatsFilter.role, StreamingStatsFilter.module)
+        .prepend(KerberosAuthenticationFilter.clientModule)
 
-    private def params: Stack.Params = StackClient.defaultParams +
-      protocolLibrary +
-      responseClassifierParam
+    private def params: Stack.Params =
+      StackClient.defaultParams +
+        protocolLibrary +
+        responseClassifierParam
   }
 
   case class Client(
     stack: Stack[ServiceFactory[Request, Response]] = Client.stack,
-    params: Stack.Params = Client.params
-  ) extends EndpointerStackClient[Request, Response, Client]
-      with param.WithSessionPool[Client]
-      with param.WithDefaultLoadBalancer[Client] {
+    params: Stack.Params = Client.params)
+      extends EndpointerStackClient[Request, Response, Client]
+      with finagle.param.WithSessionPool[Client]
+      with finagle.param.WithDefaultLoadBalancer[Client]
+      with Stack.Transformable[Client] {
 
     protected type In = Any
     protected type Out = Any
     protected type Context = TransportContext
 
-    protected def endpointer: Stackable[ServiceFactory[Request, Response]] = {
-      new EndpointerModule[Request, Response](
-        Seq(implicitly[Stack.Param[HttpImpl]], implicitly[Stack.Param[param.Stats]]), {
-          (prms: Stack.Params, addr: InetSocketAddress) =>
-            val transporter = params[HttpImpl].transporter(prms)(addr)
-            new ServiceFactory[Request, Response] {
-              def apply(conn: ClientConnection): Future[Service[Request, Response]] =
-                // we do not want to capture and request specific Locals
-                // that would live for the life of the session.
-                Contexts.letClearAll {
-                  transporter().map { trans =>
-                    val streamTransport = prms[HttpImpl].clientTransport(trans)
-
-                    new HttpClientDispatcher(
-                      new HttpTransport(streamTransport),
-                      prms[param.Stats].statsReceiver.scope(GenSerialClientDispatcher.StatsScope)
-                    )
-                  }
-                }
-
-              def close(deadline: Time): Future[Unit] = transporter match {
-                case multiplex: MultiplexTransporter => multiplex.close(deadline)
-                case _ => Future.Done
-              }
-
-              override def status: Status = transporter match {
-                case http2: MultiplexTransporter => http2.sessionStatus
-                case _ => super.status
-              }
-            }
-        }
-      )
-    }
+    protected def endpointer: Stackable[ServiceFactory[Request, Response]] =
+      params[HttpImpl].clientEndpointer
 
     protected def copy1(
       stack: Stack[ServiceFactory[Request, Response]] = this.stack,
@@ -248,17 +205,10 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
         .configured(http2.param.MaxHeaderListSize(size))
 
     /**
-     * Configures the maximum initial line length the client can
-     * receive from a server.
+     * Configures the maximum initial line length the client can receive from a server.
      */
     def withMaxInitialLineSize(size: StorageUnit): Client =
       configured(http.param.MaxInitialLineSize(size))
-
-    /**
-     * Configures the maximum request size that the client can send.
-     */
-    def withMaxRequestSize(size: StorageUnit): Client =
-      configured(http.param.MaxRequestSize(size))
 
     /**
      * Configures the maximum response size that client can receive.
@@ -268,29 +218,43 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
 
     /**
      * Streaming allows applications to work with HTTP messages that have large
-     * (or infinite) content bodies. When this set to `true`, the message content is
-     * available through a [[com.twitter.io.Reader]], which gives the application a
-     * handle to the byte stream. If `false`, the entire message content is buffered
-     * into a [[com.twitter.io.Buf]].
+     * (or infinite) content bodies.
+     *
+     * If `enabled` is set to `true`, the message content is available through a
+     * [[com.twitter.io.Reader]], which gives the application a handle to the byte stream.
+     *
+     * If `enabled` is set to `false`, the entire message content is buffered up to
+     * maximum allowed message size.
      */
     def withStreaming(enabled: Boolean): Client =
       configured(http.param.Streaming(enabled))
+
+    /**
+     * Streaming allows applications to work with HTTP messages that have large
+     * (or infinite) content bodies.
+     *
+     * This method configures `fixedLengthStreamedAfter` limit, which effectively turns on
+     * streaming (think `withStreaming(true)`). The `fixedLengthStreamedAfter`, however, disables
+     * streaming for sufficiently small messages of known fixed length.
+     *
+     * If `Content-Length` of a message does not exceed `fixedLengthStreamedAfter` it is
+     * buffered and its content is available through [[Request.content]] or
+     * [[Request.contentString]].
+     *
+     * Messages without `Content-Length` header are always streamed regardless of their
+     * actual content length and the `fixedLengthStreamedAfter` value.
+     *
+     * [[Response.isChunked]] should be used to determine whether a message is streamed
+     * (`isChunked == true`) or buffered (`isChunked == false`).
+     */
+    def withStreaming(fixedLengthStreamedAfter: StorageUnit): Client =
+      configured(http.param.Streaming(fixedLengthStreamedAfter))
 
     /**
      * Enables decompression of http content bodies.
      */
     def withDecompression(enabled: Boolean): Client =
       configured(http.param.Decompression(enabled))
-
-    /**
-     * The compression level to use. If passed the default value (-1) then it will use
-     * [[com.twitter.finagle.http.codec.TextualContentCompressor TextualContentCompressor]]
-     * which will compress text-like content-types with the default compression level (6).
-     * Otherwise, use Netty `HttpContentCompressor` for all content-types with specified
-     * compression level.
-     */
-    def withCompressionLevel(level: Int): Client =
-      configured(http.param.CompressionLevel(level))
 
     /**
      * Enable the collection of HTTP specific metrics. See [[http.filter.StatsFilter]].
@@ -312,7 +276,13 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
      * @note this will override whatever has been set in the toggle.
      */
     def withNoHttp2: Client =
-      configured(Netty4Impl)
+      configured(HttpImpl.Netty4Impl)
+
+    /**
+     * Enable kerberos client authentication for http requests
+     */
+    def withKerberos(clientKerberosConfiguration: ClientKerberosConfiguration): Client = configured(
+      http.param.ClientKerberos(clientKerberosConfiguration))
 
     /**
      * Create a [[http.MethodBuilder]] for a given destination.
@@ -332,23 +302,25 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
 
     // Java-friendly forwarders
     // See https://issues.scala-lang.org/browse/SI-8905
-    override val withSessionPool: param.SessionPoolingParams[Client] =
-      new param.SessionPoolingParams(this)
-    override val withLoadBalancer: param.DefaultLoadBalancingParams[Client] =
-      new param.DefaultLoadBalancingParams(this)
-    override val withSessionQualifier: param.SessionQualificationParams[Client] =
-      new param.SessionQualificationParams(this)
-    override val withAdmissionControl: param.ClientAdmissionControlParams[Client] =
-      new param.ClientAdmissionControlParams(this)
-    override val withSession: param.ClientSessionParams[Client] =
-      new param.ClientSessionParams(this)
-    override val withTransport: param.ClientTransportParams[Client] =
-      new param.ClientTransportParams(this)
+    override val withSessionPool: finagle.param.SessionPoolingParams[Client] =
+      new finagle.param.SessionPoolingParams(this)
+    override val withLoadBalancer: finagle.param.DefaultLoadBalancingParams[Client] =
+      new finagle.param.DefaultLoadBalancingParams(this)
+    override val withSessionQualifier: finagle.param.SessionQualificationParams[Client] =
+      new finagle.param.SessionQualificationParams(this)
+    override val withAdmissionControl: finagle.param.ClientAdmissionControlParams[Client] =
+      new finagle.param.ClientAdmissionControlParams(this)
+    override val withSession: finagle.param.ClientSessionParams[Client] =
+      new finagle.param.ClientSessionParams(this)
+    override val withTransport: finagle.param.ClientTransportParams[Client] =
+      new finagle.param.ClientTransportParams(this)
 
-    override def withResponseClassifier(responseClassifier: service.ResponseClassifier): Client =
+    override def withResponseClassifier(
+      responseClassifier: finagle.service.ResponseClassifier
+    ): Client =
       super.withResponseClassifier(responseClassifier)
     override def withRetryBudget(budget: RetryBudget): Client = super.withRetryBudget(budget)
-    override def withRetryBackoff(backoff: Stream[Duration]): Client =
+    override def withRetryBackoff(backoff: Backoff): Client =
       super.withRetryBackoff(backoff)
     override def withLabel(label: String): Client = super.withLabel(label)
     override def withStatsReceiver(statsReceiver: StatsReceiver): Client =
@@ -361,13 +333,21 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
 
     override def withStack(stack: Stack[ServiceFactory[Request, Response]]): Client =
       super.withStack(stack)
+    override def withStack(
+      fn: Stack[ServiceFactory[Request, Response]] => Stack[ServiceFactory[Request, Response]]
+    ): Client =
+      super.withStack(fn)
+    override def withExecutionOffloaded(executor: ExecutorService): Client =
+      super.withExecutionOffloaded(executor)
+    override def withExecutionOffloaded(pool: FuturePool): Client =
+      super.withExecutionOffloaded(pool)
     override def configured[P](psp: (P, Stack.Param[P])): Client = super.configured(psp)
     override def configuredParams(newParams: Stack.Params): Client =
       super.configuredParams(newParams)
     override def filtered(filter: Filter[Request, Response, Request, Response]): Client =
       super.filtered(filter)
 
-    protected def superNewClient(dest: Name, label0: String): ServiceFactory[Request, Response] = {
+    private def superNewClient(dest: Name, label0: String): ServiceFactory[Request, Response] = {
       super.newClient(dest, label0)
     }
     override def newClient(dest: Name, label0: String): ServiceFactory[Request, Response] = {
@@ -375,10 +355,14 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
         if (params[Transport.ClientSsl].sslClientConfiguration == None) useH2CClients()
         else useH2()
       val explicitlyConfigured = params.contains[HttpImpl]
-      val client = if (!explicitlyConfigured && shouldHttp2) this.configuredParams(Http2)
-      else this
+      val client =
+        if (!explicitlyConfigured && shouldHttp2) this.configuredParams(Http2)
+        else this
       client.superNewClient(dest, label0)
     }
+
+    override def transformed(t: Stack.Transformer): Client =
+      withStack(t(stack))
   }
 
   def client: Http.Client = Client()
@@ -392,14 +376,27 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
   object Server {
     private val stack: Stack[ServiceFactory[Request, Response]] =
       StackServer.newStack
+      // Because the payload filter also traces the sizes, it's important that we do so
+      // after the tracing context is initialized.
+        .insertAfter(
+          TraceInitializerFilter.role,
+          PayloadSizeFilter.module(PayloadSizeFilter.serverTraceKeyPrefix)
+        )
+        .replace(StackServer.Role.protoTracing, HttpTracingFilter.module)
         .replace(TraceInitializerFilter.role, new HttpServerTraceInitializer[Request, Response])
         .replace(StackServer.Role.preparer, HttpNackFilter.module)
-        .prepend(nonChunkedPayloadSize)
         .prepend(ServerDtabContextFilter.module)
-        .prepend(ServerContextFilter.module)
         .prepend(
           new Stack.NoOpModule(http.filter.StatsFilter.role, http.filter.StatsFilter.description)
         )
+        .prepend(KerberosAuthenticationFilter.serverModule)
+        .insertAfter(http.filter.StatsFilter.role, StreamingStatsFilter.module)
+        // the backup request module adds tracing annotations and as such must come
+        // after trace initialization and deserialization of contexts.
+        .insertAfter(TraceInitializerFilter.role, ServerContextFilter.module)
+        .insertAfter(
+          ServerContextFilter.role,
+          BackupRequest.traceAnnotationModule[Request, Response])
 
     private val params: Stack.Params = StackServer.defaultParams +
       protocolLibrary +
@@ -408,18 +405,21 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
 
   case class Server(
     stack: Stack[ServiceFactory[Request, Response]] = Server.stack,
-    params: Stack.Params = Server.params
-  ) extends StdStackServer[Request, Response, Server] {
+    params: Stack.Params = Server.params)
+      extends StdStackServer[Request, Response, Server] {
 
     protected type In = Any
     protected type Out = Any
     protected type Context = TransportContext
 
+    private[this] val dispatcherStats =
+      params[finagle.param.Stats].statsReceiver.scope("dispatch")
+
     protected def newListener(): Listener[Any, Any, TransportContext] = {
       params[HttpImpl].listener(params)
     }
 
-    protected def newStreamTransport(
+    private[this] def newStreamTransport(
       transport: Transport[Any, Any]
     ): StreamTransport[Response, Request] =
       new HttpTransport(params[HttpImpl].serverTransport(transport))
@@ -427,10 +427,8 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
     protected def newDispatcher(
       transport: Transport[In, Out] { type Context <: Server.this.Context },
       service: Service[Request, Response]
-    ): HttpServerDispatcher = {
-      val param.Stats(stats) = params[param.Stats]
-      new HttpServerDispatcher(newStreamTransport(transport), service, stats.scope("dispatch"))
-    }
+    ): HttpServerDispatcher =
+      new HttpServerDispatcher(newStreamTransport(transport), service, dispatcherStats)
 
     protected def copy1(
       stack: Stack[ServiceFactory[Request, Response]] = this.stack,
@@ -455,20 +453,38 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
       configured(http.param.MaxRequestSize(size))
 
     /**
-     * Configures the maximum response size this server can send.
-     */
-    def withMaxResponseSize(size: StorageUnit): Server =
-      configured(http.param.MaxResponseSize(size))
-
-    /**
      * Streaming allows applications to work with HTTP messages that have large
-     * (or infinite) content bodies. When this set to `true`, the message content is
-     * available through a [[com.twitter.io.Reader]], which gives the application a
-     * handle to the byte stream. If `false`, the entire message content is buffered
-     * into a [[com.twitter.io.Buf]].
+     * (or infinite) content bodies.
+     *
+     * If `enabled` is set to `true`, the message content is available through a
+     * [[com.twitter.io.Reader]], which gives the application a handle to the byte stream.
+     *
+     * If `enabled` is set to `false`, the entire message content is buffered up to
+     * maximum allowed message size.
      */
     def withStreaming(enabled: Boolean): Server =
       configured(http.param.Streaming(enabled))
+
+    /**
+     * Streaming allows applications to work with HTTP messages that have large
+     * (or infinite) content bodies.
+     *
+     * This method configures `fixedLengthStreamedAfter` limit, which effectively turns on
+     * streaming (think `withStreaming(true)`). The `fixedLengthStreamedAfter`, however, disables
+     * streaming for sufficiently small messages of known fixed length.
+     *
+     * If `Content-Length` of a message does not exceed `fixedLengthStreamedAfter` it is
+     * buffered and its content is available through [[Request.content]] or
+     * [[Request.contentString]].
+     *
+     * Messages without `Content-Length` header are always streamed regardless of their
+     * actual content length and the `fixedLengthStreamedAfter` value.
+     *
+     * [[Request.isChunked]] should be used to determine whether a message is streamed
+     * (`isChunked == true`) or buffered (`isChunked == false`).
+     */
+    def withStreaming(fixedLengthStreamedAfter: StorageUnit): Server =
+      configured(http.param.Streaming(fixedLengthStreamedAfter))
 
     /**
      * Enables decompression of http content bodies.
@@ -513,7 +529,13 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
      * @note this will override whatever has been set in the toggle.
      */
     def withNoHttp2: Server =
-      configured(Netty4Impl)
+      configured(HttpImpl.Netty4Impl)
+
+    /**
+     * Enable kerberos server authentication for http requests
+     */
+    def withKerberos(serverKerberosConfiguration: ServerKerberosConfiguration): Server = configured(
+      http.param.ServerKerberos(serverKerberosConfiguration))
 
     /**
      * By default finagle-http automatically sends 100-CONTINUE responses to inbound
@@ -528,21 +550,23 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
      *       can be met.
      *
      * @note Disabling automatic continues is only supported in
-     *       [[com.twitter.finagle.Http.Netty4Impl]] servers.
+     *       [[com.twitter.finagle.Http.HttpImpl.Netty4Impl]] servers.
      */
     def withNoAutomaticContinue: Server =
       configured(http.param.AutomaticContinue(false))
 
     // Java-friendly forwarders
     // See https://issues.scala-lang.org/browse/SI-8905
-    override val withAdmissionControl: param.ServerAdmissionControlParams[Server] =
-      new param.ServerAdmissionControlParams(this)
-    override val withTransport: param.ServerTransportParams[Server] =
-      new param.ServerTransportParams[Server](this)
-    override val withSession: param.SessionParams[Server] =
-      new param.SessionParams(this)
+    override val withAdmissionControl: finagle.param.ServerAdmissionControlParams[Server] =
+      new finagle.param.ServerAdmissionControlParams(this)
+    override val withTransport: finagle.param.ServerTransportParams[Server] =
+      new finagle.param.ServerTransportParams(this)
+    override val withSession: finagle.param.ServerSessionParams[Server] =
+      new finagle.param.ServerSessionParams(this)
 
-    override def withResponseClassifier(responseClassifier: service.ResponseClassifier): Server =
+    override def withResponseClassifier(
+      responseClassifier: finagle.service.ResponseClassifier
+    ): Server =
       super.withResponseClassifier(responseClassifier)
     override def withLabel(label: String): Server = super.withLabel(label)
     override def withStatsReceiver(statsReceiver: StatsReceiver): Server =
@@ -555,24 +579,36 @@ object Http extends Client[Request, Response] with HttpRichClient with Server[Re
 
     override def withStack(stack: Stack[ServiceFactory[Request, Response]]): Server =
       super.withStack(stack)
+
+    override def withStack(
+      fn: Stack[ServiceFactory[Request, Response]] => Stack[ServiceFactory[Request, Response]]
+    ): Server =
+      super.withStack(fn)
+    override def withExecutionOffloaded(executor: ExecutorService): Server =
+      super.withExecutionOffloaded(executor)
+    override def withExecutionOffloaded(pool: FuturePool): Server =
+      super.withExecutionOffloaded(pool)
     override def configured[P](psp: (P, Stack.Param[P])): Server = super.configured(psp)
     override def configuredParams(newParams: Stack.Params): Server =
       super.configuredParams(newParams)
 
     protected def superServe(
       addr: SocketAddress,
-      factory: ServiceFactory[Request, Response]): ListeningServer = {
+      factory: ServiceFactory[Request, Response]
+    ): ListeningServer = {
       super.serve(addr, factory)
     }
     override def serve(
       addr: SocketAddress,
-      factory: ServiceFactory[Request, Response]): ListeningServer = {
+      factory: ServiceFactory[Request, Response]
+    ): ListeningServer = {
       val shouldHttp2 =
         if (params[Transport.ServerSsl].sslServerConfiguration == None) useH2CServers()
         else useH2()
       val explicitlyConfigured = params.contains[HttpImpl]
-      val server = if (!explicitlyConfigured && shouldHttp2) this.configuredParams(Http2)
-      else this
+      val server =
+        if (!explicitlyConfigured && shouldHttp2) this.configuredParams(Http2)
+        else this
       server.superServe(addr, factory)
     }
   }

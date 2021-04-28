@@ -5,7 +5,8 @@ import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.{Stack, Status}
 import com.twitter.finagle.ssl.client.SslClientConfiguration
 import com.twitter.finagle.ssl.server.SslServerConfiguration
-import com.twitter.io.{Buf, Pipe, Reader, Writer}
+import com.twitter.finagle.ssl.session.{NullSslSessionInfo, SslSessionInfo}
+import com.twitter.io.{Buf, Pipe, Reader, ReaderDiscardedException, Writer, StreamTermination}
 import com.twitter.util._
 import java.net.SocketAddress
 import java.security.cert.Certificate
@@ -36,7 +37,6 @@ trait Transport[In, Out] extends Closable { self =>
    * The status of this transport; see [[com.twitter.finagle.Status]] for
    * status definitions.
    */
-  @deprecated("Please use Transport.context.status instead", "2017-08-21")
   def status: Status
 
   /**
@@ -45,26 +45,19 @@ trait Transport[In, Out] extends Closable { self =>
    * write on the Transport, but this allows clients to listen to
    * close events.
    */
-  @deprecated("Please use Transport.context.onClose instead", "2017-08-21")
   def onClose: Future[Throwable]
 
   /**
    * The locally bound address of this transport.
    */
   @deprecated("Please use Transport.context.localAddress instead", "2017-08-21")
-  def localAddress: SocketAddress
+  final def localAddress: SocketAddress = context.localAddress
 
   /**
    * The remote address to which the transport is connected.
    */
   @deprecated("Please use Transport.context.remoteAddress instead", "2017-08-21")
-  def remoteAddress: SocketAddress
-
-  /**
-   * The peer certificate if a TLS session is established.
-   */
-  @deprecated("Please use Transport.context.peerCertificate instead", "2017-08-21")
-  def peerCertificate: Option[Certificate]
+  final def remoteAddress: SocketAddress = context.remoteAddress
 
   /**
    * Maps this transport to `Transport[In1, Out2]`. Note, exceptions
@@ -88,9 +81,6 @@ trait Transport[In, Out] extends Closable { self =>
       def read(): Future[Out1] = self.read().map(g)
       def status: Status = self.status
       def onClose: Future[Throwable] = self.onClose
-      def localAddress: SocketAddress = self.localAddress
-      def remoteAddress: SocketAddress = self.remoteAddress
-      def peerCertificate: Option[Certificate] = self.peerCertificate
       def close(deadline: Time): Future[Unit] = self.close(deadline)
       def context: Context = self.context
       override def toString: String = self.toString
@@ -102,20 +92,6 @@ trait Transport[In, Out] extends Closable { self =>
   def context: Context
 }
 
-private[finagle] abstract class ContextBasedTransport[In, Out, Ctx <: TransportContext](
-  val context: Ctx
-) extends Transport[In, Out] {
-  type Context = Ctx
-
-  def status: Status = context.status
-  def onClose: Future[Throwable] = context.onClose
-  def localAddress: SocketAddress = context.localAddress
-  def remoteAddress: SocketAddress = context.remoteAddress
-  def peerCertificate: Option[Certificate] = context.peerCertificate
-  def close(deadline: Time): Future[Unit] = context.close(deadline)
-  override def toString: String = context.toString
-}
-
 /**
  * A collection of [[com.twitter.finagle.Stack.Param]]'s useful for configuring
  * a [[com.twitter.finagle.transport.Transport]].
@@ -124,13 +100,23 @@ private[finagle] abstract class ContextBasedTransport[In, Out, Ctx <: TransportC
  */
 object Transport {
 
-  private[finagle] val peerCertCtx = new Contexts.local.Key[Certificate]
+  private[finagle] val sslSessionInfoCtx = new Contexts.local.Key[SslSessionInfo]
 
   /**
-   * Retrieve the transport's SSLSession (if any) from
-   * [[com.twitter.finagle.context.Contexts.local]]
+   * Retrieve the [[Transport]]'s [[SslSessionInfo]] from
+   * [[com.twitter.finagle.context.Contexts.local]] if available. If none exists,
+   * a [[NullSslSessionInfo]] is returned instead.
    */
-  def peerCertificate: Option[Certificate] = Contexts.local.get(peerCertCtx)
+  def sslSessionInfo: SslSessionInfo = Contexts.local.get(sslSessionInfoCtx) match {
+    case Some(info) => info
+    case None => NullSslSessionInfo
+  }
+
+  /**
+   * Retrieve the peer certificate of the [[Transport]], if
+   * one exists.
+   */
+  def peerCertificate: Option[Certificate] = sslSessionInfo.peerCertificates.headOption
 
   /**
    * $param the buffer sizes of a `Transport`.
@@ -162,11 +148,7 @@ object Transport {
    * @param keepAlive An option indicating if the keepAlive is on or off.
    * If None, the implementation default is used.
    */
-  case class Liveness(
-    readTimeout: Duration,
-    writeTimeout: Duration,
-    keepAlive: Option[Boolean]
-  ) {
+  case class Liveness(readTimeout: Duration, writeTimeout: Duration, keepAlive: Option[Boolean]) {
     def mk(): (Liveness, Stack.Param[Liveness]) =
       (this, Liveness.param)
   }
@@ -291,7 +273,7 @@ object Transport {
     trans: Transport[_, A],
     chunkOfA: A => Future[Option[Buf]]
   ): Reader[Buf] with Future[Unit] = new Promise[Unit] with Reader[Buf] {
-    private[this] val rw = new Pipe[Buf]()
+    private[this] val rw = new Pipe[Buf]
 
     // Ensure that collate's future is satisfied _before_ its reader
     // is closed. This allows callers to observe the stream completion
@@ -307,12 +289,14 @@ object Transport {
         rw.close()
     }
 
-    def read(n: Int): Future[Option[Buf]] = rw.read(n)
+    def read(): Future[Option[Buf]] = rw.read()
 
     def discard(): Unit = {
       rw.discard()
-      raise(new Reader.ReaderDiscarded)
+      raise(new ReaderDiscardedException)
     }
+
+    def onClose: Future[StreamTermination] = rw.onClose
   }
 
   /**
@@ -325,7 +309,9 @@ object Transport {
    */
   def cast[In1, Out1](
     trans: Transport[Any, Any]
-  )(implicit m: Manifest[Out1]): Transport[In1, Out1] = {
+  )(
+    implicit m: Manifest[Out1]
+  ): Transport[In1, Out1] = {
     val cls = m.runtimeClass.asInstanceOf[Class[Out1]]
     cast[In1, Out1](cls, trans)
   }
@@ -338,10 +324,7 @@ object Transport {
    *
    * @see [[Transport.cast(trans)]] for Scala users.
    */
-  def cast[In1, Out1](
-    cls: Class[Out1],
-    trans: Transport[Any, Any]
-  ): Transport[In1, Out1] = {
+  def cast[In1, Out1](cls: Class[Out1], trans: Transport[Any, Any]): Transport[In1, Out1] = {
 
     if (cls.isAssignableFrom(classOf[Any])) {
       // No need to do any dynamic type checks on Any!
@@ -354,9 +337,6 @@ object Transport {
         def read(): Future[Out1] = trans.read().flatMap(readFn)
         def status: Status = trans.status
         def onClose: Future[Throwable] = trans.onClose
-        def localAddress: SocketAddress = trans.localAddress
-        def remoteAddress: SocketAddress = trans.remoteAddress
-        def peerCertificate: Option[Certificate] = trans.peerCertificate
         def close(deadline: Time): Future[Unit] = trans.close(deadline)
         def context: Context = trans.context.asInstanceOf[Context]
         override def toString: String = trans.toString
@@ -393,9 +373,6 @@ abstract class TransportProxy[In, Out](_self: Transport[In, Out]) extends Transp
   val self: Transport[In, Out] = _self
   def status: Status = self.status
   def onClose: Future[Throwable] = self.onClose
-  def localAddress: SocketAddress = self.localAddress
-  def remoteAddress: SocketAddress = self.remoteAddress
-  def peerCertificate: Option[Certificate] = self.peerCertificate
   def close(deadline: Time): Future[Unit] = self.close(deadline)
   def context: Context = self.context
   override def toString: String = self.toString
@@ -417,9 +394,7 @@ class QueueTransport[In, Out](writeq: AsyncQueue[In], readq: AsyncQueue[Out])
   }
 
   def read(): Future[Out] =
-    readq.poll() onFailure { exc =>
-      closep.updateIfEmpty(Throw(exc))
-    }
+    readq.poll() onFailure { exc => closep.updateIfEmpty(Throw(exc)) }
 
   def status: Status = if (closep.isDefined) Status.Closed else Status.Open
 
@@ -430,8 +405,6 @@ class QueueTransport[In, Out](writeq: AsyncQueue[In], readq: AsyncQueue[Out])
   }
 
   val onClose: Future[Throwable] = closep
-  val localAddress: SocketAddress = new SocketAddress {}
-  val remoteAddress: SocketAddress = new SocketAddress {}
-  def peerCertificate: Option[Certificate] = None
-  val context: TransportContext = new LegacyContext(this)
+  val context: TransportContext =
+    new SimpleTransportContext(new SocketAddress {}, new SocketAddress {}, NullSslSessionInfo)
 }

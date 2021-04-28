@@ -10,7 +10,7 @@ import org.mockito.Matchers.anyObject
 import org.mockito.Mockito.when
 import org.scalatest.{BeforeAndAfter, FunSuite}
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 object crtnamer {
   @volatile var observationsOpened = 0
@@ -141,9 +141,7 @@ class ClientRegistryTest
       val c = stackClient.newClient(Name.Path(path), "foo")
       val prefix =
         Seq("client", "fancy", "foo", "/$/com.twitter.finagle.client.crtnamer/foo", "Pool")
-      val filtered = GlobalRegistry.get.toSet.filter { e =>
-        e.key.startsWith(prefix)
-      }
+      val filtered = GlobalRegistry.get.toSet.filter { e => e.key.startsWith(prefix) }
       val expected = Seq(
         "high" -> "2147483647",
         "low" -> "0",
@@ -151,9 +149,7 @@ class ClientRegistryTest
         "maxWaiters" -> "2147483647"
       ).map { case (key, value) => Entry(prefix :+ key, value) }
 
-      expected.foreach { entry =>
-        assert(filtered.contains(entry))
-      }
+      expected.foreach { entry => assert(filtered.contains(entry)) }
     }
   })
 
@@ -166,14 +162,18 @@ class ClientRegistryTest
   def newStack(): Stack[ServiceFactory[Int, Int]] = {
     val mockSvc = mock[Service[Int, Int]]
     when(mockSvc.apply(anyObject[Int])).thenReturn(Future.value(10))
+    when(mockSvc.close(anyObject[Time])).thenReturn(Future.Done)
 
     val factory = ServiceFactory.const(mockSvc)
 
-    val stack = new StackBuilder(Stack.leaf(new Stack.Head {
-      def role: Stack.Role = headRole
-      def description: String = "the head!!"
-      def parameters: Seq[Stack.Param[_]] = Seq(TestParam2.param)
-    }, factory))
+    val stack = new StackBuilder(
+      Stack.leaf(
+        new Stack.Head {
+          def role: Stack.Role = headRole
+          def description: String = "the head!!"
+          def parameters: Seq[Stack.Param[_]] = Seq(TestParam2.param)
+        },
+        factory))
     val stackable: Stackable[ServiceFactory[Int, Int]] =
       new Stack.Module1[TestParam, ServiceFactory[Int, Int]] {
         def make(p: TestParam, l: ServiceFactory[Int, Int]): ServiceFactory[Int, Int] = l.map {

@@ -27,6 +27,12 @@ class ClientAdmissionControlParams[A <: Stack.Parameterized[A]](self: Stack.Para
   /**
    * Disables the `NackAdmissionFilter` if backing off during overload situations
    * is not desirable behavior. The `NackAdmissionFilter` is enabled by default.
+   *
+   * Client-side admission control may not work well with clients that only very sporadically send
+   * requests to their backends. In this case, the view that each client has of the state of the
+   * backend is reduced drastically, and its efficiency is degraded. It's recommended to disable
+   * nack admission control for clients experiencing bursty and very low (i.e., single digit RPS)
+   * volume traffic.
    */
   def noNackAdmissionControl: A = {
     self.configured(NackAdmissionFilter.Disabled)
@@ -35,7 +41,7 @@ class ClientAdmissionControlParams[A <: Stack.Parameterized[A]](self: Stack.Para
   /**
    * Configures the `NackAdmissionFilter`. The `NackAdmissionFilter` is enabled
    * by default and configured with the default values which can be found in
-   * [[com.twitter.finagle.filter.NackAdmssionFilter]].
+   * [[com.twitter.finagle.filter.NackAdmissionFilter]].
    *
    * NOTE: Here is a brief summary of the configurable params.
    *
@@ -60,11 +66,17 @@ class ClientAdmissionControlParams[A <: Stack.Parameterized[A]](self: Stack.Para
    *   requests during mild load so they choose a window of 10 seconds and a
    *   threshold of 0.15 (= 15%).
    *
-   * @param window Duration over which to average the ratio of nackd/non-nacked
+   * @param window Duration over which to average the ratio of nacked/non-nacked
    * responses.
-   * 
+   *
    * @param threshold The upper limit of the fraction of responses which are
    * nacks before the `NackAdmissionFilter` begins to drop requests.
+   *
+   * @note Client-side admission control may not work well with clients that only very sporadically
+   *       send requests to their backends. In this case, the view that each client has of the state
+   *       of the backend is reduced drastically, and its efficiency is degraded. It's recommended
+   *       to disable nack admission control (via [[noNackAdmissionControl]]) for clients
+   *       experiencing bursty and very low volume (i.e., single digit RPS) traffic.
    */
   def nackAdmissionControl(window: Duration, threshold: Double): A = {
     self.configured[NackAdmissionFilter.Param](

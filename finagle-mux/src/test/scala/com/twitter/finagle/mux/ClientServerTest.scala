@@ -1,7 +1,7 @@
 package com.twitter.finagle.mux
 
 import com.twitter.concurrent.AsyncQueue
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.client.BackupRequestFilter
 import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.liveness.FailureDetector
@@ -25,8 +25,8 @@ import org.mockito.Mockito.{never, verify, when}
 import org.mockito.stubbing.Answer
 import org.scalactic.source.Position
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.junit.AssertionsForJUnit
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.junit.AssertionsForJUnit
+import org.scalatestplus.mockito.MockitoSugar
 import org.scalatest.{FunSuite, OneInstancePerTest, Tag}
 
 private object TestContext {
@@ -61,7 +61,7 @@ private[mux] abstract class ClientServerTest
     val pingSends = new AtomicInteger(0)
     val pingReceives = new AtomicInteger(0)
 
-    {  // launch the read loops for each queue
+    { // launch the read loops for each queue
       def loop(source: AsyncQueue[Buf], dest: QueueChannelHandle[ByteReader, _]): Unit = {
         source.poll().respond {
           case Return(m) =>
@@ -104,11 +104,13 @@ private[mux] abstract class ClientServerTest
       val session = new MuxClientSession(
         handle = clientHandle,
         h_decoder = new FragmentDecoder(NullStatsReceiver),
-        h_messageWriter = new FragmentingMessageWriter(clientHandle, Int.MaxValue, NullStatsReceiver),
+        h_messageWriter =
+          new FragmentingMessageWriter(clientHandle, Int.MaxValue, NullStatsReceiver),
         detectorConfig = config,
         name = "test",
         statsReceiver = NullStatsReceiver,
-        timer = DefaultTimer)
+        timer = DefaultTimer
+      )
       // Register ourselves
       clientHandle.serialExecutor.execute(new Runnable {
         def run(): Unit = clientHandle.registerSession(session)
@@ -120,9 +122,11 @@ private[mux] abstract class ClientServerTest
       val session = new MuxServerSession(
         params = Mux.server.params,
         h_decoder = new FragmentDecoder(NullStatsReceiver),
-        h_messageWriter = new FragmentingMessageWriter(serverHandle, Int.MaxValue, NullStatsReceiver),
+        h_messageWriter =
+          new FragmentingMessageWriter(serverHandle, Int.MaxValue, NullStatsReceiver),
         handle = serverHandle,
-        service = service)
+        service = service
+      )
       serverHandle.serialExecutor.execute(new Runnable {
         def run(): Unit = serverHandle.registerSession(session)
       })
@@ -145,9 +149,7 @@ private[mux] abstract class ClientServerTest
     import ctx._
 
     val p1, p2, p3 = new Promise[Response]
-    val reqs = (1 to 3) map { i =>
-      Request(Path.empty, Nil, buf(i.toByte))
-    }
+    val reqs = (1 to 3) map { i => Request(Path.empty, Nil, buf(i.toByte)) }
     when(service(reqs(0))).thenReturn(p1)
     when(service(reqs(1))).thenReturn(p2)
     when(service(reqs(2))).thenReturn(p3)
@@ -162,9 +164,7 @@ private[mux] abstract class ClientServerTest
     for (f <- Seq(f1, f2, f3))
       assert(f.poll == None)
 
-    val reps = Seq(10, 20, 9) map { i =>
-      Response(Nil, buf(i.toByte))
-    }
+    val reps = Seq(10, 20, 9) map { i => Response(Nil, buf(i.toByte)) }
     p2.setValue(reps(1))
     assert(f1.poll == None)
     assert(f2.poll == Some(Return(reps(1))))

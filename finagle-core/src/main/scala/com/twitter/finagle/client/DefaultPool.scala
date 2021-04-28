@@ -1,6 +1,6 @@
 package com.twitter.finagle.client
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{param, ServiceFactory, Stack, Stackable, StackBuilder}
 import com.twitter.finagle.pool.{WatermarkPool, CachingPool, BufferingPool}
 import com.twitter.finagle.stats.StatsReceiver
@@ -9,7 +9,8 @@ import com.twitter.util.{Timer, Duration}
 
 object DefaultPool {
 
-  implicit object Role extends Stack.Role("Pool") {
+  val Role = StackClient.Role.pool
+  object Roles {
     val bufferingPool = Stack.Role("BufferingPool")
     val cachingPool = Stack.Role("CachingPool")
     val watermarkPool = Stack.Role("WatermarkPool")
@@ -54,7 +55,6 @@ object DefaultPool {
    */
   def module[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
     new Stack.Module[ServiceFactory[Req, Rep]] {
-      import com.twitter.finagle.pool.{CachingPool, WatermarkPool, BufferingPool}
       val role = DefaultPool.Role
       val description = "Control client connection pool"
       val parameters = Seq(
@@ -71,21 +71,21 @@ object DefaultPool {
 
         if (idleTime > 0.seconds && high > low) {
           stack.push(
-            Role.cachingPool,
+            Roles.cachingPool,
             (sf: ServiceFactory[Req, Rep]) =>
               new CachingPool(sf, high - low, idleTime, timer, statsReceiver)
           )
         }
 
         stack.push(
-          Role.watermarkPool,
+          Roles.watermarkPool,
           (sf: ServiceFactory[Req, Rep]) =>
             new WatermarkPool(sf, low, high, statsReceiver, maxWaiters)
         )
 
         if (bufferSize > 0) {
           stack.push(
-            Role.bufferingPool,
+            Roles.bufferingPool,
             (sf: ServiceFactory[Req, Rep]) => new BufferingPool(sf, bufferSize)
           )
         }
@@ -123,8 +123,8 @@ case class DefaultPool[Req, Rep](
   bufferSize: Int = 0,
   idleTime: Duration = Duration.Top,
   maxWaiters: Int = Int.MaxValue,
-  timer: Timer = DefaultTimer
-) extends (StatsReceiver => Transformer[Req, Rep]) {
+  timer: Timer = DefaultTimer)
+    extends (StatsReceiver => Transformer[Req, Rep]) {
   def apply(statsReceiver: StatsReceiver) = inputFactory => {
     val factory =
       if (idleTime <= 0.seconds || high <= low) inputFactory

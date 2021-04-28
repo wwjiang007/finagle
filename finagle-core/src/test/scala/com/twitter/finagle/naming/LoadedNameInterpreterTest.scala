@@ -2,11 +2,8 @@ package com.twitter.finagle.naming
 
 import com.twitter.finagle.{Addr, Dtab, Path, Name, NameTree}
 import com.twitter.util.{Var, Activity}
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.{BeforeAndAfter, FunSuite}
 
-@RunWith(classOf[JUnitRunner])
 class LoadedNameInterpreterTest extends FunSuite with BeforeAndAfter {
   class TestInterpreter(id: String) extends NameInterpreter {
     val va = Var.value(Addr.Bound())
@@ -41,7 +38,7 @@ class LoadedNameInterpreterTest extends FunSuite with BeforeAndAfter {
       }
       Seq(interpreter)
     }
-    val interpreter = new LoadedNameInterpreter(load)
+    val interpreter = new LoadedNameInterpreter(load _)
     assert(created)
     val act = interpreter.bind(Dtab.empty, Path.read("/a"))
     val NameTree.Leaf(name) = act.sample()

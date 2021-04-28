@@ -67,17 +67,15 @@ abstract class GenSerialServerDispatcher[Req, Rep, In, Out](trans: Transport[In,
     if (state.compareAndSet(Idle, Running)) {
       val eos = new Promise[Unit]
       val save = Local.save()
-      val dispatched = try {
-        Contexts.local.let(RemoteInfo.Upstream.AddressCtx, trans.remoteAddress) {
-          trans.peerCertificate match {
-            case None => dispatch(req, eos)
-            case Some(cert) =>
-              Contexts.local.let(Transport.peerCertCtx, cert) {
-                dispatch(req, eos)
-              }
-          }
-        }
-      } finally Local.restore(save)
+      val dispatched =
+        try {
+          Contexts.local.let(
+            RemoteInfo.Upstream.AddressCtx, // key 1
+            trans.context.remoteAddress, // value 1
+            Transport.sslSessionInfoCtx, // key 2
+            trans.context.sslSessionInfo // value 2
+          )(dispatch(req, eos))
+        } finally Local.restore(save)
 
       val handled = dispatched.flatMap(handleFn)
 

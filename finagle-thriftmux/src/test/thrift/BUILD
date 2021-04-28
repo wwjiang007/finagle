@@ -1,13 +1,8 @@
-java_thrift_library(
-    name = "thrift-scala",
-    sources = rglobs("*.thrift"),
-    compiler = "scrooge",
-    language = "scala",
-)
-
-java_thrift_library(
-    name = "thrift-java",
-    sources = rglobs("*.thrift"),
-    compiler = "scrooge",
-    language = "java",
+create_thrift_libraries(
+    base_name = "thrift",
+    sources = ["**/*.thrift"],
+    generate_languages = [
+        "java",
+        "scala",
+    ],
 )

@@ -1,18 +1,23 @@
 package com.twitter.finagle.netty4.pushsession
 
 import com.twitter.concurrent.AsyncQueue
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Stack.Params
 import com.twitter.finagle._
 import com.twitter.finagle.pushsession.{PushChannelHandle, PushSession, PushTransporter}
-import com.twitter.finagle.netty4.channel.Netty4ClientChannelInitializer.BufCodecKey
 import com.twitter.finagle.netty4.codec.BufCodec
 import com.twitter.finagle.netty4.decoder.{DecoderHandler, TestFramer}
 import com.twitter.finagle.transport.Transport
 import com.twitter.io.Buf
 import com.twitter.util._
 import io.netty.buffer.{ByteBuf, Unpooled}
-import io.netty.channel.{ChannelHandlerContext, ChannelInboundHandlerAdapter, ChannelOutboundHandlerAdapter, ChannelPipeline, ChannelPromise}
+import io.netty.channel.{
+  ChannelHandlerContext,
+  ChannelInboundHandlerAdapter,
+  ChannelOutboundHandlerAdapter,
+  ChannelPipeline,
+  ChannelPromise
+}
 import io.netty.handler.codec.MessageToMessageCodec
 import java.net.{InetAddress, InetSocketAddress, ServerSocket, Socket, SocketAddress}
 import java.nio.channels.UnresolvedAddressException
@@ -30,20 +35,14 @@ class Netty4PushTransporterTest extends FunSuite with Eventually with Integratio
   // converts to string frames of 4 bytes/chars each (we're using ASCII chars for tests which are 1 byte each)
   private def withStringFramer(pipeline: ChannelPipeline): Unit = {
     class BufToStringCodec extends MessageToMessageCodec[Buf, String] {
-      def encode(
-        ctx: ChannelHandlerContext,
-        msg: String,
-        out: util.List[AnyRef]
-      ): Unit = out.add(Buf.Utf8(msg))
+      def encode(ctx: ChannelHandlerContext, msg: String, out: util.List[AnyRef]): Unit =
+        out.add(Buf.Utf8(msg))
 
-      def decode(
-        ctx: ChannelHandlerContext,
-        msg: Buf,
-        out: util.List[AnyRef]
-      ): Unit = out.add(Buf.Utf8.unapply(msg).getOrElse("???"))
+      def decode(ctx: ChannelHandlerContext, msg: Buf, out: util.List[AnyRef]): Unit =
+        out.add(Buf.Utf8.unapply(msg).getOrElse("???"))
     }
 
-    pipeline.addLast(BufCodecKey, BufCodec)
+    pipeline.addLast(BufCodec.Key, BufCodec)
     pipeline.addLast("framer", new DecoderHandler(new TestFramer(frameSize)))
     pipeline.addLast("transcoder", new BufToStringCodec)
   }
@@ -74,8 +73,7 @@ class Netty4PushTransporterTest extends FunSuite with Eventually with Integratio
   }
 
   private[this] class Ctx[In, Out](
-    transporterFn: (SocketAddress, Params) => PushTransporter[In, Out]
-  ) {
+    transporterFn: (SocketAddress, Params) => PushTransporter[In, Out]) {
 
     var clientsideTransport: TestSession[In, Out] = null
     var server: ServerSocket = null
@@ -216,9 +214,7 @@ class Netty4PushTransporterTest extends FunSuite with Eventually with Integratio
 
       val latch = Promise[Unit]
 
-      latch.onSuccess { _ =>
-        if (ctx != null) ctx.fireExceptionCaught(ex)
-      }
+      latch.onSuccess { _ => if (ctx != null) ctx.fireExceptionCaught(ex) }
 
       override def handlerAdded(ctx: ChannelHandlerContext): Unit = {
         this.ctx = ctx
@@ -236,7 +232,9 @@ class Netty4PushTransporterTest extends FunSuite with Eventually with Integratio
       }
     ) {
 
-      override protected def makeSession(handle: PushChannelHandle[String, String]): Future[TestSession[String, String]] = {
+      override protected def makeSession(
+        handle: PushChannelHandle[String, String]
+      ): Future[TestSession[String, String]] = {
         val p = Promise[TestSession[String, String]]()
         // We don't resolve the session until the handle closes due to the exception
         handle.onClose.ensure {

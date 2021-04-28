@@ -6,12 +6,13 @@ import com.twitter.util.{Duration, Future}
 import scala.collection.mutable
 
 /**
- * @see [[MethodBuilderScaladoc]]
+ * @see [[BaseMethodBuilder]]
  */
-private[finagle] class MethodBuilderTimeout[Req, Rep] private[client] (mb: MethodBuilder[Req, Rep]) {
+private[finagle] class MethodBuilderTimeout[Req, Rep] private[client] (
+  mb: MethodBuilder[Req, Rep]) {
 
   /**
-   * @see [[MethodBuilderScaladoc.withTimeoutTotal(Duration)]]
+   * @see [[BaseMethodBuilder.withTimeoutTotal(Duration)]]
    */
   def total(howLong: Duration): MethodBuilder[Req, Rep] = {
     val timeouts = mb.config.timeout.copy(total = mb.config.timeout.total.copy(duration = howLong))
@@ -19,7 +20,7 @@ private[finagle] class MethodBuilderTimeout[Req, Rep] private[client] (mb: Metho
   }
 
   /**
-   * @see [[MethodBuilderScaladoc.withTimeoutTotal(Tunable[Duration])]]
+   * @see [[BaseMethodBuilder.withTimeoutTotal(Tunable[Duration])]]
    */
   def total(howLong: Tunable[Duration]): MethodBuilder[Req, Rep] = {
     val timeouts = mb.config.timeout.copy(total = mb.config.timeout.total.copy(tunable = howLong))
@@ -27,26 +28,28 @@ private[finagle] class MethodBuilderTimeout[Req, Rep] private[client] (mb: Metho
   }
 
   /**
-   * @see [[MethodBuilderScaladoc.withTimeoutPerRequest(Duration)]]
+   * @see [[BaseMethodBuilder.withTimeoutPerRequest(Duration)]]
    */
   def perRequest(howLong: Duration): MethodBuilder[Req, Rep] = {
-    val timeouts = mb.config.timeout.copy(perRequest = mb.config.timeout.perRequest.copy(duration = howLong))
+    val timeouts =
+      mb.config.timeout.copy(perRequest = mb.config.timeout.perRequest.copy(duration = howLong))
     mb.withConfig(mb.config.copy(timeout = timeouts))
   }
 
   /**
-   * @see [[MethodBuilderScaladoc.withTimeoutPerRequest(Tunable[Duration])]]
+   * @see [[BaseMethodBuilder.withTimeoutPerRequest(Tunable[Duration])]]
    */
   def perRequest(howLong: Tunable[Duration]): MethodBuilder[Req, Rep] = {
-    val timeouts = mb.config.timeout.copy(perRequest = mb.config.timeout.perRequest.copy(tunable = howLong))
+    val timeouts =
+      mb.config.timeout.copy(perRequest = mb.config.timeout.perRequest.copy(tunable = howLong))
     mb.withConfig(mb.config.copy(timeout = timeouts))
   }
 
   private[client] def totalFilter: Filter.TypeAgnostic = {
     val config = mb.config.timeout
     if (!config.total.isFinite &&
-        !config.total.isTunable &&
-        !config.stackTotalTimeoutDefined) {
+      !config.total.isTunable &&
+      !config.stackTotalTimeoutDefined) {
       Filter.TypeAgnostic.Identity
     } else {
       new Filter.TypeAgnostic {
@@ -112,14 +115,12 @@ private[client] object MethodBuilderTimeout {
   case class Config(
     stackTotalTimeoutDefined: Boolean,
     total: TunableDuration = TunableDuration("total"),
-    perRequest: TunableDuration = TunableDuration("perRequest")
-  )
+    perRequest: TunableDuration = TunableDuration("perRequest"))
 
   case class TunableDuration(
     id: String,
     duration: Duration = Duration.Undefined,
-    tunable: Tunable[Duration] = Tunable.none
-  ) {
+    tunable: Tunable[Duration] = Tunable.none) {
     def isFinite: Boolean = duration.isFinite
     def isTunable: Boolean = tunable != Tunable.none
 

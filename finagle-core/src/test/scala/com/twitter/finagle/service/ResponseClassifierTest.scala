@@ -1,8 +1,14 @@
 package com.twitter.finagle.service
 
-import com.twitter.finagle.{ChannelClosedException, Failure, FailureFlags, TimeoutException}
+import com.twitter.finagle.{
+  ChannelClosedException,
+  Failure,
+  FailureFlags,
+  IndividualRequestTimeoutException,
+  TimeoutException
+}
 import com.twitter.finagle.service.ResponseClass._
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.util.{Duration, Return, Throw}
 import org.scalatest.FunSuite
 
@@ -46,6 +52,50 @@ class ResponseClassifierTest extends FunSuite {
       NonRetryableFailure ==
         ResponseClassifier.Default(ReqRep(null, Throw(Failure("nope"))))
     )
+
+    assert(
+      Ignorable ==
+        ResponseClassifier.Default(ReqRep(null, Throw(Failure.ignorable("ignore"))))
+    )
+
+    assert(
+      NonRetryableFailure ==
+        ResponseClassifier.Default(
+          ReqRep(null, Throw(new IndividualRequestTimeoutException(1.second)))
+        )
+    )
+  }
+
+  // This is a copy of 'Default classification' with a slight modification for the
+  // change in behavior towards IndividualRequestTimeoutExceptions for `IgnoreIRTEs`.
+  test("IgnoreIRTEs classification") {
+    assert("IgnoreIRTEsResponseClassifier" == ResponseClassifier.IgnoreIRTEs.toString)
+    assert(
+      Success ==
+        ResponseClassifier.IgnoreIRTEs(ReqRep(null, Return("hi")))
+    )
+
+    assert(
+      RetryableFailure ==
+        ResponseClassifier.IgnoreIRTEs(ReqRep(null, Throw(Failure.rejected)))
+    )
+
+    assert(
+      NonRetryableFailure ==
+        ResponseClassifier.IgnoreIRTEs(ReqRep(null, Throw(Failure("nope"))))
+    )
+
+    assert(
+      Ignorable ==
+        ResponseClassifier.IgnoreIRTEs(ReqRep(null, Throw(Failure.ignorable("ignore"))))
+    )
+
+    assert(
+      Ignorable ==
+        ResponseClassifier.IgnoreIRTEs(
+          ReqRep(null, Throw(new IndividualRequestTimeoutException(1.second)))
+        )
+    )
   }
 
   test("composition") {
@@ -60,10 +110,40 @@ class ResponseClassifierTest extends FunSuite {
     }
     val classifier = evens.orElse(odds)
 
+    // ReqRep is weakly typed, so it will match a ReqRep or ReqRepT
     assert(RetryableFailure == classifier(ReqRep(2, aThrow)))
+    assert(RetryableFailure == classifier(ReqRepT(2, aThrow)))
     assert(NonRetryableFailure == classifier(ReqRep(1, aThrow)))
+    assert(NonRetryableFailure == classifier(ReqRepT(1, aThrow)))
 
     assert(!classifier.isDefinedAt(ReqRep(0, aReturn)))
+    assert(!classifier.isDefinedAt(ReqRepT(0, aReturn)))
+    assert(Success == classifier.applyOrElse(ReqRep(0, aReturn), ResponseClassifier.Default))
+    assert(Success == classifier.applyOrElse(ReqRepT(0, aReturn), ResponseClassifier.Default))
+
+  }
+
+  test("typed composition") {
+    val aThrow = Throw(Failure("nope"))
+    val aReturn = Return(4)
+
+    val evens: ResponseClassifier = {
+      case ReqRepT(i: Int, Throw(_)) if i % 2 == 0 => RetryableFailure
+    }
+    val odds: ResponseClassifier = {
+      case ReqRepT(i: Int, Throw(_)) if i % 2 == 1 => NonRetryableFailure
+    }
+    val classifier = evens.orElse(odds)
+
+    assert(RetryableFailure == classifier(ReqRepT[Int, Int](2, aThrow)))
+    assert(RetryableFailure == classifier(ReqRep(2, aThrow)))
+    assert(NonRetryableFailure == classifier(ReqRepT[Int, Int](1, aThrow)))
+    assert(NonRetryableFailure == classifier(ReqRep(1, aThrow)))
+
+    assert(!classifier.isDefinedAt(ReqRepT[Int, Int](0, aReturn)))
+    assert(!classifier.isDefinedAt(ReqRep(0, aReturn)))
+    assert(
+      Success == classifier.applyOrElse(ReqRepT[Int, Int](0, aReturn), ResponseClassifier.Default))
     assert(Success == classifier.applyOrElse(ReqRep(0, aReturn), ResponseClassifier.Default))
   }
 

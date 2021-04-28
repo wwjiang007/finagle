@@ -1,16 +1,25 @@
 package com.twitter.finagle.pushsession
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.pushsession.utils.MockChannelHandle
 import com.twitter.finagle.server.StackServer
+import com.twitter.finagle.ssl.session.SslSessionInfo
 import com.twitter.finagle.transport.Transport
-import com.twitter.finagle.{ClientConnection, ListeningServer, Service, ServiceFactory, Stack, Status}
+import com.twitter.finagle.{
+  ClientConnection,
+  ListeningServer,
+  Service,
+  ServiceFactory,
+  Stack,
+  Status
+}
 import com.twitter.util.registry.{Entry, GlobalRegistry}
 import com.twitter.util.{Await, Awaitable, Duration, Future, Promise, Time}
 import java.net.{InetSocketAddress, SocketAddress}
-import java.security.cert.Certificate
+import java.security.cert.{Certificate, X509Certificate}
+import org.mockito.Mockito.when
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 class PushStackServerTest extends FunSuite with MockitoSugar {
 
@@ -62,19 +71,17 @@ class PushStackServerTest extends FunSuite with MockitoSugar {
 
         def isReady(implicit permit: Awaitable.CanAwait): Boolean = true
 
-        def result(timeout: Duration)
-          (implicit permit: Awaitable.CanAwait): Unit = ()
+        def result(timeout: Duration)(implicit permit: Awaitable.CanAwait): Unit = ()
 
-        def ready(timeout: Duration)
-          (implicit permit: Awaitable.CanAwait): this.type = this
+        def ready(timeout: Duration)(implicit permit: Awaitable.CanAwait): this.type = this
       }
   }
 
   // Note: only intended to listen to one address at a time due to mutating copy1 method
   case class TestStackServer(
     var stack: Stack[ServiceFactory[Unit, Unit]] = StackServer.newStack,
-    var params: Stack.Params = StackServer.defaultParams
-  ) extends PushStackServer[Unit, Unit, TestStackServer] {
+    var params: Stack.Params = StackServer.defaultParams)
+      extends PushStackServer[Unit, Unit, TestStackServer] {
     protected type PipelineRep = Unit
     protected type PipelineReq = Unit
 
@@ -101,8 +108,8 @@ class PushStackServerTest extends FunSuite with MockitoSugar {
   test("Close notifies the channel handle if the server is closing when it becomes ready") {
     val server = new TestStackServer()
     val service = Promise[Service[Unit, Unit]]
-    val listeningServer = server.serve(
-      new InetSocketAddress(0), ServiceFactory.apply(() => service))
+    val listeningServer =
+      server.serve(new InetSocketAddress(0), ServiceFactory.apply(() => service))
     val handle = new MockChannelHandle[Unit, Unit](null)
     val sessionF = server.mockListener.builder(handle)
     listeningServer.close(10.seconds)
@@ -143,8 +150,10 @@ class PushStackServerTest extends FunSuite with MockitoSugar {
 
   test("automatically closes handle on ServiceFactory failure") {
     val server = new TestStackServer()
-    server.serve(new InetSocketAddress(0),
-      ServiceFactory(() => Future.exception(new Exception("Sad face"))))
+    server.serve(
+      new InetSocketAddress(0),
+      ServiceFactory(() => Future.exception(new Exception("Sad face")))
+    )
 
     val handle = new MockChannelHandle[Unit, Unit](null)
     val session = await(server.mockListener.builder(handle))
@@ -168,9 +177,11 @@ class PushStackServerTest extends FunSuite with MockitoSugar {
     }
 
     server.serve(new InetSocketAddress(0), TestServiceFactory)
-    val mockCert = mock[Certificate]
+    val mockCert = mock[X509Certificate]
+    val mockSslSessionInfo = mock[SslSessionInfo]
+    when(mockSslSessionInfo.peerCertificates).thenReturn(Seq(mockCert))
     val handle = new MockChannelHandle[Unit, Unit](null) {
-      override def peerCertificate: Option[Certificate] = Some(mockCert)
+      override def sslSessionInfo: SslSessionInfo = mockSslSessionInfo
     }
 
     await(server.mockListener.builder(handle))
@@ -182,8 +193,10 @@ class PushStackServerTest extends FunSuite with MockitoSugar {
     val server = new TestStackServer()
 
     // Should have registered itself
-    server.serve(new InetSocketAddress(0),
-      ServiceFactory(() => Future.exception(new Exception("Sad face"))))
+    server.serve(
+      new InetSocketAddress(0),
+      ServiceFactory(() => Future.exception(new Exception("Sad face")))
+    )
 
     val entries = GlobalRegistry.get.iterator.toList
     val foundEntry = entries.exists {

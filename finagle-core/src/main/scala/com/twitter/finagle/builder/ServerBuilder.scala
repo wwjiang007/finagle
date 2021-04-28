@@ -1,33 +1,26 @@
 package com.twitter.finagle.builder
 
 import com.twitter.util
-import com.twitter.finagle.{Server => FinagleServer, _}
+import com.twitter.finagle._
 import com.twitter.finagle.filter.{MaskCancelFilter, ServerAdmissionControl}
-import com.twitter.finagle.server.{Listener, StackBasedServer}
+import com.twitter.finagle.server.{Listener, StackBasedServer, StackServer}
 import com.twitter.finagle.service.{ExpiringService, PendingRequestFilter, TimeoutFilter}
-import com.twitter.finagle.ssl.{ApplicationProtocols, CipherSuites, KeyCredentials}
-import com.twitter.finagle.ssl.server.{SslServerConfiguration, SslServerEngineFactory, SslServerSessionVerifier}
-import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.ssl.server.{
+  SslServerConfiguration,
+  SslServerEngineFactory,
+  SslServerSessionVerifier
+}
+import com.twitter.finagle.stats.{
+  RelativeNameMarkingStatsReceiver,
+  RoleConfiguredStatsReceiver,
+  Server,
+  StatsReceiver
+}
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.util._
 import com.twitter.util.{CloseAwaitably, Duration, Future, NullMonitor, Time}
-import java.io.File
 import java.net.SocketAddress
 import scala.annotation.implicitNotFound
-
-/**
- * A listening server. This is for compatibility with older code that is
- * using builder.Server. New code should use the ListeningServer trait.
- */
-trait Server extends ListeningServer {
-
-  /**
-   * When a server is bound to an ephemeral port, gets back the address
-   * with concrete listening port picked.
-   */
-  @deprecated("Use boundAddress", "2014-12-19")
-  final def localAddress: SocketAddress = boundAddress
-}
 
 /**
  * Factory for [[com.twitter.finagle.builder.ServerBuilder]] instances
@@ -45,7 +38,10 @@ object ServerBuilder {
   /**
    * Provides a typesafe `build` for Java.
    */
-  def safeBuild[Req, Rep](service: Service[Req, Rep], builder: Complete[Req, Rep]): Server =
+  def safeBuild[Req, Rep](
+    service: Service[Req, Rep],
+    builder: Complete[Req, Rep]
+  ): ListeningServer =
     builder.build(service)(ServerConfigEvidence.FullyConfigured)
 
   /**
@@ -54,7 +50,7 @@ object ServerBuilder {
   def safeBuild[Req, Rep](
     serviceFactory: ServiceFactory[Req, Rep],
     builder: Complete[Req, Rep]
-  ): Server =
+  ): ListeningServer =
     builder.build(serviceFactory)(ServerConfigEvidence.FullyConfigured)
 }
 
@@ -62,10 +58,18 @@ object ServerConfig {
   sealed trait Yes
   type FullySpecified[Req, Rep] = ServerConfig[Req, Rep, Yes, Yes, Yes]
 
-  def nilServer[Req, Rep]: FinagleServer[Req, Rep] = new FinagleServer[Req, Rep] {
-    def serve(addr: SocketAddress, service: ServiceFactory[Req, Rep]): ListeningServer =
-      NullServer
+  private case class NilServer[Req, Rep](
+    stack: Stack[ServiceFactory[Req, Rep]] = StackServer.newStack[Req, Rep],
+    params: Stack.Params = Stack.Params.empty)
+      extends StackBasedServer[Req, Rep] {
+
+    def withParams(ps: Stack.Params): StackBasedServer[Req, Rep] = copy(params = ps)
+    def transformed(t: Stack.Transformer): StackBasedServer[Req, Rep] = copy(stack = t(stack))
+
+    def serve(addr: SocketAddress, service: ServiceFactory[Req, Rep]): ListeningServer = NullServer
   }
+
+  def nilServer[Req, Rep]: StackBasedServer[Req, Rep] = NilServer[Req, Rep]()
 
   // params specific to ServerBuilder
   private[builder] case class BindTo(addr: SocketAddress) {
@@ -169,12 +173,10 @@ private[builder] final class ServerConfig[Req, Rep, HasCodec, HasBindTo, HasName
  * - `backlog`: OS-defined default value
  *
  * @see The [[https://twitter.github.io/finagle/guide/Configuration.html user guide]]
- *      for information on the preferred `with`-style APIs insead.
+ *      for information on the preferred `with`-style APIs instead.
  */
 class ServerBuilder[Req, Rep, HasCodec, HasBindTo, HasName] private[builder] (
-  val params: Stack.Params,
-  mk: Stack.Params => FinagleServer[Req, Rep]
-) {
+  private[finagle] val server: StackBasedServer[Req, Rep]) {
   import ServerConfig._
   import com.twitter.finagle.param._
 
@@ -183,22 +185,21 @@ class ServerBuilder[Req, Rep, HasCodec, HasBindTo, HasName] private[builder] (
   type ThisConfig = ServerConfig[Req, Rep, HasCodec, HasBindTo, HasName]
   type This = ServerBuilder[Req, Rep, HasCodec, HasBindTo, HasName]
 
-  private[builder] def this() = this(Stack.Params.empty, Function.const(ServerConfig.nilServer) _)
+  private[builder] def this() = this(ServerConfig.nilServer)
 
   override def toString: String = "ServerBuilder(%s)".format(params)
 
-  protected def copy[Req1, Rep1, HasCodec1, HasBindTo1, HasName1](
-    ps: Stack.Params,
-    newServer: Stack.Params => FinagleServer[Req1, Rep1]
+  private def copy[Req1, Rep1, HasCodec1, HasBindTo1, HasName1](
+    server: StackBasedServer[Req1, Rep1]
   ): ServerBuilder[Req1, Rep1, HasCodec1, HasBindTo1, HasName1] =
-    new ServerBuilder(ps, newServer)
+    new ServerBuilder(server)
 
   private def _configured[P, HasCodec1, HasBindTo1, HasName1](
     param: P
   )(
     implicit stackParam: Stack.Param[P]
   ): ServerBuilder[Req, Rep, HasCodec1, HasBindTo1, HasName1] =
-    copy(params + param, mk)
+    copy(server.configured(param))
 
   /**
    * Configure the underlying [[Stack.Param Params]].
@@ -208,7 +209,7 @@ class ServerBuilder[Req, Rep, HasCodec, HasBindTo, HasName] private[builder] (
    * Java users may find it easier to use the `Tuple2` version below.
    */
   def configured[P](param: P)(implicit stackParam: Stack.Param[P]): This =
-    copy(params + param, mk)
+    copy(server.configured(param))
 
   /**
    * Java friendly API for configuring the underlying [[Stack.Param Params]].
@@ -222,23 +223,12 @@ class ServerBuilder[Req, Rep, HasCodec, HasBindTo, HasName] private[builder] (
    * as an example).
    */
   def configured[P](paramAndStackParam: (P, Stack.Param[P])): This =
-    copy(params.+(paramAndStackParam._1)(paramAndStackParam._2), mk)
+    copy(server.configured(paramAndStackParam._1)(paramAndStackParam._2))
 
   /**
-   * Overrides the stack and [[com.twitter.finagle.Server]] that will be used
-   * by this builder.
-   *
-   * @param mk A function that materializes a `Server` from a set of `Params`.
-   * `mk` is passed the state of configuration when `build` is called. There is
-   * no guarantee that all the builder parameters will be used by the server
-   * created by `mk`; it is up to the discretion of the server and protocol
-   * implementation.
+   * The underlying [[Stack.Param Params]] used for configuration.
    */
-  @deprecated("Use stack(server: StackBasedServer)", "7.0.0")
-  def stack[Req1, Rep1](
-    mk: Stack.Params => FinagleServer[Req1, Rep1]
-  ): ServerBuilder[Req1, Rep1, Yes, HasBindTo, HasName] =
-    copy(params, mk)
+  def params: Stack.Params = server.params
 
   /**
    * Overrides the stack and [[com.twitter.finagle.Server]] that will be used
@@ -252,12 +242,8 @@ class ServerBuilder[Req, Rep, HasCodec, HasBindTo, HasName] private[builder] (
    */
   def stack[Req1, Rep1](
     server: StackBasedServer[Req1, Rep1]
-  ): ServerBuilder[Req1, Rep1, Yes, HasBindTo, HasName] = {
-    val withParams: Stack.Params => FinagleServer[Req1, Rep1] = { ps =>
-      server.withParams(server.params ++ ps)
-    }
-    copy(server.params ++ params, withParams)
-  }
+  ): ServerBuilder[Req1, Rep1, Yes, HasBindTo, HasName] =
+    copy(server.withParams(server.params ++ params))
 
   /**
    * To migrate to the Stack-based APIs, use `CommonParams.withStatsReceiver`.
@@ -323,19 +309,6 @@ class ServerBuilder[Req, Rep, HasCodec, HasBindTo, HasName] private[builder] (
    */
   def bindTo(address: SocketAddress): ServerBuilder[Req, Rep, HasCodec, Yes, HasName] =
     _configured(BindTo(address))
-
-  /**
-   * To migrate to the Stack-based APIs, use `configured`.
-   * For example:
-   * {{{
-   * import com.twitter.finagle.Http
-   * import com.twitter.finagle.param
-   *
-   * Http.server.configured(param.Logger(logger))
-   * }}}
-   */
-  def logger(logger: java.util.logging.Logger): This =
-    _configured(Logger(logger))
 
   /**
    * To migrate to the Stack-based APIs, use `ServerTransportParams.verbose`.
@@ -412,53 +385,6 @@ class ServerBuilder[Req, Rep, HasCodec, HasBindTo, HasName] private[builder] (
     configured(Transport.ServerSsl(Some(config)))
       .configured(SslServerEngineFactory.Param(engineFactory))
       .configured(SslServerSessionVerifier.Param(sessionVerifier))
-
-  /**
-   * Encrypt the connection with SSL/TLS.
-   *
-   * To migrate to the Stack-based APIs, use `ServerTransportParams.tls`.
-   * For example:
-   * {{{
-   * import com.twitter.finagle.Http
-   *
-   * Http.server.withTransport.tls(...)
-   * }}}
-   */
-  def tls(
-    certificatePath: String,
-    keyPath: String,
-    caCertificatePath: String = null,
-    ciphers: String = null,
-    nextProtos: String = null
-  ): This = {
-    val keyCredentials = if (caCertificatePath == null) {
-      KeyCredentials.CertAndKey(new File(certificatePath), new File(keyPath))
-    } else {
-      KeyCredentials.CertKeyAndChain(
-        new File(certificatePath),
-        new File(keyPath),
-        new File(caCertificatePath)
-      )
-    }
-    val cipherSuites =
-      if (ciphers == null) CipherSuites.Unspecified
-      else CipherSuites.fromString(ciphers)
-    val applicationProtocols =
-      if (nextProtos == null) ApplicationProtocols.Unspecified
-      else ApplicationProtocols.fromString(nextProtos)
-
-    configured(
-      Transport.ServerSsl(
-        Some(
-          SslServerConfiguration(
-            keyCredentials = keyCredentials,
-            cipherSuites = cipherSuites,
-            applicationProtocols = applicationProtocols
-          )
-        )
-      )
-    )
-  }
 
   /**
    * Configures the maximum concurrent requests that are admitted
@@ -694,83 +620,54 @@ class ServerBuilder[Req, Rep, HasCodec, HasBindTo, HasName] private[builder] (
   /**
    * Construct the Server, given the provided Service.
    */
-  def build(service: Service[Req, Rep])(
+  def build(
+    service: Service[Req, Rep]
+  )(
     implicit THE_BUILDER_IS_NOT_FULLY_SPECIFIED_SEE_ServerBuilder_DOCUMENTATION: ServerConfigEvidence[
       HasCodec,
       HasBindTo,
       HasName
     ]
-  ): Server = build(ServiceFactory.const(service))
-
-  @deprecated("Used for ABI compat", "5.0.1")
-  final def build(
-    service: Service[Req, Rep],
-    THE_BUILDER_IS_NOT_FULLY_SPECIFIED_SEE_ServerBuilder_DOCUMENTATION: ThisConfig =:= FullySpecifiedConfig
-  ): Server =
-    build(
-      ServiceFactory.const(service),
-      THE_BUILDER_IS_NOT_FULLY_SPECIFIED_SEE_ServerBuilder_DOCUMENTATION
-    )
-
-  /**
-   * Construct the Server, given the provided Service factory.
-   */
-  @deprecated("Use the ServiceFactory variant instead", "5.0.1")
-  final def build(serviceFactory: () => Service[Req, Rep])(
-    implicit THE_BUILDER_IS_NOT_FULLY_SPECIFIED_SEE_ServerBuilder_DOCUMENTATION: ThisConfig =:= FullySpecifiedConfig
-  ): Server =
-    build((_: ClientConnection) => serviceFactory())(
-      THE_BUILDER_IS_NOT_FULLY_SPECIFIED_SEE_ServerBuilder_DOCUMENTATION
-    )
+  ): ListeningServer = build(ServiceFactory.const(service))
 
   /**
    * Construct the Server, given the provided ServiceFactory. This
    * is useful if the protocol is stateful (e.g., requires authentication
    * or supports transactions).
    */
-  @deprecated("Use the ServiceFactory variant instead", "5.0.1")
-  final def build(serviceFactory: (ClientConnection) => Service[Req, Rep])(
-    implicit THE_BUILDER_IS_NOT_FULLY_SPECIFIED_SEE_ServerBuilder_DOCUMENTATION: ThisConfig =:= FullySpecifiedConfig
-  ): Server =
-    build(
-      new ServiceFactory[Req, Rep] {
-        def apply(conn: ClientConnection) = Future.value(serviceFactory(conn))
-        def close(deadline: Time) = Future.Done
-      },
-      THE_BUILDER_IS_NOT_FULLY_SPECIFIED_SEE_ServerBuilder_DOCUMENTATION
-    )
-
-  /**
-   * Construct the Server, given the provided ServiceFactory. This
-   * is useful if the protocol is stateful (e.g., requires authentication
-   * or supports transactions).
-   */
-  def build(serviceFactory: ServiceFactory[Req, Rep])(
+  def build(
+    serviceFactory: ServiceFactory[Req, Rep]
+  )(
     implicit THE_BUILDER_IS_NOT_FULLY_SPECIFIED_SEE_ServerBuilder_DOCUMENTATION: ServerConfigEvidence[
       HasCodec,
       HasBindTo,
       HasName
     ]
-  ): Server = {
+  ): ListeningServer = {
 
     val Label(lbl) = params[Label]
     val label = if (lbl == "") "server" else lbl
 
     val BindTo(addr) = params[BindTo]
-    val Logger(logger) = params[Logger]
+    val logger = DefaultLogger
     val Daemonize(daemon) = params[Daemonize]
     val MonitorFactory(newMonitor) = params[MonitorFactory]
+    val statsReceiver = new RoleConfiguredStatsReceiver(
+      new RelativeNameMarkingStatsReceiver(params[Stats].statsReceiver),
+      Server,
+      Some(label))
 
     val monitor = newMonitor(lbl, InetSocketAddressUtil.toPublic(addr)) andThen
       new SourceTrackingMonitor(logger, label)
 
     val serverParams = params +
       Monitor(monitor) +
-      Reporter(NullReporterFactory)
+      Reporter(NullReporterFactory) +
+      Stats(statsReceiver)
 
-    val listeningServer = mk(serverParams).serve(addr, serviceFactory)
+    val listeningServer = server.withParams(serverParams).serve(addr, serviceFactory)
 
-    new Server with CloseAwaitably {
+    new ListeningServer with CloseAwaitably {
 
       val exitGuard = if (!daemon) Some(ExitGuard.guard(s"server for '$label'")) else None
 
@@ -784,17 +681,11 @@ class ServerBuilder[Req, Rep, HasCodec, HasBindTo, HasName] private[builder] (
     }
   }
 
-  @deprecated("Used for ABI compat", "5.0.1")
-  final def build(
-    serviceFactory: ServiceFactory[Req, Rep],
-    THE_BUILDER_IS_NOT_FULLY_SPECIFIED_SEE_ServerBuilder_DOCUMENTATION: ThisConfig =:= FullySpecifiedConfig
-  ): Server = build(serviceFactory)(new ServerConfigEvidence[HasCodec, HasBindTo, HasName] {})
-
   /**
    * Construct a Service, with runtime checks for builder
    * completeness.
    */
-  def unsafeBuild(service: Service[Req, Rep]): Server = {
+  def unsafeBuild(service: Service[Req, Rep]): ListeningServer = {
     if (!params.contains[BindTo])
       throw new IncompleteSpecification("No bindTo was specified")
 

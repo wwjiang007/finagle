@@ -1,22 +1,19 @@
 package com.twitter.finagle.serverset2
 
 import com.twitter.finagle.common.zookeeper.ServerSetImpl
-import com.twitter.finagle.{Addr, Address, Resolver, Name}
+import com.twitter.finagle.{Addr, Address, Name, Resolver}
 import com.twitter.finagle.addr.WeightedAddress
-import com.twitter.finagle.serverset2.addr.ZkMetadata
+import com.twitter.finagle.partitioning.zk.ZkMetadata
 import com.twitter.finagle.zookeeper.ZkInstance
 import com.twitter.util.RandomSocket
 import java.net.InetSocketAddress
-import org.junit.runner.RunWith
 import org.scalactic.source.Position
 import org.scalatest.concurrent.Eventually
 import org.scalatest.concurrent.PatienceConfiguration
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.time.{Span, SpanSugar}
-import org.scalatest.{FunSuite, BeforeAndAfter, Tag}
-import scala.collection.JavaConverters.mapAsJavaMapConverter
+import org.scalatest.{BeforeAndAfter, FunSuite, Tag}
+import scala.jdk.CollectionConverters._
 
-@RunWith(classOf[JUnitRunner])
 class Zk2ResolverTest
     extends FunSuite
     with BeforeAndAfter
@@ -36,6 +33,7 @@ class Zk2ResolverTest
   val stabilizationInterval = PatienceConfiguration.Interval(5.seconds)
 
   val shardId = 42
+  val emptyMetadata = Map.empty[String, String]
 
   before {
     inst = new ZkInstance
@@ -46,21 +44,17 @@ class Zk2ResolverTest
     inst.stop()
   }
 
-  override def test(testName: String, testTags: Tag*)(f: => Any)(implicit pos: Position): Unit = {
-    // Since this test currently relies on timing, it's currently best to treat it as flaky for CI.
-    // It should be runnable, if a little slow, however.
-    if (!sys.props.contains("SKIP_FLAKY"))
-      super.test(testName, testTags: _*)(f)
-  }
-
   private[this] def zk2resolve(path: String): Name =
     Resolver.eval("zk2!" + inst.zookeeperConnectString + "!" + path)
 
   private[this] def address(
     ia: InetSocketAddress,
-    shardIdOpt: Option[Int] = Some(shardId)
+    shardIdOpt: Option[Int] = Some(shardId),
+    metadata: Map[String, String] = emptyMetadata
   ): Address =
-    WeightedAddress(Address.Inet(ia, ZkMetadata.toAddrMetadata(ZkMetadata(shardIdOpt))), 1.0)
+    WeightedAddress(
+      Address.Inet(ia, ZkMetadata.toAddrMetadata(ZkMetadata(shardIdOpt, metadata))),
+      1.0)
 
   test("end-to-end: service endpoint") {
     val Name.Bound(va) = zk2resolve("/foo/bar")
@@ -126,6 +120,31 @@ class Zk2ResolverTest
     eventually {
       assert(
         va.sample() == Addr.Bound(address(joinAddr, None)),
+        "resolution is not bound once the serverset exists"
+      )
+    }
+
+    status.leave()
+    eventually(stabilizationTimeout, stabilizationInterval) {
+      assert(va.sample() == Addr.Neg, "resolution is not negative after the serverset disappears")
+    }
+  }
+
+  test("end-to-end: service endpoint with metadata") {
+    val Name.Bound(va) = zk2resolve("/foo/bar")
+    eventually {
+      assert(va.sample() == Addr.Neg, "resolution is not negative before serverset exists")
+    }
+
+    val metadataMap = Map("someKey" -> "someValue")
+    val metadataJMap = metadataMap.asJava
+    val serverSet = new ServerSetImpl(inst.zookeeperClient, "/foo/bar")
+    val joinAddr = RandomSocket()
+    val status =
+      serverSet.join(joinAddr, Map.empty[String, InetSocketAddress].asJava, shardId, metadataJMap)
+    eventually {
+      assert(
+        va.sample() == Addr.Bound(address(joinAddr, Some(shardId), metadataMap)),
         "resolution is not bound once the serverset exists"
       )
     }

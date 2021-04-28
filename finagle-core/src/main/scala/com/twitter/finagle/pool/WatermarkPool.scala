@@ -37,8 +37,9 @@ final class WatermarkPool[Req, Rep](
   lowWatermark: Int,
   highWatermark: Int = Int.MaxValue,
   statsReceiver: StatsReceiver = NullStatsReceiver,
-  maxWaiters: Int = Int.MaxValue
-) extends ServiceFactory[Req, Rep] { thePool => // note: avoids `self` as an alias because ServiceProxy has a `self`
+  maxWaiters: Int = Int.MaxValue)
+    extends ServiceFactory[Req, Rep] {
+  thePool => // note: avoids `self` as an alias because ServiceProxy has a `self`
 
   // `queue` contains unwrapped `Service` instances, which *must* be wrapped by a `ServiceWrapper` before
   // returning to the application.
@@ -60,12 +61,17 @@ final class WatermarkPool[Req, Rep](
 
   private[this] val numWaiters = statsReceiver.counter("pool_num_waited")
   private[this] val tooManyWaiters = statsReceiver.counter("pool_num_too_many_waiters")
-  private[this] val waitersStat = statsReceiver.addGauge("pool_waiters") {
+  private[this] val waitersGauge = statsReceiver.addGauge("pool_waiters") {
     thePool.synchronized { waiters.size }
   }
-  private[this] val sizeStat = statsReceiver.addGauge("pool_size") {
-    thePool.synchronized { numServices }
-  }
+  private[this] val sizeGauge = statsReceiver.addGauge("pool_size") { size }
+
+  /**
+   * The current size of the pool.
+   *
+   * Exposed for testing.
+   */
+  private[pool] def size: Int = synchronized(numServices)
 
   /**
    * Flush waiters by creating new services for them. This must
@@ -87,9 +93,8 @@ final class WatermarkPool[Req, Rep](
     }
   }
 
-
   final private[this] class ServiceWrapper(underlying: Service[Req, Rep])
-    extends ServiceProxy[Req, Rep](underlying) {
+      extends ServiceProxy[Req, Rep](underlying) {
 
     private[this] val closed: Promise[Unit] = new Promise[Unit]
     private[this] val released: AtomicBoolean = new AtomicBoolean(false)
@@ -216,16 +221,16 @@ final class WatermarkPool[Req, Rep](
 
       // nb: we can't lean on the `isOpen` bit flip protecting us as we
       // can with the `queue` drain which follows because of the interrupt
-      // handler above which accesses `waiters`.
-      val res = waiters.asScala.toSeq
+      // handler above which accesses `waiters`. Also, note the significant
+      // call to `toArray` which copies waiters to a new collection instead
+      // of proxying to the underlying one.
+      val res = waiters.toArray(new Array[Promise[Service[Req, Rep]]](waiters.size))
       waiters.clear()
       res
     }
 
     // Fail the existing waiters.
-    toFail.foreach { waiter =>
-      waiter.setException(new ServiceClosedException)
-    }
+    toFail.foreach { waiter => waiter.setException(new ServiceClosedException) }
 
     // Drain the pool. All `queue` access first tests `isOpen` mediated by `thePool` lock
     // so we don't need to hold the lock while clearing it since we've flipped the `isOpen`
@@ -233,6 +238,9 @@ final class WatermarkPool[Req, Rep](
     queue.asScala.foreach { svc => (new ServiceWrapper(svc)).close() }
     queue.clear()
 
+    // Clear out the gauges
+    sizeGauge.remove()
+    waitersGauge.remove()
 
     // Close the underlying factory.
     factory.close(deadline)

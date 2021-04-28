@@ -1,8 +1,8 @@
 package com.twitter.finagle.liveness
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.service.Backoff
-import com.twitter.finagle.util.Ema
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.Backoff
+import com.twitter.finagle.util.{Ema, Showable}
 import com.twitter.util.{Duration, Stopwatch, WindowedAdder}
 
 /**
@@ -16,6 +16,11 @@ import com.twitter.util.{Duration, Stopwatch, WindowedAdder}
  *      for more details.
  */
 abstract class FailureAccrualPolicy { self =>
+
+  /**
+   * Name of the policy.
+   */
+  def name: String
 
   /** Invoked by FailureAccrualFactory when a request is successful. */
   def recordSuccess(): Unit
@@ -33,6 +38,12 @@ abstract class FailureAccrualPolicy { self =>
    */
   def revived(): Unit
 
+  /*
+   * Invoked by FailureAccrualFactory to retrieve a string representation
+   * of the policy's current state.
+   */
+  def show(): String
+
   /**
    * Creates a [[FailureAccrualPolicy]] which uses both `this` and `that`.
    *
@@ -41,6 +52,8 @@ abstract class FailureAccrualPolicy { self =>
    */
   final def orElse(that: FailureAccrualPolicy): FailureAccrualPolicy =
     new FailureAccrualPolicy {
+      val name: String = s"${self.name}, ${that.name}"
+
       def recordSuccess(): Unit = {
         self.recordSuccess()
         that.recordSuccess()
@@ -65,10 +78,16 @@ abstract class FailureAccrualPolicy { self =>
         self.revived()
         that.revived()
       }
+
+      def show(): String = s"${self.show()}, ${that.show()}"
     }
 }
 
 object FailureAccrualPolicy {
+
+  implicit val showable: Showable[FailureAccrualPolicy] = new Showable[FailureAccrualPolicy] {
+    def show(policy: FailureAccrualPolicy): String = policy.show()
+  }
 
   val DefaultConsecutiveFailures = 5
   val DefaultMinimumRequestThreshold = 5
@@ -78,13 +97,13 @@ object FailureAccrualPolicy {
   // workloads, this approach will better deal with randomly distributed failures.
   // Note that if an endpoint begins to fail all requests, FailureAccrual will
   // trigger in (window) * (1 - threshold) seconds - 6 seconds for these values.
-  val DefaultSuccessRateThreshold = 0.8
-  val DefaultSuccessRateWindow = 30.seconds
+  val DefaultSuccessRateThreshold: Double = 0.8
+  val DefaultSuccessRateWindow: Duration = 30.seconds
 
   private[this] val Success = 1
   private[this] val Failure = 0
 
-  protected[this] val constantBackoff = Backoff.const(300.seconds)
+  protected[this] val constantBackoff: Backoff = Backoff.const(300.seconds)
 
   /**
    * A policy based on an exponentially-weighted moving average success rate
@@ -104,23 +123,24 @@ object FailureAccrualPolicy {
    * `markDeadOnFailure()` will return None, until at least `window` data points
    * are provided.
    *
-   * @param markDeadFor stream of durations to use for the next duration
+   * @param markDeadFor a policy encoded [[Backoff]] to calculate the next duration
    * returned from `markDeadOnFailure()`
    */
   private[this] abstract class SuccessRateFailureAccrualPolicy(
     requiredSuccessRate: Double,
     window: Long,
-    markDeadFor: Stream[Duration]
-  ) extends FailureAccrualPolicy {
+    markDeadFor: Backoff)
+      extends FailureAccrualPolicy {
     assert(
       requiredSuccessRate >= 0.0 && requiredSuccessRate <= 1.0,
       s"requiredSuccessRate must be [0, 1]: $requiredSuccessRate"
     )
     assert(window > 0, s"window must be positive: $window")
 
-    // Pad the back of the stream to mark dead for a constant amount (300 seconds)
-    // when the stream runs out.
-    private[this] val freshMarkDeadFor = markDeadFor ++ constantBackoff
+    val name = "SuccessRateFailureAccrualPolicy"
+
+    // Mark dead for a constant amount (300 seconds) when the `markDeadFor` runs out.
+    private[this] val freshMarkDeadFor = markDeadFor.concat(constantBackoff)
 
     // The head of `nextMarkDeadFor` is the next duration that will be returned
     // from `markDeadOnFailure()` if the required success rate is not met.
@@ -129,27 +149,29 @@ object FailureAccrualPolicy {
 
     private[this] val successRate = new Ema(window)
 
-    override def recordSuccess(): Unit = synchronized {
+    def recordSuccess(): Unit = synchronized {
       successRate.update(emaStamp, Success)
     }
 
-    override def markDeadOnFailure(): Option[Duration] = synchronized {
+    def markDeadOnFailure(): Option[Duration] = synchronized {
       val emaStampForRequest = emaStamp
       val sr = successRate.update(emaStampForRequest, Failure)
       if (canRemove(emaStampForRequest, sr)) {
-        val duration = nextMarkDeadFor.head
-        nextMarkDeadFor = nextMarkDeadFor.tail
+        val duration = nextMarkDeadFor.duration
+        nextMarkDeadFor = nextMarkDeadFor.next
         Some(duration)
       } else {
         None
       }
     }
 
-    override def revived: Unit = synchronized {
+    def revived(): Unit = synchronized {
       nextMarkDeadFor = freshMarkDeadFor
       resetEmaCounter()
       successRate.reset()
     }
+
+    def show(): String = s"$name(sr=${successRate.last}, requiredSuccessRate=$requiredSuccessRate)"
 
     /**
      * Returns the Ema stamp corresponding this request.
@@ -196,29 +218,29 @@ object FailureAccrualPolicy {
    * @param window window over which the success rate is tracked. `window` requests
    * must occur for `markDeadOnFailure()` to ever return Some(Duration)
    *
-   * @param markDeadFor stream of durations to use for the next duration
+   * @param markDeadFor a policy encoded [[Backoff]] to calculate the next duration
    * returned from `markDeadOnFailure()`
    */
   def successRate(
     requiredSuccessRate: Double,
     window: Int,
-    markDeadFor: Stream[Duration]
+    markDeadFor: Backoff
   ): FailureAccrualPolicy = {
     new SuccessRateFailureAccrualPolicy(requiredSuccessRate, window, markDeadFor) {
       private[this] var totalRequests = 0L
 
-      override protected def emaStamp: Long = {
+      protected def emaStamp: Long = {
         totalRequests += 1
         totalRequests
       }
 
-      override protected def resetEmaCounter(): Unit = {
+      protected def resetEmaCounter(): Unit = {
         totalRequests = 0
       }
 
       // Since this FailureAccrualPolicy is based on number of requests, there are always sufficient
       // requests
-      override protected def sufficientRequests: Boolean = true
+      protected def sufficientRequests: Boolean = true
     }
   }
 
@@ -235,11 +257,11 @@ object FailureAccrualPolicy {
    *
    * @param requiredSuccessRate successRate that must be met
    *
-   * @param window window over which the success rate is tracked.
-   * `markDeadOnFailure()` will return None, until we get requests for a duration
-   * of at least `window`.
+   * @param window duration over which the success rate is tracked.
+   * `markDeadOnFailure()` will return None, until we get at least `minRequestThreshold`
+   *  requests within a `window` duration.
    *
-   * @param markDeadFor stream of durations to use for the next duration
+   * @param markDeadFor a policy encoded [[Backoff]] to calculate the next duration
    * returned from `markDeadOnFailure()`
    *
    * @param minRequestThreshold minimum number of requests in the past `window`
@@ -248,8 +270,25 @@ object FailureAccrualPolicy {
   def successRateWithinDuration(
     requiredSuccessRate: Double,
     window: Duration,
-    markDeadFor: Stream[Duration],
+    markDeadFor: Backoff,
     minRequestThreshold: Int
+  ): FailureAccrualPolicy =
+    successRateWithinDuration(
+      requiredSuccessRate,
+      window,
+      markDeadFor,
+      minRequestThreshold,
+      Stopwatch.systemMillis)
+
+  /**
+   * Package protected for testing.
+   */
+  private[liveness] def successRateWithinDuration(
+    requiredSuccessRate: Double,
+    window: Duration,
+    markDeadFor: Backoff,
+    minRequestThreshold: Int,
+    nowMillis: () => Long
   ): FailureAccrualPolicy = {
     assert(window.isFinite, s"window must be finite: $window")
 
@@ -260,17 +299,17 @@ object FailureAccrualPolicy {
       private[this] val requestCounter: WindowedAdder =
         WindowedAdder(window.inMilliseconds, 5, Stopwatch.systemMillis)
 
-      override protected def sufficientRequests: Boolean = requestCounter.sum >= minRequestThreshold
+      protected def sufficientRequests: Boolean = requestCounter.sum >= minRequestThreshold
 
-      // Time elapsed since this instance was built, or since the endpoint was revived.
-      private[this] var timeElapsed: Stopwatch.Elapsed = Stopwatch.start()
+      // when the instance was built or the endpoint was revived.
+      private[this] var startMillis: Long = nowMillis()
 
-      override protected def emaStamp: Long = {
-        timeElapsed.apply().inMilliseconds
+      protected def emaStamp: Long = {
+        nowMillis() - startMillis
       }
 
-      override protected def resetEmaCounter(): Unit = {
-        timeElapsed = Stopwatch.start()
+      protected def resetEmaCounter(): Unit = {
+        startMillis = nowMillis()
         requestCounter.reset()
       }
 
@@ -304,19 +343,20 @@ object FailureAccrualPolicy {
    * `markDeadOnFailure()` will return None, until we get requests for a duration
    * of at least `window`.
    *
-   * @param markDeadFor stream of durations to use for the next duration
+   * @param markDeadFor a policy encoded [[Backoff]] to calculate the next duration
    * returned from `markDeadOnFailure()`
    */
   def successRateWithinDuration(
     requiredSuccessRate: Double,
     window: Duration,
-    markDeadFor: Stream[Duration]
+    markDeadFor: Backoff
   ): FailureAccrualPolicy =
     successRateWithinDuration(
       requiredSuccessRate,
       window,
       markDeadFor,
-      DefaultMinimumRequestThreshold)
+      DefaultMinimumRequestThreshold
+    )
 
   /**
    * A policy based on a maximum number of consecutive failures. If `numFailures`
@@ -325,43 +365,45 @@ object FailureAccrualPolicy {
    *
    * @param numFailures number of consecutive failures
    *
-   * @param markDeadFor stream of durations to use for the next duration
+   * @param markDeadFor a policy encoded [[Backoff]] to calculate the next duration
    * returned from `markDeadOnFailure()`
    */
-  def consecutiveFailures(
-    numFailures: Int,
-    markDeadFor: Stream[Duration]
-  ): FailureAccrualPolicy = new FailureAccrualPolicy {
+  def consecutiveFailures(numFailures: Int, markDeadFor: Backoff): FailureAccrualPolicy =
+    new FailureAccrualPolicy {
+      val name = "ConsecutiveFailureAccrualPolicy"
 
-    // Pad the back of the stream to mark dead for a constant amount (300 seconds)
-    // when the stream runs out.
-    private[this] val freshMarkDeadFor = markDeadFor ++ constantBackoff
+      // Pad the back of the stream to mark dead for a constant amount (300 seconds)
+      // when the Backoff runs out.
+      private[this] val freshMarkDeadFor = markDeadFor.concat(constantBackoff)
 
-    // The head of `nextMarkDeadFor` is the next duration that will be returned
-    // from `markDeadOnFailure()` if the required success rate is not met.
-    // The tail is the remainder of the durations.
-    private[this] var nextMarkDeadFor = freshMarkDeadFor
+      // The head of `nextMarkDeadFor` is the next duration that will be returned
+      // from `markDeadOnFailure()` if the required success rate is not met.
+      // The tail is the remainder of the durations.
+      private[this] var nextMarkDeadFor = freshMarkDeadFor
 
-    private[this] var consecutiveFailures = 0L
+      private[this] var consecutiveFailures = 0L
 
-    def recordSuccess(): Unit = synchronized {
-      consecutiveFailures = 0
-    }
-
-    def markDeadOnFailure(): Option[Duration] = synchronized {
-      consecutiveFailures += 1
-      if (consecutiveFailures >= numFailures) {
-        val duration = nextMarkDeadFor.head
-        nextMarkDeadFor = nextMarkDeadFor.tail
-        Some(duration)
-      } else {
-        None
+      def recordSuccess(): Unit = synchronized {
+        consecutiveFailures = 0
       }
-    }
 
-    def revived(): Unit = synchronized {
-      consecutiveFailures = 0
-      nextMarkDeadFor = freshMarkDeadFor
+      def markDeadOnFailure(): Option[Duration] = synchronized {
+        consecutiveFailures += 1
+        if (consecutiveFailures >= numFailures) {
+          val duration = nextMarkDeadFor.duration
+          nextMarkDeadFor = nextMarkDeadFor.next
+          Some(duration)
+        } else {
+          None
+        }
+      }
+
+      def revived(): Unit = synchronized {
+        consecutiveFailures = 0
+        nextMarkDeadFor = freshMarkDeadFor
+      }
+
+      def show(): String =
+        s"$name(consecutiveFailures=$consecutiveFailures, consecutiveFailuresThreshold=$numFailures)"
     }
-  }
 }

@@ -6,8 +6,7 @@ import com.twitter.finagle.transport.Transport
 import com.twitter.util.{Future, Promise, Return, Time}
 import io.netty.{channel => nettyChan}
 import java.net.SocketAddress
-import java.security.cert.Certificate
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import scala.util.control.NoStackTrace
 
 /**
@@ -24,12 +23,16 @@ import scala.util.control.NoStackTrace
 private[finagle] class ChannelTransport(
   ch: nettyChan.Channel,
   readQueue: AsyncQueue[Any] = new AsyncQueue[Any],
-  omitStackTraceOnInactive: Boolean = false
-) extends Transport[Any, Any] {
+  omitStackTraceOnInactive: Boolean = false)
+    extends Transport[Any, Any] {
 
   type Context = ChannelTransportContext
 
   import ChannelTransport._
+
+  // Accessible for testing
+  private[transport] val closed = new Promise[Throwable]
+  private[transport] val failed = new AtomicBoolean(false)
 
   private[this] val readInterruptHandler: PartialFunction[Throwable, Unit] = {
     case e =>
@@ -72,7 +75,7 @@ private[finagle] class ChannelTransport(
   }
 
   private[this] def fail(exc: Throwable): Unit = {
-    if (!context.failed.compareAndSet(false, true))
+    if (!failed.compareAndSet(false, true))
       return
 
     // We do have to fail the queue before fail exits, otherwise control is
@@ -87,7 +90,7 @@ private[finagle] class ChannelTransport(
     // returned to netty potentially allowing subsequent offers to the queue,
     // which should be illegal after failure.
     close()
-    context.closed.updateIfEmpty(Return(exc))
+    closed.updateIfEmpty(Return(exc))
   }
 
   def write(msg: Any): Future[Unit] = {
@@ -98,7 +101,7 @@ private[finagle] class ChannelTransport(
       def operationComplete(f: nettyChan.ChannelFuture): Unit =
         if (f.isSuccess) p.setDone()
         else {
-          p.setException(ChannelException(f.cause, remoteAddress))
+          p.setException(ChannelException(f.cause, context.remoteAddress))
         }
     })
 
@@ -129,15 +132,18 @@ private[finagle] class ChannelTransport(
     p
   }
 
-  def status: Status = context.status
-  def onClose: Future[Throwable] = context.onClose
-  def localAddress: SocketAddress = context.localAddress
-  def remoteAddress: SocketAddress = context.remoteAddress
-  def peerCertificate: Option[Certificate] = context.peerCertificate
+  def status: Status =
+    if (failed.get || !ch.isOpen) Status.Closed
+    else Status.Open
 
-  def close(deadline: Time): Future[Unit] = context.close(deadline)
+  def onClose: Future[Throwable] = closed
 
-  override def toString = s"Transport<channel=$ch, onClose=${context.closed}>"
+  def close(deadline: Time): Future[Unit] = {
+    if (ch.isOpen) ch.close()
+    closed.unit
+  }
+
+  override def toString = s"Transport<channel=$ch, onClose=${closed}>"
 
   ch.pipeline.addLast(
     HandlerName,
@@ -165,14 +171,13 @@ private[finagle] class ChannelTransport(
       }
 
       override def channelInactive(ctx: nettyChan.ChannelHandlerContext): Unit = {
-        context.alreadyClosed.set(true)
         if (omitStackTraceOnInactive) {
-          fail(new ChannelClosedException(remoteAddress) with NoStackTrace)
-        } else fail(new ChannelClosedException(remoteAddress))
+          fail(new NoStackTraceChannelClosedException(context.remoteAddress))
+        } else fail(new ChannelClosedException(context.remoteAddress))
       }
 
       override def exceptionCaught(ctx: nettyChan.ChannelHandlerContext, e: Throwable): Unit = {
-        fail(ChannelException(e, remoteAddress))
+        fail(ChannelException(e, context.remoteAddress))
       }
     }
   )
@@ -182,4 +187,8 @@ private[finagle] class ChannelTransport(
 
 private[finagle] object ChannelTransport {
   val HandlerName: String = "finagleChannelTransport"
+
+  private class NoStackTraceChannelClosedException(remoteAddress: SocketAddress)
+      extends ChannelClosedException(remoteAddress)
+      with NoStackTrace
 }

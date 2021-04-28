@@ -5,7 +5,7 @@
 # you may not use this work except in compliance with the License.
 # You may obtain a copy of the License in the LICENSE file, or at:
 #
-#  http://www.apache.org/licenses/LICENSE-2.0
+#  https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,14 +14,23 @@
 # limitations under the License.
 # ==================================================================================================
 
-java_thrift_library(
-    name = "thrift-java",
-    sources = globs("com/twitter/thrift/endpoint.thrift"),
-    compiler = "scrooge",
-    language = "java",
-    provides = artifact(
-        org = "com.twitter.thrift",
-        name = "finagle-serversets-thrift",
-        repo = artifactory,
-    ),
+create_thrift_libraries(
+    base_name = "thrift",
+    sources = ["com/twitter/thrift/endpoint.thrift"],
+    generate_languages = [
+        "java",
+        "scala",
+    ],
+    provides_java_name = "finagle-serversets-thrift-java",
+)
+
+python_thrift_library(
+    name = "thrift-python",
+    sources = ["com/twitter/thrift/endpoint.thrift"],
+)
+
+python_thrift_library(
+    name = "py-thrift",
+    sources = ["com/twitter/thrift/endpoint.thrift"],
+    compatibility = ["CPython>=2.7,<4"],
 )

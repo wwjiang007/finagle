@@ -12,12 +12,12 @@ import org.scalatest.FunSuite
 class FragmentingMessageWriterTest extends FunSuite {
 
   private class PendingStreamStatsReceiver extends InMemoryStatsReceiver {
-    def pendingStreamCount: Int = gauges(Seq("pending_write_streams"))().toInt
-    def writes: Seq[Int] = stats(Seq("write_stream_bytes")).map(_.toInt)
+    def pendingStreamCount: Int = gauges(Seq("mux", "framer", "pending_write_streams"))().toInt
+    def writes: Seq[Int] = stats(Seq("mux", "framer", "write_stream_bytes")).map(_.toInt)
   }
 
   private val Tag = 2
-  private val Data = Buf.ByteArray((0 until 1024).map(_.toByte):_*)
+  private val Data = Buf.ByteArray((0 until 1024).map(_.toByte): _*)
 
   private def concat(msgs: Iterable[Buf]): Buf = msgs.foldLeft(Buf.Empty)(_.concat(_))
 
@@ -50,7 +50,8 @@ class FragmentingMessageWriterTest extends FunSuite {
 
     val handle.SendOne(data2, _) = handle.pendingWrites.dequeue()
 
-    val fullMessage = data2.slice(0, 4).concat(data1.slice(4, Int.MaxValue)).concat(data2.slice(4, Int.MaxValue))
+    val fullMessage =
+      data2.slice(0, 4).concat(data1.slice(4, Int.MaxValue)).concat(data2.slice(4, Int.MaxValue))
 
     assert(Message.decode(fullMessage) == msg)
   }

@@ -11,7 +11,54 @@ private object TraceInfo {
     while (iter.hasNext) headers -= iter.next()
   }
 
+  def convertB3Trace(request: Request) =
+    if (request.headerMap.contains(Header.TraceContext)) {
+      def handleSampled(headers: HeaderMap, value: String): Unit =
+        value match {
+          case "0" => headers.set(Header.Flags, "0")
+          case "d" => headers.set(Header.Flags, "1")
+          case "1" => headers.set(Header.Sampled, "1")
+          case _ => ()
+        }
+      def handleTraceAndSpanIds(headers: HeaderMap, a: String, b: String): Unit = {
+        headers.set(Header.TraceId, a)
+        headers.set(Header.SpanId, b)
+      }
+
+      val _ = request.headerMap.get(Header.TraceContext).map(_.split("-").toList) match {
+        case Some(a) =>
+          val headers = request.headerMap
+          a.size match {
+            case 0 =>
+              // bogus
+              ()
+            case 1 =>
+              // either debug flag or sampled
+              handleSampled(headers, a(0))
+            case 2 =>
+              // this is required to be traceId, spanId
+              handleTraceAndSpanIds(headers, a(0), a(1))
+            case 3 =>
+              handleTraceAndSpanIds(headers, a(0), a(1))
+              handleSampled(headers, a(2))
+            case 4 =>
+              handleTraceAndSpanIds(headers, a(0), a(1))
+              handleSampled(headers, a(2))
+              headers.set(Header.ParentSpanId, a(3))
+          }
+        case None =>
+          ()
+      }
+      request.headerMap -= "b3"
+    }
+
   def letTraceIdFromRequestHeaders[R](request: Request)(f: => R): R = {
+    // rather than rewrite all this to handle reading and writing the
+    // new b3 trace header format this code sets up the request to
+    // allow the existing code to consume, but not produce, b3 header
+    // traces.
+    convertB3Trace(request)
+
     val id =
       if (Header.hasAllRequired(request.headerMap)) {
         val spanId = SpanId.fromString(request.headerMap(Header.SpanId))
@@ -54,11 +101,9 @@ private object TraceInfo {
     id match {
       case Some(tid) =>
         Trace.letId(tid) {
-          traceRpc(request)
           f
         }
       case None =>
-        traceRpc(request)
         f
     }
   }
@@ -72,31 +117,22 @@ private object TraceInfo {
     } else {
       traceId.traceIdHigh.get.toString + traceId.traceId.toString
     }
-    request.headerMap.add(Header.TraceId, traceIdString)
-    request.headerMap.add(Header.SpanId, traceId.spanId.toString)
+    request.headerMap.addUnsafe(Header.TraceId, traceIdString)
+    request.headerMap.addUnsafe(Header.SpanId, traceId.spanId.toString)
     // no parent id set means this is the root span
     traceId._parentId match {
       case Some(id) =>
-        request.headerMap.add(Header.ParentSpanId, id.toString)
+        request.headerMap.addUnsafe(Header.ParentSpanId, id.toString)
       case None => ()
     }
     // three states of sampled, yes, no or none (let the server decide)
     traceId.sampled match {
       case Some(sampled) =>
-        request.headerMap.add(Header.Sampled, sampled.toString)
+        request.headerMap.addUnsafe(Header.Sampled, sampled.toString)
       case None => ()
     }
     if (traceId.flags.toLong != 0L) {
-      request.headerMap.add(Header.Flags, JLong.toString(traceId.flags.toLong))
-    }
-    traceRpc(request)
-  }
-
-  def traceRpc(request: Request): Unit = {
-    val trace = Trace()
-    if (trace.isActivelyTracing) {
-      trace.recordRpc(request.method.toString)
-      trace.recordBinary("http.uri", stripParameters(request.uri))
+      request.headerMap.addUnsafe(Header.Flags, JLong.toString(traceId.flags.toLong))
     }
   }
 

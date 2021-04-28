@@ -3,11 +3,8 @@ package com.twitter.finagle.redis.protocol
 import com.twitter.finagle.redis.RedisRequestTest
 import com.twitter.finagle.redis.tags.CodecTest
 import com.twitter.io.Buf
-import org.junit.runner.RunWith
 import org.scalacheck.Gen
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 final class SortedSetCodecSuite extends RedisRequestTest {
 
   test("ZADD", CodecTest) {
@@ -89,5 +86,13 @@ final class SortedSetCodecSuite extends RedisRequestTest {
       "ZREMRANGEBYRANK",
       (k: Buf, a: Long, b: Long) => ZRemRangeByRank(k, a, b)
     )
+  }
+
+  test("ZPOPMIN", CodecTest) {
+    checkSingleKeyOptionCount("ZPOPMIN", ZPopMin.apply)
+  }
+
+  test("ZPOPMAX", CodecTest) {
+    checkSingleKeyOptionCount("ZPOPMAX", ZPopMax.apply)
   }
 }

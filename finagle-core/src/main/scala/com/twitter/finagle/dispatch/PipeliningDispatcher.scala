@@ -1,7 +1,7 @@
 package com.twitter.finagle.dispatch
 
 import com.twitter.concurrent.AsyncQueue
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{Failure, FailureFlags, Stack}
 import com.twitter.finagle.stats.StatsReceiver
 import com.twitter.finagle.transport.Transport
@@ -29,8 +29,8 @@ abstract class GenPipeliningDispatcher[Req, Rep, In, Out, T](
   trans: Transport[In, Out],
   statsReceiver: StatsReceiver,
   stallTimeout: Duration,
-  timer: Timer
-) extends GenSerialClientDispatcher[Req, Rep, In, Out](trans, statsReceiver) { self =>
+  timer: Timer)
+    extends GenSerialClientDispatcher[Req, Rep, In, Out](trans, statsReceiver) { self =>
   import GenPipeliningDispatcher._
 
   // thread-safety provided by synchronization on this
@@ -80,9 +80,7 @@ abstract class GenPipeliningDispatcher[Req, Rep, In, Out, T](
   // Dispatch serialization is guaranteed by GenSerialClientDispatcher so we
   // leverage that property to sequence `q` offers.
   protected def dispatch(req: Req, p: Promise[Rep]): Future[Unit] =
-    pipeline(req, p).flatMap { toQueue =>
-      q.offer(Pending(toQueue, p)); Future.Done
-    }
+    pipeline(req, p).flatMap { toQueue => q.offer(Pending(toQueue, p)); Future.Done }
 
   override def apply(req: Req): Future[Rep] = {
     val f = super.apply(req)
@@ -98,7 +96,7 @@ abstract class GenPipeliningDispatcher[Req, Rep, In, Out, T](
               // we check stalled so that we log exactly once per failed pipeline
               if (!stalled) {
                 stalled = true
-                val addr = trans.remoteAddress
+                val addr = trans.context.remoteAddress
                 GenPipeliningDispatcher.log.warning(
                   s"pipelined connection stalled with ${q.size} items, talking to $addr"
                 )
@@ -117,7 +115,10 @@ object GenPipeliningDispatcher {
   private case class Pending[T, Rep](value: T, promise: Promise[Rep])
 
   private def stalledPipelineException(timeout: Duration) =
-    Failure(s"The connection pipeline could not make progress in $timeout", FailureFlags.Interrupted)
+    Failure(
+      s"The connection pipeline could not make progress in $timeout",
+      FailureFlags.Interrupted
+    )
 
   object Timeout {
     def unapply(t: Throwable): Option[Throwable] = t match {
@@ -145,8 +146,8 @@ class PipeliningDispatcher[Req, Rep](
   trans: Transport[Req, Rep],
   statsReceiver: StatsReceiver,
   stallTimeout: Duration,
-  timer: Timer
-) extends GenPipeliningDispatcher[Req, Rep, Req, Rep, Unit](
+  timer: Timer)
+    extends GenPipeliningDispatcher[Req, Rep, Req, Rep, Unit](
       trans,
       statsReceiver,
       stallTimeout,

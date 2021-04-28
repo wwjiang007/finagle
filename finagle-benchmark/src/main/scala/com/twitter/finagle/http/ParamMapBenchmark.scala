@@ -4,7 +4,6 @@ import com.twitter.finagle.benchmark.StdBenchAnnotations
 import io.netty.handler.codec.http.QueryStringEncoder
 import java.nio.charset.Charset
 import java.util.{List => JList, Map => JMap}
-import org.jboss.netty.handler.codec.http.QueryStringDecoder
 import org.openjdk.jmh.annotations._
 
 @State(Scope.Benchmark)
@@ -20,9 +19,8 @@ class ParamMapBenchmark extends StdBenchAnnotations {
 
   @Setup
   def prepare(): Unit = {
-    queryString = (0 until size).map { i =>
-      s"key$i=value$i"
-    }.mkString("?", "&", "")
+    queryString = (0 until size)
+      .map { i => s"key$i=value$i" }.mkString("?", "&", "")
 
     params = (0 until size).map { i =>
       // TODO: this is a bit of a cheat since we fastpath values without a space in the new impl
@@ -36,11 +34,6 @@ class ParamMapBenchmark extends StdBenchAnnotations {
   }
 
   @Benchmark
-  def nettyQueryStringDecoder(): JMap[String, JList[String]] = {
-    new QueryStringDecoder(queryString).getParameters
-  }
-
-  @Benchmark
   def queryParamEncoder(): String = {
     QueryParamEncoder.encode(params)
   }
@@ -49,8 +42,9 @@ class ParamMapBenchmark extends StdBenchAnnotations {
   def nettyQueryParamEncoder(): String = {
     // copy of the old Netty based implementation
     val encoder = new QueryStringEncoder("", Charset.forName("utf-8"))
-    params.foreach { case (k, v) =>
-      encoder.addParam(k, v)
+    params.foreach {
+      case (k, v) =>
+        encoder.addParam(k, v)
     }
 
     encoder.toString

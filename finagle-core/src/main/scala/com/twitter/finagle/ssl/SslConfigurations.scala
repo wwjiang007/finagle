@@ -2,9 +2,19 @@ package com.twitter.finagle.ssl
 
 import com.twitter.util.security.{Pkcs8KeyManagerFactory, X509TrustManagerFactory}
 import com.twitter.util.{Return, Throw}
+import java.io.File
 import javax.net.ssl.{KeyManager, SSLContext, SSLEngine, TrustManager}
 
 private[ssl] object SslConfigurations {
+
+  private def filesToKeyManagers(certsFile: File, keyFile: File): Array[KeyManager] = {
+    val factory = new Pkcs8KeyManagerFactory(certsFile, keyFile)
+    val tryKms = factory.getKeyManagers()
+    tryKms match {
+      case Return(kms) => kms
+      case Throw(ex) => throw SslConfigurationException(ex)
+    }
+  }
 
   /**
    * Creates an optional array of `javax.net.ssl.KeyManager` based on the [[KeyCredentials]]
@@ -22,12 +32,9 @@ private[ssl] object SslConfigurations {
     keyCredentials match {
       case KeyCredentials.Unspecified => None
       case KeyCredentials.CertAndKey(certFile, keyFile) =>
-        val factory = new Pkcs8KeyManagerFactory(certFile, keyFile)
-        val tryKms = factory.getKeyManagers()
-        tryKms match {
-          case Return(kms) => Some(kms)
-          case Throw(ex) => throw SslConfigurationException(ex)
-        }
+        Some(filesToKeyManagers(certFile, keyFile))
+      case KeyCredentials.CertsAndKey(certsFile, keyFile) =>
+        Some(filesToKeyManagers(certsFile, keyFile))
       case _: KeyCredentials.CertKeyAndChain =>
         throw SslConfigurationException.notSupported(
           "KeyCredentials.CertKeyAndChain",
@@ -56,6 +63,12 @@ private[ssl] object SslConfigurations {
       case TrustCredentials.CertCollection(file) =>
         val factory = new X509TrustManagerFactory(file)
         val tryTms = factory.getTrustManagers()
+        tryTms match {
+          case Return(tms) => Some(tms)
+          case Throw(ex) => throw SslConfigurationException(ex)
+        }
+      case TrustCredentials.X509Certificates(x509Certs) =>
+        val tryTms = X509TrustManagerFactory.buildTrustManager(x509Certs)
         tryTms match {
           case Return(tms) => Some(tms)
           case Throw(ex) => throw SslConfigurationException(ex)
@@ -95,10 +108,7 @@ private[ssl] object SslConfigurations {
    * Sets the enabled cipher suites of the supplied
    * `javax.net.ssl.SSLEngine`.
    */
-  def configureCipherSuites(
-    sslEngine: SSLEngine,
-    cipherSuites: CipherSuites
-  ): Unit =
+  def configureCipherSuites(sslEngine: SSLEngine, cipherSuites: CipherSuites): Unit =
     cipherSuites match {
       case CipherSuites.Unspecified => // Do Nothing
       case CipherSuites.Enabled(ciphers) =>
@@ -109,10 +119,7 @@ private[ssl] object SslConfigurations {
    * Sets the enabled protocols of the supplied
    * `javax.net.ssl.SSLEngine`.
    */
-  def configureProtocols(
-    sslEngine: SSLEngine,
-    protocols: Protocols
-  ): Unit =
+  def configureProtocols(sslEngine: SSLEngine, protocols: Protocols): Unit =
     protocols match {
       case Protocols.Unspecified => // Do Nothing
       case Protocols.Enabled(protocols) =>
@@ -127,16 +134,14 @@ private[ssl] object SslConfigurations {
    * https://docs.oracle.com/javase/7/docs/technotes/guides/security/StandardNames.html
    * for more details.
    */
-  def configureHostnameVerification(
-    sslEngine: SSLEngine,
-    hostname: Option[String]
-  ): Unit = hostname match {
-    case Some(_) =>
-      val sslParameters = sslEngine.getSSLParameters()
-      sslParameters.setEndpointIdentificationAlgorithm("HTTPS")
-      sslEngine.setSSLParameters(sslParameters)
-    case None => // do nothing
-  }
+  def configureHostnameVerification(sslEngine: SSLEngine, hostname: Option[String]): Unit =
+    hostname match {
+      case Some(_) =>
+        val sslParameters = sslEngine.getSSLParameters()
+        sslParameters.setEndpointIdentificationAlgorithm("HTTPS")
+        sslEngine.setSSLParameters(sslParameters)
+      case None => // do nothing
+    }
 
   /**
    * Guard method for failing fast inside of a factory's apply method when
@@ -150,6 +155,11 @@ private[ssl] object SslConfigurations {
       case KeyCredentials.Unspecified => // Do Nothing
       case KeyCredentials.CertAndKey(_, _) =>
         throw SslConfigurationException.notSupported("KeyCredentials.CertAndKey", engineFactoryName)
+      case KeyCredentials.CertsAndKey(_, _) =>
+        throw SslConfigurationException.notSupported(
+          "KeyCredentials.CertsAndKey",
+          engineFactoryName
+        )
       case KeyCredentials.CertKeyAndChain(_, _, _) =>
         throw SslConfigurationException.notSupported(
           "KeyCredentials.CertKeyAndChain",
@@ -179,18 +189,23 @@ private[ssl] object SslConfigurations {
           "TrustCredentials.CertCollection",
           engineFactoryName
         )
+      case TrustCredentials.X509Certificates(_) =>
+        throw SslConfigurationException.notSupported(
+          "TrustCredentials.X509Certificates",
+          engineFactoryName
+        )
       case TrustCredentials.TrustManagerFactory(_) =>
-        throw SslConfigurationException.notSupported("TrustCredentials.TrustManagerFactory", engineFactoryName)
+        throw SslConfigurationException.notSupported(
+          "TrustCredentials.TrustManagerFactory",
+          engineFactoryName
+        )
     }
 
   /**
    * Guard method for failing fast inside of a factory's apply method when
    * [[Protocols]] are not supported.
    */
-  def checkProtocolsNotSupported(
-    engineFactoryName: String,
-    protocols: Protocols
-  ): Unit =
+  def checkProtocolsNotSupported(engineFactoryName: String, protocols: Protocols): Unit =
     protocols match {
       case Protocols.Unspecified => // Do Nothing
       case Protocols.Enabled(_) =>
@@ -215,13 +230,10 @@ private[ssl] object SslConfigurations {
     }
 
   /**
-   * Guart method for failing fast inside of a server factory's apply method when
+   * Guard method for failing fast inside of a server factory's apply method when
    * [[ClientAuth]] is not supported.
    */
-  def checkClientAuthNotSupported(
-    engineFactoryName: String,
-    clientAuth: ClientAuth
-  ): Unit =
+  def checkClientAuthNotSupported(engineFactoryName: String, clientAuth: ClientAuth): Unit =
     clientAuth match {
       case ClientAuth.Unspecified => // Do Nothing
       case ClientAuth.Off =>

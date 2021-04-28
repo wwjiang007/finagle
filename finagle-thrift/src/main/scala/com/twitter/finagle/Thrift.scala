@@ -2,7 +2,8 @@ package com.twitter.finagle
 
 import com.twitter.finagle.client.{ClientRegistry, StackClient, StdStackClient, Transporter}
 import com.twitter.finagle.context.Contexts
-import com.twitter.finagle.dispatch.GenSerialClientDispatcher
+import com.twitter.finagle.dispatch.ClientDispatcher
+import com.twitter.finagle.naming.BindingFactory
 import com.twitter.finagle.param.{
   ExceptionStatsHandler => _,
   Monitor => _,
@@ -13,18 +14,26 @@ import com.twitter.finagle.param.{
 import com.twitter.finagle.server.{Listener, StackServer, StdStackServer}
 import com.twitter.finagle.service.{ResponseClassifier, RetryBudget}
 import com.twitter.finagle.stats.{ExceptionStatsHandler, StatsReceiver}
-import com.twitter.finagle.thrift.{ClientId => _, _}
+import com.twitter.finagle.thrift.exp.partitioning.ThriftPartitioningService.ReqRepMarshallable
+import com.twitter.finagle.thrift.exp.partitioning.{
+  PartitioningParams,
+  ThriftPartitioningService,
+  WithThriftPartitioningStrategy
+}
 import com.twitter.finagle.thrift.service.ThriftResponseClassifier
 import com.twitter.finagle.thrift.transport.ThriftClientPreparer
 import com.twitter.finagle.thrift.transport.netty4.Netty4Transport
+import com.twitter.finagle.thrift.{ClientId => FinagleClientId, _}
 import com.twitter.finagle.tracing.Tracer
 import com.twitter.finagle.transport.{Transport, TransportContext}
-import com.twitter.util.{Closable, Duration, Future, Monitor}
+import com.twitter.scrooge.TReusableBuffer
+import com.twitter.util.{Closable, Duration, Future, FuturePool, Monitor}
 import java.net.SocketAddress
+import java.util.concurrent.ExecutorService
 import org.apache.thrift.protocol.TProtocolFactory
 
 /**
- * Client and server for [[http://thrift.apache.org Apache Thrift]].
+ * Client and server for [[https://thrift.apache.org Apache Thrift]].
  * `Thrift` implements Thrift framed transport and binary protocol by
  * default, though custom protocol factories (i.e. wire encoding) may
  * be injected with `withProtocolFactory`. The client,
@@ -49,7 +58,7 @@ import org.apache.thrift.protocol.TProtocolFactory
  * to the request, and every subsequent request is dispatched with an
  * envelope carrying trace metadata. The envelope itself is also a
  * Thrift struct described
- * [[https://github.com/twitter/finagle/blob/master/finagle-thrift/src/main/thrift/tracing.thrift
+ * [[https://github.com/twitter/finagle/blob/release/finagle-thrift/src/main/thrift/tracing.thrift
  * here]].
  *
  * == Clients ==
@@ -103,7 +112,7 @@ import org.apache.thrift.protocol.TProtocolFactory
  * finagle server (or any other supporting this extension), we reply
  * to the request, and every subsequent request is dispatched with an
  * envelope carrying trace metadata. The envelope itself is also a
- * Thrift struct described [[https://github.com/twitter/finagle/blob/master/finagle-thrift/src/main/thrift/tracing.thrift here]].
+ * Thrift struct described [[https://github.com/twitter/finagle/blob/release/finagle-thrift/src/main/thrift/tracing.thrift here]].
  *
  * == Servers ==
  *
@@ -137,7 +146,7 @@ object Thrift
 
     val maxThriftBufferSize: Int = 16 * 1024
 
-    case class ClientId(clientId: Option[thrift.ClientId])
+    case class ClientId(clientId: Option[FinagleClientId])
     implicit object ClientId extends Stack.Param[ClientId] {
       val default = ClientId(None)
     }
@@ -183,6 +192,16 @@ object Thrift
     }
 
     /**
+     * A `Param` that sets a factory to create a TReusableBuffer, the TReusableBuffer can be
+     * shared with other client instances.
+     * If this is set, MaxReusableBufferSize will be ignored.
+     */
+    case class TReusableBufferFactory(tReusableBufferFactory: () => TReusableBuffer)
+    implicit object TReusableBufferFactory extends Stack.Param[TReusableBufferFactory] {
+      val default = TReusableBufferFactory(RichClientParam.NO_THRIFT_REUSABLE_BUFFER_FACTORY)
+    }
+
+    /**
      * A `Param` to control whether to record per-endpoint stats.
      * If this is set to true, per-endpoint stats will be counted.
      *
@@ -191,6 +210,11 @@ object Thrift
     case class PerEndpointStats(enabled: Boolean)
     implicit object PerEndpointStats extends Stack.Param[PerEndpointStats] {
       val default = PerEndpointStats(false)
+    }
+
+    private[finagle] final case class ServiceClass(clazz: Option[Class[_ <: AnyRef]])
+    private[finagle] implicit object ServiceName extends Stack.Param[ServiceClass] {
+      val default = ServiceClass(None)
     }
   }
 
@@ -213,9 +237,23 @@ object Thrift
       }
 
     // We must do 'preparation' this way in order to let Finagle set up tracing & so on.
-    private val stack: Stack[ServiceFactory[ThriftClientRequest, Array[Byte]]] =
+    private val stack: Stack[ServiceFactory[ThriftClientRequest, Array[Byte]]] = {
+
+      /** Thrift helper for message marshalling */
+      object ThriftMarshallable extends ReqRepMarshallable[ThriftClientRequest, Array[Byte]] {
+        def framePartitionedRequest(
+          rawRequest: ThriftClientRequest,
+          original: ThriftClientRequest
+        ): ThriftClientRequest = rawRequest
+        def isOneway(original: ThriftClientRequest): Boolean = original.oneway
+        def fromResponseToBytes(rep: Array[Byte]): Array[Byte] = rep
+        val emptyResponse: Array[Byte] = Array.emptyByteArray
+      }
+
       StackClient.newStack
         .replace(StackClient.Role.prepConn, preparer)
+        .insertAfter(BindingFactory.role, ThriftPartitioningService.module(ThriftMarshallable))
+    }
 
     private val params: Stack.Params = StackClient.defaultParams +
       ProtocolLibrary("thrift")
@@ -230,10 +268,11 @@ object Thrift
    */
   case class Client(
     stack: Stack[ServiceFactory[ThriftClientRequest, Array[Byte]]] = Client.stack,
-    params: Stack.Params = Client.params
-  ) extends StdStackClient[ThriftClientRequest, Array[Byte], Client]
+    params: Stack.Params = Client.params)
+      extends StdStackClient[ThriftClientRequest, Array[Byte], Client]
       with WithSessionPool[Client]
       with WithDefaultLoadBalancer[Client]
+      with WithThriftPartitioningStrategy[Client]
       with ThriftRichClient {
 
     protected def copy1(
@@ -243,7 +282,9 @@ object Thrift
 
     protected val clientParam: RichClientParam = RichClientParam(
       protocolFactory = params[param.ProtocolFactory].protocolFactory,
-      maxThriftBufferSize = params[param.MaxReusableBufferSize].maxReusableBufferSize,
+      maxThriftBufferSize = params[Thrift.param.MaxReusableBufferSize].maxReusableBufferSize,
+      thriftReusableBufferFactory =
+        params[Thrift.param.TReusableBufferFactory].tReusableBufferFactory,
       clientStats = params[Stats].statsReceiver,
       responseClassifier = params[com.twitter.finagle.param.ResponseClassifier].responseClassifier,
       perEndpointStats = params[Thrift.param.PerEndpointStats].enabled
@@ -255,12 +296,6 @@ object Thrift
     protected type Out = Array[Byte]
     protected type Context = TransportContext
 
-    @deprecated("Use clientParam.protocolFactory", "2017-08-16")
-    protected def protocolFactory: TProtocolFactory = clientParam.protocolFactory
-
-    @deprecated("Use clientParam.clientStats", "2017-08-16")
-    override protected def stats: StatsReceiver = clientParam.clientStats
-
     protected def newTransporter(addr: SocketAddress): Transporter[In, Out, Context] =
       Netty4Transport.Client(params)(addr)
 
@@ -269,13 +304,13 @@ object Thrift
     ): Service[ThriftClientRequest, Array[Byte]] =
       new ThriftSerialClientDispatcher(
         transport,
-        params[Stats].statsReceiver.scope(GenSerialClientDispatcher.StatsScope)
+        params[Stats].statsReceiver.scope(ClientDispatcher.StatsScope)
       )
 
     def withProtocolFactory(protocolFactory: TProtocolFactory): Client =
       configured(param.ProtocolFactory(protocolFactory))
 
-    def withClientId(clientId: thrift.ClientId): Client =
+    def withClientId(clientId: FinagleClientId): Client =
       configured(Thrift.param.ClientId(Some(clientId)))
 
     /**
@@ -298,10 +333,20 @@ object Thrift
      * allocated for the next thrift response.
      * The default max size is 16Kb.
      *
+     * @note MaxReusableBufferSize will be ignored if TReusableBufferFactory is set.
+     *
      * @param size Max size of the reusable buffer for thrift responses in bytes.
      */
     def withMaxReusableBufferSize(size: Int): Client =
       configured(param.MaxReusableBufferSize(size))
+
+    /**
+     * Produce a [[com.twitter.finagle.Thrift.Client]] with a factory creates new
+     * TReusableBuffer, the TReusableBuffer can be shared with other client instance.
+     * If set, the MaxReusableBufferSize will be ignored.
+     */
+    def withTReusableBufferFactory(tReusableBufferFactory: () => TReusableBuffer): Client =
+      configured(param.TReusableBufferFactory(tReusableBufferFactory))
 
     /**
      * Produce a [[com.twitter.finagle.Thrift.Client]] with per-endpoint stats filters
@@ -309,7 +354,7 @@ object Thrift
     def withPerEndpointStats: Client =
       configured(param.PerEndpointStats(true))
 
-    def clientId: Option[thrift.ClientId] = params[Thrift.param.ClientId].clientId
+    def clientId: Option[FinagleClientId] = params[Thrift.param.ClientId].clientId
 
     private[this] def withDeserializingClassifier: Client = {
       // Note: what type of deserializer used is important if none is specified
@@ -354,6 +399,8 @@ object Thrift
       new SessionQualificationParams(this)
     override val withAdmissionControl: ClientAdmissionControlParams[Client] =
       new ClientAdmissionControlParams(this)
+    override val withPartitioning: PartitioningParams[Client] =
+      new PartitioningParams(this)
 
     override def withLabel(label: String): Client = super.withLabel(label)
     override def withStatsReceiver(statsReceiver: StatsReceiver): Client =
@@ -366,11 +413,21 @@ object Thrift
     override def withResponseClassifier(responseClassifier: ResponseClassifier): Client =
       super.withResponseClassifier(responseClassifier)
     override def withRetryBudget(budget: RetryBudget): Client = super.withRetryBudget(budget)
-    override def withRetryBackoff(backoff: Stream[Duration]): Client =
+    override def withRetryBackoff(backoff: Backoff): Client =
       super.withRetryBackoff(backoff)
 
     override def withStack(stack: Stack[ServiceFactory[ThriftClientRequest, Array[Byte]]]): Client =
       super.withStack(stack)
+    override def withStack(
+      fn: Stack[ServiceFactory[ThriftClientRequest, Array[Byte]]] => Stack[
+        ServiceFactory[ThriftClientRequest, Array[Byte]]
+      ]
+    ): Client =
+      super.withStack(fn)
+    override def withExecutionOffloaded(executor: ExecutorService): Client =
+      super.withExecutionOffloaded(executor)
+    override def withExecutionOffloaded(pool: FuturePool): Client =
+      super.withExecutionOffloaded(pool)
     override def configured[P](psp: (P, Stack.Param[P])): Client = super.configured(psp)
     override def filtered(
       filter: Filter[ThriftClientRequest, Array[Byte], ThriftClientRequest, Array[Byte]]
@@ -380,25 +437,11 @@ object Thrift
 
   def client: Thrift.Client = Client()
 
-  def newService(
-    dest: Name,
-    label: String
-  ): Service[ThriftClientRequest, Array[Byte]] =
+  def newService(dest: Name, label: String): Service[ThriftClientRequest, Array[Byte]] =
     client.newService(dest, label)
 
-  def newClient(
-    dest: Name,
-    label: String
-  ): ServiceFactory[ThriftClientRequest, Array[Byte]] =
+  def newClient(dest: Name, label: String): ServiceFactory[ThriftClientRequest, Array[Byte]] =
     client.newClient(dest, label)
-
-  @deprecated("Use `Thrift.client.withProtocolFactory`", "6.22.0")
-  def withProtocolFactory(protocolFactory: TProtocolFactory): Client =
-    client.withProtocolFactory(protocolFactory)
-
-  @deprecated("Use `Thrift.client.withClientId`", "6.22.0")
-  def withClientId(clientId: thrift.ClientId): Client =
-    client.withClientId(clientId)
 
   object Server {
     private val preparer =
@@ -458,8 +501,8 @@ object Thrift
    */
   case class Server(
     stack: Stack[ServiceFactory[Array[Byte], Array[Byte]]] = Server.stack,
-    params: Stack.Params = Server.params
-  ) extends StdStackServer[Array[Byte], Array[Byte], Server]
+    params: Stack.Params = Server.params)
+      extends StdStackServer[Array[Byte], Array[Byte], Server]
       with ThriftRichServer {
     protected def copy1(
       stack: Stack[ServiceFactory[Array[Byte], Array[Byte]]] = this.stack,
@@ -477,18 +520,6 @@ object Thrift
       responseClassifier = params[com.twitter.finagle.param.ResponseClassifier].responseClassifier,
       perEndpointStats = params[Thrift.param.PerEndpointStats].enabled
     )
-
-    @deprecated("Use serverParam.serviceName", "2017-08-16")
-    override protected def serverLabel: String = serverParam.serviceName
-
-    @deprecated("Use serverParam.serverStats", "2017-08-16")
-    override protected def serverStats: StatsReceiver = serverParam.serverStats
-
-    @deprecated("Use serverParam.protocolFactory", "2017-08-16")
-    protected def protocolFactory: TProtocolFactory = serverParam.protocolFactory
-
-    @deprecated("Use serverParam.maxThriftBufferSize", "2017-08-16")
-    override protected def maxThriftBufferSize: Int = serverParam.maxThriftBufferSize
 
     private[this] def withDeserializingClassifier: Server = {
       // Note: what type of deserializer used is important if none is specified
@@ -555,8 +586,8 @@ object Thrift
     // See https://issues.scala-lang.org/browse/SI-8905
     override val withAdmissionControl: ServerAdmissionControlParams[Server] =
       new ServerAdmissionControlParams(this)
-    override val withSession: SessionParams[Server] =
-      new SessionParams(this)
+    override val withSession: ServerSessionParams[Server] =
+      new ServerSessionParams(this)
     override val withTransport: ServerTransportParams[Server] =
       new ServerTransportParams(this)
 
@@ -571,6 +602,17 @@ object Thrift
 
     override def withStack(stack: Stack[ServiceFactory[Array[Byte], Array[Byte]]]): Server =
       super.withStack(stack)
+
+    override def withStack(
+      fn: Stack[ServiceFactory[Array[Byte], Array[Byte]]] => Stack[
+        ServiceFactory[Array[Byte], Array[Byte]]
+      ]
+    ): Server =
+      super.withStack(fn)
+    override def withExecutionOffloaded(executor: ExecutorService): Server =
+      super.withExecutionOffloaded(executor)
+    override def withExecutionOffloaded(pool: FuturePool): Server =
+      super.withExecutionOffloaded(pool)
     override def configured[P](psp: (P, Stack.Param[P])): Server = super.configured(psp)
   }
 

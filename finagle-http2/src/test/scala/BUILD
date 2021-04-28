@@ -1,17 +1,17 @@
 junit_tests(
-    sources = rglobs("*.scala"),
-    compiler_option_sets = {"fatal_warnings"},
+    sources = ["**/*.scala"],
+    compiler_option_sets = ["fatal_warnings"],
     dependencies = [
-        scoped(
-            "3rdparty/jvm/io/netty",
-            scope = "forced",
-        ),
         "3rdparty/jvm/io/netty:netty4-codec-http",
         "3rdparty/jvm/io/netty:netty4-codec-http2",
         "3rdparty/jvm/io/netty:netty4-handler-proxy",
         "3rdparty/jvm/junit",
         "3rdparty/jvm/org/mockito:mockito-all",
+        "3rdparty/jvm/org/scalacheck",
         "3rdparty/jvm/org/scalatest",
+        "3rdparty/jvm/org/scalatestplus:junit",
+        "3rdparty/jvm/org/scalatestplus:mockito-1-10",
+        "3rdparty/jvm/org/scalatestplus:scalacheck",
         "finagle/finagle-base-http",
         "finagle/finagle-core",
         "finagle/finagle-http2",

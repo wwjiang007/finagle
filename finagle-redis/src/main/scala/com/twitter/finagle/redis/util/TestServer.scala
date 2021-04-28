@@ -9,14 +9,29 @@ import scala.collection.JavaConverters._
 import scala.util.Random
 
 object RedisTestHelper {
-  def redisServerExists: Boolean = {
+  private val SemVerRegex = "(\\d+)\\.(\\d+)\\.(\\d+)".r
+
+  lazy val redisServerExists: Boolean = redisServerVersion.isDefined
+
+  lazy val redisServerVersion: Option[(Int, Int, Int)] = {
     try {
-      val p = new ProcessBuilder("redis-server", "--help").start()
+      val p = new ProcessBuilder("redis-server", "--version").start()
       p.waitFor(10, TimeUnit.SECONDS)
       val exitValue = p.exitValue()
-      exitValue == 0 || exitValue == 1
+      if (exitValue != 0 && exitValue != 1) None
+      else {
+        // An example output from redis 5.0.1:
+        // `Redis server v=5.0.1 sha=00000000:0 malloc=libc bits=64 build=c6d614f40d59bf0a`
+        val stdout = scala.io.Source.fromInputStream(p.getInputStream()).mkString
+        val version = stdout.split(" ")(2).substring(2)
+
+        version match {
+          case SemVerRegex(a, b, c) => Some((a.toInt, b.toInt, c.toInt))
+          case _ => None
+        }
+      }
     } catch {
-      case _: Exception => false
+      case _: Exception => None
     }
   }
 }
@@ -28,9 +43,8 @@ object RedisCluster { self =>
 
   def address: Option[InetSocketAddress] = instanceStack.head.address
   def address(i: Int) = instanceStack(i).address
-  def addresses: Seq[Option[InetSocketAddress]] = instanceStack.map { i =>
-    i.address
-  }
+  def addresses: Seq[Option[InetSocketAddress]] =
+    instanceStack.map { i => i.address }.toList
 
   def hostAddresses(from: Int = 0, until: Int = instanceStack.size): String = {
     require(instanceStack.nonEmpty)
@@ -45,9 +59,7 @@ object RedisCluster { self =>
   }
 
   def start(count: Int = 1, mode: RedisMode = RedisMode.Standalone): Seq[ExternalRedis] = {
-    (0 until count).map { i =>
-      start(new ExternalRedis(mode))
-    }
+    (0 until count).map { i => start(new ExternalRedis(mode)) }
   }
 
   def start(instance: ExternalRedis): ExternalRedis = {
@@ -63,9 +75,7 @@ object RedisCluster { self =>
   }
 
   def stopAll(): Unit = {
-    instanceStack.foreach { i =>
-      i.stop()
-    }
+    instanceStack.foreach { i => i.stop() }
     instanceStack.clear
   }
 
@@ -74,9 +84,7 @@ object RedisCluster { self =>
     .getRuntime()
     .addShutdownHook(new Thread {
       override def run(): Unit = {
-        self.instanceStack.foreach { instance =>
-          instance.stop()
-        }
+        self.instanceStack.foreach { instance => instance.stop() }
       }
     })
 }
@@ -91,7 +99,6 @@ object RedisMode {
 class ExternalRedis(mode: RedisMode = RedisMode.Standalone) {
   private[this] val rand = new Random
   private[this] var process: Option[Process] = None
-  private[this] val forbiddenPorts = 6300.until(7300) ++ 55535.until(65535)
   private[this] val possiblePorts = 49152.until(55535)
   var address: Option[InetSocketAddress] = None
 
@@ -100,7 +107,7 @@ class ExternalRedis(mode: RedisMode = RedisMode.Standalone) {
   }
 
   private[this] def findAddress(): Unit = {
-    var tries = possiblePorts.size-1
+    var tries = possiblePorts.size - 1
     while (address.isEmpty && tries >= 0) {
       val addr = new InetSocketAddress(possiblePorts(tries))
       val socket = new Socket
@@ -113,7 +120,7 @@ class ExternalRedis(mode: RedisMode = RedisMode.Standalone) {
         case exc: Exception =>
           address = None
           tries -= 1
-          Thread.sleep(5) 
+          Thread.sleep(5)
       } finally {
         socket.close()
       }

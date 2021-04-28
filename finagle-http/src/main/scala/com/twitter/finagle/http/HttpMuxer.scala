@@ -2,8 +2,9 @@ package com.twitter.finagle.http
 
 import com.twitter.finagle.util.LoadService
 import com.twitter.finagle.Service
-import com.twitter.util.Future
+import com.twitter.util.{Closable, Future, Time}
 import java.util.logging.Logger
+import scala.annotation.tailrec
 
 /**
  * A service that dispatches incoming requests to registered handlers.
@@ -23,15 +24,20 @@ import java.util.logging.Logger
  *  NOTE: When multiple pattern matches exist, the longest pattern wins.
  */
 class HttpMuxer(_routes: Seq[Route]) extends Service[Request, Response] {
+  import HttpMuxer._
 
   def this() = this(Seq.empty[Route])
 
-  private[this] val sorted: Seq[Route] =
-    _routes.sortBy(_.pattern.length).reverse
+  private[this] val sortedMatchers: Array[RouteMatcher] =
+    _routes
+      .sortBy(_.pattern.length)
+      .reverse
+      .map(new RouteMatcher(_))
+      .toArray
 
   protected def routes: Seq[Route] = _routes
 
-  def patterns: Seq[String] = sorted.map(_.pattern)
+  def patterns: Seq[String] = sortedMatchers.map(_.route.pattern)
 
   /**
    * Create a new Mux service with the specified pattern added. If the pattern already exists, overwrite existing value.
@@ -57,15 +63,17 @@ class HttpMuxer(_routes: Seq[Route]) extends Service[Request, Response] {
     val path = normalize(request.path)
 
     // find the longest pattern that matches (the patterns are already sorted)
-    sorted.find { route =>
-      val pattern = route.pattern
-      if (pattern == "")
-        path == "/" || path == "" // special cases
-      else if (pattern.endsWith("/"))
-        path.startsWith(pattern) // prefix match
-      else
-        path == pattern // exact match
+    @tailrec
+    def go(i: Int): Option[Route] = {
+      if (i >= sortedMatchers.size) {
+        None
+      } else {
+        val matcher = sortedMatchers(i)
+        if (matcher.matches(path)) matcher.someRoute
+        else go(i + 1)
+      }
     }
+    go(0)
   }
 
   /**
@@ -77,17 +85,8 @@ class HttpMuxer(_routes: Seq[Route]) extends Service[Request, Response] {
     case None => Future.value(Response(request.version, Status.NotFound))
   }
 
-  /**
-   * - ensure path starts with "/"
-   * - get rid of excessive "/"s. For example "/a//b///c/" => "/a/b/c/"
-   * - return "" if path is ""
-   * - return "/" if path is "/" or "///" etc
-   */
-  private[this] def normalize(path: String) = {
-    val suffix = if (path.endsWith("/")) "/" else ""
-    val p = path.split("/").filterNot(_.isEmpty).mkString("/")
-    if (p == "") suffix else "/" + p + suffix
-  }
+  override def close(deadline: Time): Future[Unit] =
+    Closable.all(routes.map(_.handler): _*).close(deadline)
 }
 
 /**
@@ -96,7 +95,65 @@ class HttpMuxer(_routes: Seq[Route]) extends Service[Request, Response] {
  * @see [[HttpMuxers]] for Java compatibility APIs.
  */
 object HttpMuxer extends HttpMuxer {
+
+  private final class RouteMatcher(val route: Route) {
+    private[this] val isEmpty = route.pattern.isEmpty
+    private[this] val usePrefixMatch = route.pattern.endsWith("/")
+    val someRoute: Some[Route] = Some(route)
+
+    def matches(path: String): Boolean = {
+      if (isEmpty) {
+        path == "/" || path.isEmpty
+      } else {
+        val pattern = route.pattern
+        if (usePrefixMatch)
+          path.startsWith(pattern)
+        else
+          path == pattern
+      }
+    }
+  }
+
   @volatile private[this] var underlying = new HttpMuxer()
+
+  private[this] def addLeadingAndStripDuplicateSlashes(s: String): String = {
+    val b = new java.lang.StringBuilder(s.length)
+    b.append('/')
+
+    @tailrec
+    def go(i: Int, lastSlash: Boolean): Unit = {
+      if (i < s.length) {
+        val c = s.charAt(i)
+        if (lastSlash && c == '/') go(i + 1, true)
+        else {
+          b.append(c)
+          go(i + 1, c == '/')
+        }
+      }
+    }
+    go(0, true)
+
+    b.toString
+  }
+
+  /**
+   * - ensure path starts with "/" (unless path is "")
+   * - get rid of excessive "/"s. For example "/a//b///c/" => "/a/b/c/"
+   * - return "" if path is ""
+   * - return "/" if path is "/" or "///" etc
+   *
+   * @note exposed for testing.
+   */
+  private[http] def normalize(path: String): String = {
+    if (path.isEmpty) {
+      ""
+    } else if (!path.contains("//")) {
+      if (path.startsWith("/")) path
+      else "/" + path
+    } else {
+      addLeadingAndStripDuplicateSlashes(path)
+    }
+  }
 
   /**
    * add handlers to mutate dispatching strategies.
@@ -133,6 +190,8 @@ object HttpMuxer extends HttpMuxer {
   override def patterns: Seq[String] = underlying.patterns
 
   override def withHandler(route: Route): HttpMuxer = underlying.withHandler(route)
+
+  override def close(deadline: Time): Future[Unit] = underlying.close(deadline)
 }
 
 /**

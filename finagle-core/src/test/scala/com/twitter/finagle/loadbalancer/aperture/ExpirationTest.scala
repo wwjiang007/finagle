@@ -1,10 +1,11 @@
 package com.twitter.finagle.loadbalancer.aperture
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Address
 import com.twitter.finagle.loadbalancer.{EndpointFactory, LazyEndpointFactory}
 import com.twitter.finagle.ServiceFactoryProxy
-import com.twitter.finagle.stats.{StatsReceiver, InMemoryStatsReceiver}
+import com.twitter.finagle.stats.{InMemoryStatsReceiver, StatsReceiver}
+import com.twitter.finagle.util.Rng
 import com.twitter.util._
 import org.scalatest.fixture.FunSuite
 
@@ -18,8 +19,8 @@ class ExpirationTest extends FunSuite with ApertureSuite {
   private class ExpiryBal(
     val idleTime: Duration = 1.minute,
     val mockTimer: MockTimer = new MockTimer,
-    val stats: InMemoryStatsReceiver = new InMemoryStatsReceiver
-  ) extends TestBal
+    val stats: InMemoryStatsReceiver = new InMemoryStatsReceiver)
+      extends TestBal
       with Expiration[Unit, Unit] {
 
     def expired: Long = stats.counters(Seq("expired"))
@@ -33,14 +34,14 @@ class ExpirationTest extends FunSuite with ApertureSuite {
     case class Node(factory: EndpointFactory[Unit, Unit])
         extends ServiceFactoryProxy[Unit, Unit](factory)
         with ExpiringNode
-        with ApertureNode {
+        with ApertureNode[Unit, Unit] {
+      override def tokenRng: Rng = rng
       def load: Double = 0
       def pending: Int = 0
       override val token: Int = 0
     }
 
     protected def newNode(factory: EndpointFactory[Unit, Unit]): Node = Node(factory)
-    protected def failingNode(cause: Throwable): Node = ???
 
     override def close(when: Time) = {
       expiryTask.cancel()
@@ -53,9 +54,7 @@ class ExpirationTest extends FunSuite with ApertureSuite {
 
   case class FixtureParam(tc: TimeControl)
   def withFixture(test: OneArgTest) =
-    Time.withCurrentTimeFrozen { tc =>
-      test(FixtureParam(tc))
-    }
+    Time.withCurrentTimeFrozen { tc => test(FixtureParam(tc)) }
 
   test("does not expire uninitialized nodes") { f =>
     val bal = new ExpiryBal
@@ -75,9 +74,7 @@ class ExpirationTest extends FunSuite with ApertureSuite {
     bal.adjustx(1)
     assert(bal.aperturex == 2)
 
-    (0 to 10).foreach { _ =>
-      Await.result(bal(), 5.seconds).close()
-    }
+    (0 to 10).foreach { _ => Await.result(bal(), 5.seconds).close() }
     bal.adjustx(-1)
     assert(bal.aperturex == 1)
 
@@ -100,18 +97,14 @@ class ExpirationTest extends FunSuite with ApertureSuite {
   test("expires nodes outside of aperture") { f =>
     val bal = new ExpiryBal
 
-    val eps = Vector.tabulate(10) { i =>
-      Factory(i)
-    }
+    val eps = Vector.tabulate(10) { i => Factory(i) }
     bal.update(eps.map(newLazyEndpointFactory))
     bal.adjustx(eps.size)
     assert(bal.aperturex == eps.size)
 
     // we rely on p2c to ensure that each endpoint gets
     // a request for service acquisition.
-    def checkoutLoop(): Unit = (0 to 100).foreach { _ =>
-      Await.result(bal(), 5.seconds).close()
-    }
+    def checkoutLoop(): Unit = (0 to 100).foreach { _ => Await.result(bal(), 5.seconds).close() }
 
     checkoutLoop()
     assert(eps.filter(_.total > 0).size == eps.size)

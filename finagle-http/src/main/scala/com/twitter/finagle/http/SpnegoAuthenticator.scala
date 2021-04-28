@@ -1,6 +1,6 @@
 package com.twitter.finagle.http
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{Filter, Service}
 import com.twitter.util.{Base64StringEncoder, Duration, Future, FuturePool, Return, Time}
 import com.twitter.logging.Logger
@@ -29,9 +29,7 @@ object SpnegoAuthenticator {
   private object AuthHeader {
     val SchemePrefixLength = AuthScheme.length + 1
     def apply(token: Option[Token]): Option[String] =
-      token map { t =>
-        AuthScheme + " " + Base64StringEncoder.encode(t)
-      }
+      token map { t => AuthScheme + " " + Base64StringEncoder.encode(t) }
 
     /** If the header represents a valid spnego negotiation, return it. */
     def unapply(header: String): Option[Token] =
@@ -93,7 +91,7 @@ object SpnegoAuthenticator {
 
       /**
        * Oid for the KRB5 mechanism  These come from
-       * http://www.oid-info.com/get/1.2.840.113554.1.2.2
+       * https://www.oid-info.com/get/1.2.840.113554.1.2.2
        *
        */
       val Krb5Mechanism = new Oid("1.2.840.113554.1.2.2")
@@ -101,7 +99,7 @@ object SpnegoAuthenticator {
 
       /**
        * Oid for the Spnego mechanism  These come from
-       * http://www.oid-info.com/get/1.3.6.1.5.5.2
+       * https://www.oid-info.com/get/1.3.6.1.5.5.2
        *
        */
       val SpnegoMechanism = new Oid("1.3.6.1.5.5.2")
@@ -237,8 +235,8 @@ object SpnegoAuthenticator {
     class JAASClientSource(
       val loginContext: String,
       _serverPrincipal: String,
-      _serverPrincipalType: Oid = JAAS.Krb5PrincipalType
-    ) extends ClientSource
+      _serverPrincipalType: Oid = JAAS.Krb5PrincipalType)
+        extends ClientSource
         with JAAS {
       val serverPrincipal = manager.createName(_serverPrincipal, _serverPrincipalType)
 
@@ -348,9 +346,7 @@ object SpnegoAuthenticator {
     def authorizationHeader(req: Request): Option[String] =
       req.headerMap.get(Fields.Authorization)
     def authorizationHeader(req: Request, token: Token): Unit =
-      AuthHeader(Some(token)).foreach { header =>
-        req.headerMap.set(Fields.Authorization, header)
-      }
+      AuthHeader(Some(token)).foreach { header => req.headerMap.set(Fields.Authorization, header) }
     def protocolVersion(req: Request): Version = req.version
     def authenticated(req: Request, context: GSSContext): Authenticated[Request] =
       Authenticated.Http(req, context)

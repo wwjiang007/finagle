@@ -1,6 +1,6 @@
 package com.twitter.finagle.netty4.pushsession
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{ChannelException, Status, UnknownChannelException}
 import com.twitter.finagle.pushsession.{PushChannelHandle, PushSession}
 import com.twitter.finagle.stats.NullStatsReceiver
@@ -21,7 +21,8 @@ import scala.collection.JavaConverters._
 
 class Netty4PushChannelHandleTest extends FunSuite {
 
-  private class NoopSession(handle: PushChannelHandle[Any, Any]) extends PushSession[Any, Any](handle) {
+  private class NoopSession(handle: PushChannelHandle[Any, Any])
+      extends PushSession[Any, Any](handle) {
     val received: mutable.Queue[Any] = new mutable.Queue[Any]()
     def receive(message: Any): Unit = received += message
     def status: Status = handle.status
@@ -42,13 +43,19 @@ class Netty4PushChannelHandleTest extends FunSuite {
     }
   }
 
-  private def nettyChannel[In, Out](transportHandlers: (String, ChannelHandler)*)(
+  private def nettyChannel[In, Out](
+    transportHandlers: (String, ChannelHandler)*
+  )(
     f: PushChannelHandle[In, Out] => Future[PushSession[In, Out]]
   ): (EmbeddedChannel, Netty4PushChannelHandle[In, Out]) = {
     val ch = new EmbeddedChannel()
     transportHandlers.foreach { case (name, handler) => ch.pipeline.addLast(name, handler) }
     val (handle, _) = Netty4PushChannelHandle.install[In, Out, PushSession[In, Out]](
-      ch, _ => (), f, NullStatsReceiver)
+      ch,
+      _ => (),
+      f,
+      NullStatsReceiver
+    )
     ch -> handle
   }
 
@@ -304,7 +311,12 @@ class Netty4PushChannelHandleTest extends FunSuite {
 
     val protocolInit: ChannelPipeline => Unit = _.addLast(ObserverName, OutboundObserver)
     val (handle, _) =
-      Netty4PushChannelHandle.install[Any, Any, NoopSession](ch, protocolInit, _ => p, NullStatsReceiver)
+      Netty4PushChannelHandle.install[Any, Any, NoopSession](
+        ch,
+        protocolInit,
+        _ => p,
+        NullStatsReceiver
+      )
 
     assert(ch.pipeline.get(Netty4PushChannelHandle.SessionDriver) == null)
     assert(ch.pipeline.get(Netty4PushChannelHandle.DelayedByteBufHandler) != null)

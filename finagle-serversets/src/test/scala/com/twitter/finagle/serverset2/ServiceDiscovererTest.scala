@@ -2,7 +2,7 @@ package com.twitter.finagle.serverset2
 
 import com.twitter.finagle.common.io.JsonCodec
 import com.twitter.finagle.common.zookeeper.ServerSets
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.serverset2.ServiceDiscoverer.ClientHealth
 import com.twitter.finagle.serverset2.ZkOp.{GetData, GetChildrenWatch, ExistsWatch}
 import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
@@ -13,15 +13,12 @@ import com.twitter.io.Buf.ByteArray
 import com.twitter.thrift
 import com.twitter.thrift.ServiceInstance
 import com.twitter.util._
-import org.junit.runner.RunWith
 import org.mockito.Mockito.when
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 import java.util.concurrent.atomic.AtomicReference
 
-@RunWith(classOf[JUnitRunner])
 class ServiceDiscovererTest
     extends FunSuite
     with MockitoSugar
@@ -31,8 +28,8 @@ class ServiceDiscovererTest
   class ServiceDiscovererWithExposedCache(
     varZkSession: Var[ZkSession],
     statsReceiver: StatsReceiver,
-    timer: Timer = DefaultTimer
-  ) extends ServiceDiscoverer(varZkSession, statsReceiver, ForeverEpoch, timer) {
+    timer: Timer = DefaultTimer)
+      extends ServiceDiscoverer(varZkSession, statsReceiver, ForeverEpoch, timer) {
     val cache = new ZkEntryCache("/foo/bar", NullStatsReceiver)
     cache.setSession(varZkSession.sample)
     override val entriesOf = Memoize { path: String =>
@@ -41,7 +38,14 @@ class ServiceDiscovererTest
   }
 
   def ep(port: Int) =
-    Endpoint(Array(null), "localhost", port, Int.MinValue, Endpoint.Status.Alive, port.toString)
+    Endpoint(
+      Array(null),
+      "localhost",
+      port,
+      Int.MinValue,
+      Endpoint.Status.Alive,
+      port.toString,
+      Map.empty)
   val ForeverEpoch = Epoch(Duration.Top, new MockTimer)
   val retryStream = RetryStream()
 

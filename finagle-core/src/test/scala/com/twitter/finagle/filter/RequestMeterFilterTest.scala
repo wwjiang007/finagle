@@ -1,19 +1,16 @@
 package com.twitter.finagle.filter
 
 import com.twitter.concurrent.AsyncMeter
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{Failure, Service}
 import com.twitter.util._
 
 import java.util.concurrent.RejectedExecutionException
 
-import org.junit.runner.RunWith
 import org.mockito.Mockito.when
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
 class RequestMeterFilterTest extends FunSuite with MockitoSugar {
 
   val echoSvc = new Service[Int, Int] {

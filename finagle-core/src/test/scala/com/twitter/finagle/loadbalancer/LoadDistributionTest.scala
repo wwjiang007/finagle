@@ -1,12 +1,10 @@
 package com.twitter.finagle.loadbalancer
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.service.ConstantService
 import com.twitter.finagle.util.Rng
 import com.twitter.util.{Activity, Await, Future, Time, Var}
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.{FunSuite, OneInstancePerTest}
 import scala.util.Random
 
@@ -56,7 +54,6 @@ object LoadDistributionTest {
  * Assuming that the upper bound for a load on a given node is 1.5x and solving `log log x = 2`
  * for x, we can get the maximum size of the cluster (~1600) for which these tests are correct.
  */
-@RunWith(classOf[JUnitRunner])
 abstract class LoadDistributionTest(newBalancerFactory: Rng => LoadBalancerFactory)
     extends FunSuite
     with OneInstancePerTest {
@@ -66,14 +63,12 @@ abstract class LoadDistributionTest(newBalancerFactory: Rng => LoadBalancerFacto
   private[this] val serverset = Var(Vector.empty[EndpointFactory[Unit, Unit]])
 
   private[this] def newClients(n: Int): Vector[ServiceFactory[Unit, Unit]] =
-    Vector.tabulate(n)(
-      i =>
-        newBalancerFactory(Rng(i)).newBalancer(
-          Activity(serverset.map(Activity.Ok(_))),
-          new NoBrokersAvailableException(),
-          Stack.Params.empty
-      )
-    )
+    Vector.tabulate(n)(i =>
+      newBalancerFactory(Rng(i)).newBalancer(
+        Activity(serverset.map(Activity.Ok(_))),
+        new NoBrokersAvailableException(),
+        Stack.Params.empty
+      ))
 
   private[this] def newServers(n: Int): Vector[Server] =
     Vector.fill(n)(new Server)
@@ -91,7 +86,10 @@ abstract class LoadDistributionTest(newBalancerFactory: Rng => LoadBalancerFacto
     clients.foreach(sendAndWait(150))
 
     // Optimal load is 750 / 10 = 75.
-    assert(servers.forall(s => s.load <= 150))
+    // With eager connections enabled, we expect 1 more request per client.
+    // With eager connections disabled, we expect <= 150, with it enabled we expect <= 155
+    // (as we have 5 clients)
+    assert(servers.forall(s => s.load <= 155))
   }
 
   test("servers deploy") {
@@ -156,6 +154,5 @@ class P2CPeakEmwaLoadDistributionTest
     extends LoadDistributionTest(notSoRandom => Balancers.p2cPeakEwma(rng = notSoRandom))
 
 class ApertureLoadDistributionTest
-    extends LoadDistributionTest(
-      notSoRandom => Balancers.aperture(rng = notSoRandom, minAperture = 5)
-    )
+    extends LoadDistributionTest(notSoRandom =>
+      Balancers.aperture(rng = notSoRandom, minAperture = 5))

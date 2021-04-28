@@ -12,7 +12,7 @@ protocols. A few of these protocol implementations are documented below.
 Thrift
 ------
 
-`Apache Thrift <http://thrift.apache.org/>`_ is an interface definition
+`Apache Thrift <https://thrift.apache.org/>`_ is an interface definition
 language. With its associated code generator(s) and binary communication
 protocol, Thrift facilitates the development of scalable RPC systems. By
 “scalable”, we specifically mean that IDLs can be shared, allowing developers
@@ -25,19 +25,18 @@ implementations of servers can be swapped out transparently, since they all
 expose the same interface, regardless of language.
 
 Thrift was originally built at Facebook. For more details on the original design,
-check out the `whitepaper <http://thrift.apache.org/static/files/thrift-20070401.pdf>`_.
+check out the `whitepaper <https://thrift.apache.org/static/files/thrift-20070401.pdf>`_.
 
 `finagle-thrift` is used extensively within Twitter, but to meet the needs of our
 service-oriented architecture we had to extend the Thrift protocol. We
 introduced the notion of “Twitter-upgraded Thrift”, or TTwitter, which augments
 the protocol with support for our internal infrastructure. Specifically, we tack
-on a request header containing Zipkin tracing info, Finagle ClientId strings, and
+on a request header containing tracing info, Finagle ClientId strings, and
 Wily delegations. In order to maintain backwards compatibility, TTwitter clients
 perform protocol negotiation upon connection and will downgrade to raw TBinary
 Thrift if servers are not using the upgraded protocol. By default, `finagle-thrift`
 uses the Thrift framed codec and the binary protocol for serialization.
 
-.. note:: Some Thrift server implementations do not handle this protocol
           negotiation well. If your client should run into this, you can disable
           it by calling ``Thrift.client.withNoAttemptTTwitterUpgrade``.
 
@@ -58,42 +57,42 @@ following rich APIs:
 
 Serving the IDL:
 
-.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServiceIfaceExample.scala#thriftserverapi
+.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServicePerEndpointExample.scala#thriftserverapi
    :language: scala
 
 .. _finagle_thrift_client:
 
 Construct a client:
 
-.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServiceIfaceExample.scala#thriftclientapi
+.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServicePerEndpointExample.scala#thriftclientapi
    :language: scala
 
 A `ServicePerEndpoint` is a collection of `Services`, one for each Thrift method. Call the `log` method:
 
-.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServiceIfaceExample.scala#thriftclientapi-call
+.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServicePerEndpointExample.scala#thriftclientapi-call
    :language: scala
 
 Thrift `Services` can be combined with :api:`Filters <com/twitter/finagle/Filter$>`.
 
-.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServiceIfaceExample.scala#thriftclientapi-filters
+.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServicePerEndpointExample.scala#thriftclientapi-filters
    :language: scala
 
 Here's an example of a retry policy that retries on Thrift exceptions:
 
-.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServiceIfaceExample.scala#thriftclientapi-retries
+.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServicePerEndpointExample.scala#thriftclientapi-retries
    :language: scala
 
 Another way to construct Thrift clients is using the `MethodPerEndpoint` interface:
 
-.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServiceIfaceExample.scala#thriftclientapi-methodiface
+.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServicePerEndpointExample.scala#thriftclientapi-methodiface
    :language: scala
 
 To convert the Service interface to the method interface use :api:`Thrift.Client.methodPerEndpoint <com/twitter/finagle/Thrift$>`:
 
-.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServiceIfaceExample.scala#thriftclientapi-method-adapter
+.. includecode:: ../../../finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServicePerEndpointExample.scala#thriftclientapi-method-adapter
    :language: scala
 
-The complete example is at `ThriftServiceIfaceExample.scala <https://github.com/twitter/finagle/blob/develop/finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServiceIfaceExample.scala>`_.
+The complete example is at `ThriftServicePerEndpointExample.scala <https://github.com/twitter/finagle/blob/develop/finagle-example/src/main/scala/com/twitter/finagle/example/thrift/ThriftServicePerEndpointExample.scala>`_.
 Check out the `finagle-thrift` :api:`API <com/twitter/finagle/Thrift$>`
 for more info.
 
@@ -110,14 +109,14 @@ same way that HTTP is an application-layer protocol with ﻿﻿﻿numerous imple
 in a variety of languages, Mux is a session-layer protocol with a Scala
 implementation in the finagle-mux package. Also since it is a purely
 session-layer protocol, Mux can be used in conjunction with protocols from other
-layers of the `OSI <http://en.wikipedia.org/wiki/OSI_model>`_ model. For example,
+layers of the `OSI <https://en.wikipedia.org/wiki/OSI_model>`_ model. For example,
 Finagle currently has an implementation of the Thrift protocol on top of Mux,
 available in the `finagle-thriftmux` package.
 
 Much of the future work on Finagle will involve improvements to Mux and feature
 development targeting services that support it. The wire format and semantics of
 the Mux protocol are documented in `its source
-code <https://github.com/twitter/finagle/blob/master/finagle-mux/src/main/scala/com/twitter/finagle/mux/package.scala>`_.
+code <https://github.com/twitter/finagle/blob/release/finagle-mux/src/main/scala/com/twitter/finagle/mux/package.scala>`_.
 
 **Why is RPC multiplexing important?**
 
@@ -201,7 +200,7 @@ Note that `select` takes care of checking out the service and returning it to th
 other useful methods are available on :api:`mysql.Client <com/twitter/finagle/mysql/Client>` which is returned
 from the call to `newRichClient`.
 
-For a more involved example see the Finagle `example project <https://github.com/twitter/finagle/blob/master/finagle-example/src/main/scala/com/twitter/finagle/example/mysql/Example.scala>`_.
+For a more involved example see the Finagle `example project <https://github.com/twitter/finagle/blob/release/finagle-example/src/main/scala/com/twitter/finagle/example/mysql/Example.scala>`_.
 
 HTTP
 ----
@@ -225,7 +224,7 @@ Finagle sets certain request/response headers to transmit additional metadata.
   See :finagle-http-src:`HttpDtab.scala <com/twitter/finagle/http/codec/HttpDtab.scala>` and :ref:`dtabs <dtabs>`.
 
 `finagle-http-nack`
-  Makes finagle treat this reply as a retryable nack. See `HttpNackFilter.scala <https://github.com/twitter/finagle/blob/master/finagle-base-http/src/main/scala/com/twitter/finagle/http/filter/HttpNackFilter.scala>`_
+  Makes finagle treat this reply as a retryable nack. See `HttpNackFilter.scala <https://github.com/twitter/finagle/blob/release/finagle-base-http/src/main/scala/com/twitter/finagle/http/filter/HttpNackFilter.scala>`_
 
 `finagle-http-nonretryable-nack`
-  Makes finagle treat this reply as a nonretryable nack. See `HttpNackFilter.scala <https://github.com/twitter/finagle/blob/master/finagle-base-http/src/main/scala/com/twitter/finagle/http/filter/HttpNackFilter.scala>`_
+  Makes finagle treat this reply as a nonretryable nack. See `HttpNackFilter.scala <https://github.com/twitter/finagle/blob/release/finagle-base-http/src/main/scala/com/twitter/finagle/http/filter/HttpNackFilter.scala>`_

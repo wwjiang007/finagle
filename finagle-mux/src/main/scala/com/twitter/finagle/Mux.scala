@@ -1,7 +1,7 @@
 package com.twitter.finagle
 
-import com.twitter.conversions.storage._
-import com.twitter.finagle.Mux.param.{MaxFrameSize, OppTls}
+import com.twitter.conversions.StorageUnitOps._
+import com.twitter.finagle.Mux.param.{CompressionPreferences, MaxFrameSize, OppTls}
 import com.twitter.finagle.client._
 import com.twitter.finagle.factory.TimeoutFactory
 import com.twitter.finagle.naming.BindingFactory
@@ -9,29 +9,35 @@ import com.twitter.finagle.filter.{NackAdmissionFilter, PayloadSizeFilter}
 import com.twitter.finagle.mux.Handshake.Headers
 import com.twitter.finagle.mux.pushsession._
 import com.twitter.finagle.mux.transport._
-import com.twitter.finagle.mux.{Handshake, OpportunisticTlsParams, Request, Response}
+import com.twitter.finagle.mux.{
+  ExportCompressionUsage,
+  Handshake,
+  OpportunisticTlsParams,
+  Request,
+  Response,
+  WithCompressionPreferences
+}
 import com.twitter.finagle.netty4.pushsession.{Netty4PushListener, Netty4PushTransporter}
 import com.twitter.finagle.netty4.ssl.server.Netty4ServerSslChannelInitializer
 import com.twitter.finagle.netty4.ssl.client.Netty4ClientSslChannelInitializer
 import com.twitter.finagle.param.{Label, ProtocolLibrary, Stats, Timer, WithDefaultLoadBalancer}
-import com.twitter.finagle.pool.SingletonPool
+import com.twitter.finagle.pool.BalancingPool
 import com.twitter.finagle.pushsession._
 import com.twitter.finagle.server._
 import com.twitter.finagle.tracing._
 import com.twitter.finagle.transport.Transport.{ClientSsl, ServerSsl}
 import com.twitter.finagle.transport.Transport
 import com.twitter.io.{Buf, ByteReader}
-import com.twitter.logging.Logger
 import com.twitter.util.{Future, StorageUnit}
 import io.netty.channel.{Channel, ChannelPipeline}
-import java.net.{InetSocketAddress, SocketAddress}
+import java.net.SocketAddress
 import java.util.concurrent.Executor
+import scala.collection.mutable.ArrayBuffer
 
 /**
  * A client and server for the mux protocol described in [[com.twitter.finagle.mux]].
  */
 object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mux.Response] {
-  private val log = Logger.get()
 
   /**
    * The current version of the mux protocol.
@@ -72,18 +78,16 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
      * @note opportunistic TLS is not mutually intelligible with simple mux
      *       over TLS
      */
-    case class OppTls(level: Option[OpportunisticTls.Level]) {
-      def mk(): (OppTls, Stack.Param[OppTls]) =
-        (this, OppTls.param)
-    }
+    @deprecated("Please use com.twitter.finagle.param.OppTls directly", "2021-03-11")
+    type OppTls = com.twitter.finagle.param.OppTls
+
+    @deprecated("Please use com.twitter.finagle.param.OppTls directly", "2021-03-11")
     object OppTls {
-      implicit val param = Stack.Param(OppTls(None))
+      def apply(level: Option[OpportunisticTls.Level]): OppTls =
+        com.twitter.finagle.param.OppTls(level)
 
       /** Determine whether opportunistic TLS is configured to `Desired` or `Required`. */
-      def enabled(params: Stack.Params): Boolean = params[OppTls].level match {
-        case Some(OpportunisticTls.Desired | OpportunisticTls.Required) => true
-        case _ => false
-      }
+      def enabled(params: Stack.Params): Boolean = com.twitter.finagle.param.OppTls.enabled(params)
     }
 
     /**
@@ -117,7 +121,20 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
 
     private[finagle] object PingManager {
       implicit val param = Stack.Param(PingManager { (_, writer) =>
-        ServerPingManager.default(writer) })
+        ServerPingManager.default(writer)
+      })
+    }
+
+    /**
+     * A class eligible for configuring if the client or server is willing to compress or decompress
+     * requests or responses.
+     */
+    case class CompressionPreferences(compressionPreferences: Compression.LocalPreferences) {
+      def mk(): (CompressionPreferences, Stack.Param[CompressionPreferences]) =
+        (this, CompressionPreferences.param)
+    }
+    object CompressionPreferences {
+      implicit val param = Stack.Param(CompressionPreferences(Compression.DefaultLocal))
     }
   }
 
@@ -139,25 +156,37 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
       param.TurnOnTlsFn(tlsEnable)
 
     private val stack: Stack[ServiceFactory[mux.Request, mux.Response]] = StackClient.newStack
-      // We use a singleton pool to manage a multiplexed session. Because it's mux'd, we
-      // don't want arbitrary interrupts on individual dispatches to cancel outstanding service
-      // acquisitions, so we disable `allowInterrupts`.
-      .replace(StackClient.Role.pool,
-        SingletonPool.module[mux.Request, mux.Response](allowInterrupts = false))
+    // We use a singleton pool to manage a multiplexed session. Because it's mux'd, we
+    // don't want arbitrary interrupts on individual dispatches to cancel outstanding service
+    // acquisitions, so we disable `allowInterrupts`.
+      .replace(
+        StackClient.Role.pool,
+        BalancingPool.module[mux.Request, mux.Response](allowInterrupts = false)
+      )
       // As per the config above, we don't allow interrupts to propagate past the pool.
       // However, we need to provide a way to cancel service acquisitions which are taking
       // too long, so we "move" the [[TimeoutFactory]] below the pool.
       .remove(StackClient.Role.postNameResolutionTimeout)
-      .insertAfter(StackClient.Role.pool,
-        TimeoutFactory.module[mux.Request, mux.Response](Stack.Role("MuxSessionTimeout")))
+      .insertAfter(
+        StackClient.Role.pool,
+        TimeoutFactory.module[mux.Request, mux.Response](Stack.Role("MuxSessionTimeout"))
+      )
       .replace(BindingFactory.role, MuxBindingFactory)
-      .prepend(PayloadSizeFilter.module(_.body.length, _.body.length))
+      // Because the payload filter also traces the sizes, it's important that we do so
+      // after the tracing context is initialized.
+      .insertAfter(
+        TraceInitializerFilter.role,
+        PayloadSizeFilter.clientModule[mux.Request, mux.Response](_.body.length, _.body.length)
+      )
       // Since NackAdmissionFilter should operate on all requests sent over
       // the wire including retries, it must be below `Retries`. Since it
       // aggregates the status of the entire cluster, it must be above
       // `LoadBalancerFactory` (not part of the endpoint stack).
-      .insertBefore(StackClient.Role.prepFactory,
-        NackAdmissionFilter.module[mux.Request, mux.Response])
+      .insertBefore(
+        StackClient.Role.prepFactory,
+        NackAdmissionFilter.module[mux.Request, mux.Response]
+      )
+      .prepend(ExportCompressionUsage.module)
 
     /**
      * Returns the headers that a client sends to a server.
@@ -167,10 +196,20 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
      */
     private[finagle] def headers(
       maxFrameSize: StorageUnit,
-      tlsLevel: OpportunisticTls.Level
-    ): Handshake.Headers = Seq(
-      MuxFramer.Header.KeyBuf -> MuxFramer.Header.encodeFrameSize(maxFrameSize.inBytes.toInt),
-      OpportunisticTls.Header.KeyBuf -> tlsLevel.buf)
+      tlsLevel: OpportunisticTls.Level,
+      compressionPreferences: Compression.LocalPreferences
+    ): Handshake.Headers = {
+      val buffer = ArrayBuffer(
+        MuxFramer.Header.KeyBuf -> MuxFramer.Header.encodeFrameSize(maxFrameSize.inBytes.toInt),
+        OpportunisticTls.Header.KeyBuf -> tlsLevel.buf
+      )
+
+      if (!compressionPreferences.isDisabled) {
+        buffer += (CompressionNegotiation.ClientHeader.KeyBuf ->
+          CompressionNegotiation.ClientHeader.encode(compressionPreferences))
+      }
+      buffer.toSeq
+    }
 
     /**
      * Check the opportunistic TLS configuration to ensure it's in a consistent state
@@ -179,20 +218,23 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
       if (param.OppTls.enabled(params) && params[ClientSsl].sslClientConfiguration.isEmpty) {
         val level = params[param.OppTls].level
         throw new IllegalStateException(
-          s"Client desired opportunistic TLS ($level) but ClientSsl param is empty.")
+          s"Client desired opportunistic TLS ($level) but ClientSsl param is empty."
+        )
       }
     }
   }
 
   final case class Client(
     stack: Stack[ServiceFactory[mux.Request, mux.Response]] = Mux.Client.stack,
-    params: Stack.Params = Mux.Client.params
-  ) extends PushStackClient[mux.Request, mux.Response, Client]
-    with WithDefaultLoadBalancer[Client]
-    with OpportunisticTlsParams[Client] {
+    params: Stack.Params = Mux.Client.params)
+      extends PushStackClient[mux.Request, mux.Response, Client]
+      with WithDefaultLoadBalancer[Client]
+      with OpportunisticTlsParams[Client]
+      with WithCompressionPreferences[Client] {
 
-    private[this] val scopedStatsParams = params + Stats(
-      params[Stats].statsReceiver.scope("mux"))
+    private[this] val statsReceiver = params[Stats].statsReceiver
+    private[this] val sessionStats = new SharedNegotiationStats(statsReceiver)
+    private[this] val sessionParams = params + Stats(statsReceiver.scope("mux"))
 
     protected type SessionT = MuxClientNegotiatingSession
     protected type In = ByteReader
@@ -201,11 +243,14 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
     protected def newSession(
       handle: PushChannelHandle[ByteReader, Buf]
     ): Future[MuxClientNegotiatingSession] = {
-      val negotiator: Option[Headers] => Future[MuxClientSession] = {
-        headers => new Negotiation.Client(scopedStatsParams).negotiateAsync(handle, headers)
+      val negotiator: Option[Headers] => Future[MuxClientSession] = { headers =>
+        new Negotiation.Client(sessionParams, sessionStats).negotiateAsync(handle, headers)
       }
       val headers = Mux.Client.headers(
-        params[MaxFrameSize].size, params[OppTls].level.getOrElse(OpportunisticTls.Off))
+        params[MaxFrameSize].size,
+        params[OppTls].level.getOrElse(OpportunisticTls.Off),
+        params[CompressionPreferences].compressionPreferences
+      )
 
       Future.value(
         new MuxClientNegotiatingSession(
@@ -214,29 +259,25 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
           negotiator = negotiator,
           headers = headers,
           name = params[Label].label,
-          stats = scopedStatsParams[Stats].statsReceiver))
+          stats = sessionParams[Stats].statsReceiver
+        )
+      )
     }
 
-    override def newClient(
-      dest: Name,
-      label0: String
-    ): ServiceFactory[Request, Response] = {
+    override def newClient(dest: Name, label0: String): ServiceFactory[Request, Response] = {
       // We want to fail fast if the client's TLS configuration is inconsistent
       Mux.Client.validateTlsParamConsistency(params)
       super.newClient(dest, label0)
     }
 
-    protected def newPushTransporter(
-      inetSocketAddress: InetSocketAddress
-    ): PushTransporter[ByteReader, Buf] = {
-
+    protected def newPushTransporter(sa: SocketAddress): PushTransporter[ByteReader, Buf] = {
       // We use a custom Netty4PushTransporter to provide a handle to the
       // underlying Netty channel via MuxChannelHandle, giving us the ability to
       // add TLS support later in the lifecycle of the socket connection.
       new Netty4PushTransporter[ByteReader, Buf](
         transportInit = _ => (),
         protocolInit = PipelineInit,
-        remoteAddress = inetSocketAddress,
+        remoteAddress = sa,
         params = Mux.param.removeTlsIfOpportunisticClient(params)
       ) {
         override protected def initSession[T <: PushSession[ByteReader, Buf]](
@@ -245,9 +286,9 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
           sessionBuilder: (PushChannelHandle[ByteReader, Buf]) => Future[T]
         ): Future[T] = {
           // With this builder we add support for opportunistic TLS via `MuxChannelHandle`
-          // and the respective `Negotation` types. Adding more proxy types will break this pathway.
+          // and the respective `Negotiation` types. Adding more proxy types will break this pathway.
           def wrappedBuilder(pushChannelHandle: PushChannelHandle[ByteReader, Buf]): Future[T] =
-            sessionBuilder(new MuxChannelHandle(pushChannelHandle, channel, scopedStatsParams))
+            sessionBuilder(new MuxChannelHandle(pushChannelHandle, channel, sessionParams))
 
           super.initSession(channel, protocolInit, wrappedBuilder)
         }
@@ -275,9 +316,16 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
 
   object Server {
 
-    private[finagle] val stack: Stack[ServiceFactory[mux.Request, mux.Response]] = StackServer.newStack
-      .remove(TraceInitializerFilter.role)
-      .prepend(PayloadSizeFilter.module(_.body.length, _.body.length))
+    private[finagle] val stack: Stack[ServiceFactory[mux.Request, mux.Response]] =
+      StackServer.newStack
+      // We remove the trace init filter and don't replace it with anything because
+      // the mux codec initializes tracing.
+        .remove(TraceInitializerFilter.role)
+        .prepend(ExportCompressionUsage.module)
+        // Because tracing initialization happens in the mux codec, we know the service stack
+        // is dispatched with proper tracing context, so the ordering of this filter isn't
+        // relevant.
+        .prepend(PayloadSizeFilter.serverModule(_.body.length, _.body.length))
 
     private[finagle] val tlsEnable: (Stack.Params, ChannelPipeline) => Unit = (params, pipeline) =>
       pipeline.addFirst("opportunisticSslInit", new Netty4ServerSslChannelInitializer(params))
@@ -288,28 +336,34 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
 
     type SessionF = (
       RefPushSession[ByteReader, Buf],
-        Stack.Params,
-        MuxChannelHandle,
-        Service[Request, Response]
-      ) => PushSession[ByteReader, Buf]
+      Stack.Params,
+      SharedNegotiationStats,
+      MuxChannelHandle,
+      Service[Request, Response]
+    ) => PushSession[ByteReader, Buf]
 
     val defaultSessionFactory: SessionF = (
-    ref: RefPushSession[ByteReader, Buf],
-    params: Stack.Params,
-    handle: MuxChannelHandle,
-    service: Service[Request, Response]
+      ref: RefPushSession[ByteReader, Buf],
+      params: Stack.Params,
+      sharedStats: SharedNegotiationStats,
+      handle: MuxChannelHandle,
+      service: Service[Request, Response]
     ) => {
-      val scopedStatsParams = params + Stats(
-        params[Stats].statsReceiver.scope("mux"))
+      val scopedStatsParams = params + Stats(params[Stats].statsReceiver.scope("mux"))
       MuxServerNegotiator.build(
         ref = ref,
         handle = handle,
         service = service,
         makeLocalHeaders = Mux.Server
-          .headers(_: Headers, params[MaxFrameSize].size,
-            params[OppTls].level.getOrElse(OpportunisticTls.Off)),
+          .headers(
+            _: Headers,
+            params[MaxFrameSize].size,
+            params[OppTls].level.getOrElse(OpportunisticTls.Off),
+            params[CompressionPreferences].compressionPreferences
+          ),
         negotiate = (service, headers) =>
-          new Negotiation.Server(scopedStatsParams, service).negotiate(handle, headers),
+          new Negotiation.Server(scopedStatsParams, sharedStats, service)
+            .negotiate(handle, headers),
         timer = params[Timer].timer
       )
       ref
@@ -327,10 +381,30 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
     private[finagle] def headers(
       clientHeaders: Handshake.Headers,
       maxFrameSize: StorageUnit,
-      tlsLevel: OpportunisticTls.Level
-    ): Handshake.Headers = Seq(
-      MuxFramer.Header.KeyBuf -> MuxFramer.Header.encodeFrameSize(maxFrameSize.inBytes.toInt),
-      OpportunisticTls.Header.KeyBuf -> tlsLevel.buf)
+      tlsLevel: OpportunisticTls.Level,
+      compressionPreferences: Compression.LocalPreferences
+    ): Handshake.Headers = {
+      val clientCompressionPreferences = Handshake
+        .valueOf(CompressionNegotiation.ClientHeader.KeyBuf, clientHeaders)
+        .map(CompressionNegotiation.ClientHeader.decode(_))
+        .getOrElse(Compression.PeerCompressionOff)
+      val compressionFormats = CompressionNegotiation.negotiate(
+        compressionPreferences,
+        clientCompressionPreferences
+      )
+
+      val withoutCompression = Seq(
+        MuxFramer.Header.KeyBuf -> MuxFramer.Header.encodeFrameSize(maxFrameSize.inBytes.toInt),
+        OpportunisticTls.Header.KeyBuf -> tlsLevel.buf
+      )
+
+      if (compressionFormats.isDisabled) {
+        withoutCompression
+      } else {
+        withoutCompression :+ (CompressionNegotiation.ServerHeader.KeyBuf ->
+          CompressionNegotiation.ServerHeader.encode(compressionFormats))
+      }
+    }
 
     /**
      * Check the opportunistic TLS configuration to ensure it's in a consistent state
@@ -340,7 +414,8 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
       if (param.OppTls.enabled(params) && params[ServerSsl].sslServerConfiguration.isEmpty) {
         val level = params[param.OppTls].level
         throw new IllegalStateException(
-          s"Server desired opportunistic TLS ($level) but ServerSsl param is empty.")
+          s"Server desired opportunistic TLS ($level) but ServerSsl param is empty."
+        )
       }
     }
   }
@@ -348,12 +423,15 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
   final case class Server(
     stack: Stack[ServiceFactory[mux.Request, mux.Response]] = Mux.Server.stack,
     params: Stack.Params = Mux.Server.params,
-    sessionFactory: Server.SessionF = Server.defaultSessionFactory
-  ) extends PushStackServer[mux.Request, mux.Response, Server]
-    with OpportunisticTlsParams[Server] {
+    sessionFactory: Server.SessionF = Server.defaultSessionFactory)
+      extends PushStackServer[mux.Request, mux.Response, Server]
+      with OpportunisticTlsParams[Server]
+      with WithCompressionPreferences[Server] {
 
     protected type PipelineReq = ByteReader
     protected type PipelineRep = Buf
+
+    private[this] val sessionStats = new SharedNegotiationStats(params[Stats].statsReceiver)
 
     protected def newListener(): PushListener[ByteReader, Buf] = {
       Mux.Server.validateTlsParamConsistency(params)
@@ -380,17 +458,19 @@ object Mux extends Client[mux.Request, mux.Response] with Server[mux.Request, mu
     protected def newSession(
       handle: PushChannelHandle[ByteReader, Buf],
       service: Service[Request, Response]
-    ): RefPushSession[ByteReader, Buf] = handle match {
-      case h: MuxChannelHandle =>
-        val ref = new RefPushSession[ByteReader, Buf](h, SentinelSession[ByteReader, Buf](h))
-        sessionFactory(ref, params, h, service)
-        ref
+    ): RefPushSession[ByteReader, Buf] = {
+      handle match {
+        case h: MuxChannelHandle =>
+          val ref = new RefPushSession[ByteReader, Buf](h, SentinelSession[ByteReader, Buf](h))
+          sessionFactory(ref, params, sessionStats, h, service)
+          ref
 
-      case other =>
-        throw new IllegalStateException(
-          s"Expected to find a `MuxChannelHandle` but found ${other.getClass.getSimpleName}")
+        case other =>
+          throw new IllegalStateException(
+            s"Expected to find a `MuxChannelHandle` but found ${other.getClass.getSimpleName}"
+          )
+      }
     }
-
 
     protected def copy1(
       stack: Stack[ServiceFactory[Request, Response]],

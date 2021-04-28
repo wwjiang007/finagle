@@ -1,6 +1,6 @@
 package com.twitter.finagle.param
 
-import com.twitter.finagle.Stack
+import com.twitter.finagle.{Backoff, Stack}
 import com.twitter.finagle.liveness.{FailureAccrualFactory, FailureAccrualPolicy}
 import com.twitter.finagle.service.FailFastFactory
 import com.twitter.util.Duration
@@ -61,22 +61,20 @@ class SessionQualificationParams[A <: Stack.Parameterized[A]](self: Stack.Parame
    *
    * @param successRate The success rate to trigger on
    * @param window The time window of the moving average
-   * @param backoff The backoff that should be applied to revival attempts
+   * @param backoff The [[Backoff]] that should be applied to revival attempts
    * @param minRequestThreshold The minimum number of requests in a window
    * required for failure accrual to trigger
    */
   def successRateFailureAccrual(
     successRate: Double,
     window: Duration,
-    backoff: Stream[Duration],
+    backoff: Backoff,
     minRequestThreshold: Int
   ): A = {
     self.configured(
-      FailureAccrualFactory.Param(
-        () =>
-          FailureAccrualPolicy
-            .successRateWithinDuration(successRate, window, backoff, minRequestThreshold)
-      )
+      FailureAccrualFactory.Param(() =>
+        FailureAccrualPolicy
+          .successRateWithinDuration(successRate, window, backoff, minRequestThreshold))
     )
   }
 
@@ -97,7 +95,8 @@ class SessionQualificationParams[A <: Stack.Parameterized[A]](self: Stack.Parame
       successRate,
       window,
       FailureAccrualFactory.jitteredBackoff,
-      FailureAccrualPolicy.DefaultMinimumRequestThreshold)
+      FailureAccrualPolicy.DefaultMinimumRequestThreshold
+    )
 
   /**
    * Sets a failure accrual policy that triggers when success rate drops under a given value
@@ -110,18 +109,19 @@ class SessionQualificationParams[A <: Stack.Parameterized[A]](self: Stack.Parame
    *
    * @param successRate The success rate to trigger on
    * @param window The time window of the moving average
-   * @param backoff The backoff that should be applied to revival attempts
+   * @param backoff The [[Backoff]] that should be applied to revival attempts
    */
   def successRateFailureAccrual(
     successRate: Double,
     window: Duration,
-    backoff: Stream[Duration]
+    backoff: Backoff
   ): A =
     successRateFailureAccrual(
       successRate,
       window,
       backoff,
-      FailureAccrualPolicy.DefaultMinimumRequestThreshold)
+      FailureAccrualPolicy.DefaultMinimumRequestThreshold
+    )
 
   /**
    * Sets a FailureAccrualPolicy that triggers after `nFailures` consecutive failures.
@@ -131,16 +131,12 @@ class SessionQualificationParams[A <: Stack.Parameterized[A]](self: Stack.Parame
    *      [[FailureAccrualFactory]]
    *
    * @param nFailures The number of failures to trigger on
-   * @param backoff The backoff that should be applied to revival attempts
+   * @param backoff The [[Backoff]] that should be applied to revival attempts
    */
-  def consecutiveFailuresFailureAccrual(
-    nFailures: Int,
-    backoff: Stream[Duration]
-  ): A = {
+  def consecutiveFailuresFailureAccrual(nFailures: Int, backoff: Backoff): A = {
     self.configured(
-      FailureAccrualFactory.Param(
-        () => FailureAccrualPolicy.consecutiveFailures(nFailures, backoff)
-      )
+      FailureAccrualFactory.Param(() =>
+        FailureAccrualPolicy.consecutiveFailures(nFailures, backoff))
     )
   }
 

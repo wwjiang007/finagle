@@ -1,5 +1,7 @@
 package com.twitter.finagle.http
 
+import scala.collection.immutable
+
 object HttpTracing {
 
   /**
@@ -8,13 +10,14 @@ object HttpTracing {
    * See [[headers()]] for Java compatibility.
    */
   object Header {
+    val TraceContext = "b3"
     val TraceId = "X-B3-TraceId"
     val SpanId = "X-B3-SpanId"
     val ParentSpanId = "X-B3-ParentSpanId"
     val Sampled = "X-B3-Sampled"
     val Flags = "X-B3-Flags"
 
-    val All = Seq(TraceId, SpanId, ParentSpanId, Sampled, Flags)
+    val All = immutable.Seq(TraceId, SpanId, ParentSpanId, Sampled, Flags)
     val Required = Seq(TraceId, SpanId)
 
     /** exposed for testing */

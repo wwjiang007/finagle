@@ -1,20 +1,16 @@
 package com.twitter.finagle.zipkin.core
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.tracing._
 import com.twitter.util._
 import java.net.{InetAddress, InetSocketAddress}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.junit.runner.RunWith
 
-@RunWith(classOf[JUnitRunner])
 class RawZipkinTracerTest extends FunSuite {
 
   val traceId = TraceId(Some(SpanId(123)), Some(SpanId(123)), SpanId(123), None, Flags().setDebug)
 
-  class FakeRawZipkinTracer extends RawZipkinTracer(NullStatsReceiver) {
+  class FakeRawZipkinTracer extends RawZipkinTracer {
     var spans: Seq[Span] = Seq.empty
     override def sendSpans(xs: Seq[Span]): Future[Unit] = {
       spans ++= xs

@@ -12,7 +12,9 @@ import com.twitter.finagle.service._
 import com.twitter.finagle.stack.nilStack
 import com.twitter.finagle.stats.{ClientStatsReceiver, LoadedHostStatsReceiver}
 import com.twitter.finagle.tracing._
+
 import com.twitter.util.registry.GlobalRegistry
+import scala.collection.immutable.Queue
 
 object StackClient {
 
@@ -21,6 +23,7 @@ object StackClient {
    * within the companion objects of the respective modules.
    */
   object Role extends Stack.Role("StackClient") {
+
     /**
      * Defines the role of the connection pool in the client stack.
      */
@@ -53,7 +56,7 @@ object StackClient {
     val postNameResolutionTimeout = Stack.Role("PostNameResolutionTimeout")
 
     /**
-     * Defines a preallocoted position at the "bottom" of the stack which is
+     * Defines a preallocated position at the "bottom" of the stack which is
      * special in that it's the first role before the client sends the request to
      * the underlying transport implementation.
      */
@@ -75,6 +78,7 @@ object StackClient {
    * @see [[com.twitter.finagle.service.FailFastFactory]]
    * @see [[com.twitter.finagle.service.PendingRequestFilter]]
    * @see [[com.twitter.finagle.client.DefaultPool]]
+   * @see [[com.twitter.finagle.service.ClosableService]]
    * @see [[com.twitter.finagle.service.TimeoutFilter]]
    * @see [[com.twitter.finagle.liveness.FailureAccrualFactory]]
    * @see [[com.twitter.finagle.service.StatsServiceFactory]]
@@ -85,7 +89,14 @@ object StackClient {
    * @see [[com.twitter.finagle.filter.ExceptionSourceFilter]]
    * @see [[com.twitter.finagle.client.LatencyCompensation]]
    */
-  def endpointStack[Req, Rep]: Stack[ServiceFactory[Req, Rep]] = {
+  def endpointStack[Req, Rep]: Stack[ServiceFactory[Req, Rep]] =
+    // temporary standard behaviour for those calling this API from outside
+    // of StackClient.scala
+    endpointStack(false)
+
+  private def endpointStack[Req, Rep](
+    shouldOffloadEarly: Boolean
+  ): Stack[ServiceFactory[Req, Rep]] = {
     // Ensure that we have performed global initialization.
     com.twitter.finagle.Init()
 
@@ -93,6 +104,18 @@ object StackClient {
      * N.B. see the note in `newStack` regarding up / down orientation in the stack.
      */
     val stk = new StackBuilder[ServiceFactory[Req, Rep]](nilStack[Req, Rep])
+
+    if (shouldOffloadEarly) {
+
+      /**
+       * `OffloadFilter` shifts future continuations (callbacks and
+       * transformations) off of IO threads into a configured `FuturePool`.
+       * This module is intentionally placed at the top of the stack
+       * such that execution context shifts as client's response leaves
+       * the stack and enters the application code.
+       */
+      stk.push(OffloadFilter.client)
+    }
 
     /**
      * `prepConn` is the bottom of the stack by definition. This position represents
@@ -108,7 +131,7 @@ object StackClient {
      * so this should be low in the stack to accurately delineate between wire time
      * and handling time.
      */
-    stk.push(WireTracingFilter.module)
+    stk.push(WireTracingFilter.clientModule)
 
     /**
      * `ExpiringService` enforces an idle timeout and total ttl for connections.
@@ -138,8 +161,13 @@ object StackClient {
      * `DefaultPool` configures connection pooling. Like the `LoadBalancerFactory`
      * module it is a potentially aggregate [[ServiceFactory]] composed of multiple
      * [[Service Services]] which represent a distinct session to the same endpoint.
+     *
+     * When the service lifecycle is managed independently of the stack. `ClosableService`
+     * ensures a closed service cannot be reused. Typically a closed service releases
+     * its connection into the configured pool.
      */
     stk.push(DefaultPool.module)
+    stk.push(ClosableService.client)
 
     /**
      * `TimeoutFilter` enforces static request timeouts and broadcast request deadlines,
@@ -253,7 +281,9 @@ object StackClient {
      * as "module A is pushed after module B".
      */
 
-    val stk = new StackBuilder(endpointStack[Req, Rep])
+    val shouldOffloadEarly = offloadEarly() || com.twitter.finagle.offload.auto()
+
+    val stk = new StackBuilder(endpointStack[Req, Rep](shouldOffloadEarly))
 
     /*
      * These modules balance requests across cluster endpoints and
@@ -287,10 +317,7 @@ object StackClient {
      *    acquisition.
      *
      *  * `Role.prepFactory` is a hook used to inject codec-specific
-     *    behavior; it is used in the HTTP codec to avoid closing a
-     *    service while a chunked response is being read. It must
-     *    appear below `FactoryToService` so that services are not
-     *    prematurely closed by `FactoryToService`.
+     *    behavior that needs to run for each session before it's been acquired.
      *
      *  * `FactoryToService` acquires a new endpoint service from the
      *    load balancer on each request (and closes it after the
@@ -384,14 +411,32 @@ object StackClient {
     stk.push(FactoryToService.module)
 
     /*
-     * These modules set up tracing for the request span:
+     * These modules set up tracing for the request span and miscellaneous
+     * actions before a request leaves the client stack:
      *
      *  * `Role.protoTracing` is a hook for protocol-specific tracing
+     *
+     *  * `Failure` processes request failures for external representation
      *
      *  * `ClientTracingFilter` traces request send / receive
      *    events. It must appear above all other modules except
      *    `TraceInitializerFilter` so it delimits all tracing in the
      *    course of a request.
+     *
+     *  * `ForwardAnnotation` allows us to inject annotations into child
+     *    span.
+     *
+     *  * `RegistryEntryLifecycle` is a hook for registering this client
+     *    into the ClientRegistry and removing on close.
+     *
+     *  * `OffloadFilter` shifts future continuations (callbacks and
+     *    transformations) off of IO threads into a configured `FuturePool`.
+     *    This module is intentionally placed at the top of the stack
+     *    such that execution context shifts as client's response leaves
+     *    the stack and enters the application code.
+     *
+     *  * `ClientExceptionTracingFilter` reports binary annotations for exceptions.
+     *    It has no position constraints within the stack.
      *
      *  * `TraceInitializerFilter` allocates a new trace span per
      *    request. It must appear above all other modules so the
@@ -401,8 +446,13 @@ object StackClient {
     stk.push(Role.protoTracing, identity[ServiceFactory[Req, Rep]](_))
     stk.push(Failure.module)
     stk.push(ClientTracingFilter.module)
-    stk.push(TraceInitializerFilter.clientModule)
+    stk.push(ForwardAnnotation.module)
+    if (!shouldOffloadEarly) {
+      stk.push(OffloadFilter.client)
+    }
     stk.push(RegistryEntryLifecycle.module)
+    stk.push(ClientExceptionTracingFilter.module())
+    stk.push(TraceInitializerFilter.clientModule)
     stk.result
   }
 
@@ -413,6 +463,19 @@ object StackClient {
     Stack.Params.empty +
       Stats(ClientStatsReceiver) +
       LoadBalancerFactory.HostStats(LoadedHostStatsReceiver)
+
+  /**
+   * A set of ClientParamsInjectors for transforming client params.
+   */
+  private[finagle] object DefaultInjectors {
+    @volatile private var underlying = Queue.empty[ClientParamsInjector]
+
+    def append(injector: ClientParamsInjector): Unit =
+      synchronized { underlying = underlying :+ injector }
+
+    def injectors: Seq[ClientParamsInjector] =
+      underlying
+  }
 }
 
 /**
@@ -444,9 +507,51 @@ trait StackClient[Req, Rep]
   /** The current parameter map. */
   def params: Stack.Params
 
-  /** A new StackClient with the provided stack. */
+  /**
+   * A new [[StackClient]] with the provided `stack`.
+   *
+   * @see `withStack` that takes a `Function1` for a more ergonomic
+   *     API when used with method chaining.
+   */
   def withStack(stack: Stack[ServiceFactory[Req, Rep]]): StackClient[Req, Rep]
 
+  /**
+   * A new [[StackClient]] using the function to create a new [[Stack]].
+   *
+   * The input to `fn` is the [[stack client's current stack]].
+   * This API allows for easier usage when writing code that
+   * uses method chaining.
+   *
+   * This method is similar to [[transformed]] while providing easier API
+   * ergonomics for one-off `Stack` changes.
+   *
+   * @example
+   * From Scala:
+   * {{{
+   * import com.twitter.finagle.Http
+   *
+   * Http.client.withStack(_.prepend(MyStackModule))
+   * }}}
+   *
+   * From Java:
+   * {{{
+   * import com.twitter.finagle.Http;
+   * import static com.twitter.util.Function.func;
+   *
+   * Http.client().withStack(func(stack -> stack.prepend(MyStackModule)));
+   * }}}
+   *
+   * @see [[withStack(Stack)]]
+   * @see [[transformed]]
+   */
+  def withStack(
+    fn: Stack[ServiceFactory[Req, Rep]] => Stack[ServiceFactory[Req, Rep]]
+  ): StackClient[Req, Rep] =
+    withStack(fn(stack))
+
+  /**
+   * @see [[withStack]]
+   */
   def transformed(t: Stack.Transformer): StackClient[Req, Rep] =
     withStack(t(stack))
 

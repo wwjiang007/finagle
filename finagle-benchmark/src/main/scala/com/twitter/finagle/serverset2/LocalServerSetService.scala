@@ -1,7 +1,7 @@
 package com.twitter.finagle.serverset2
 
 import com.twitter.app.App
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.util.DefaultTimer
 import com.twitter.logging.Logger
 import com.twitter.util.{Await, Future}
@@ -43,9 +43,7 @@ private[serverset2] object LocalServerSetService extends App {
   @volatile private var nextMemberId = 0
 
   def createServerSetPaths(num: Int): Seq[String] =
-    (1 to num).map { id =>
-      s"/twitter/service/testset_$id/staging/job"
-    }
+    (1 to num).map { id => s"/twitter/service/testset_$id/staging/job" }
 
   def main(): Unit = {
     logger.info(s"Starting zookeeper on localhost:${zkListenPort()}")

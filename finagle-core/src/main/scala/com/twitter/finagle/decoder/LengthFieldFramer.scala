@@ -3,7 +3,7 @@ package com.twitter.finagle.decoder
 import com.twitter.io.{Buf, ByteReader}
 import scala.collection.mutable.ArrayBuffer
 
-private[finagle] object LengthFieldFramer {
+private[twitter] object LengthFieldFramer {
 
   class FrameTooLargeException(size: Long, max: Long)
       extends Exception(s"Frame of size $size exceeds max length of $max")
@@ -48,13 +48,13 @@ private[finagle] object LengthFieldFramer {
  * @param bigEndian Set to false if the length field is little endian. This has
  *                  no effect on the rest of the frame.
  */
-private[finagle] class LengthFieldFramer(
+private[twitter] class LengthFieldFramer(
   lengthFieldBegin: Int,
   lengthFieldLength: Int,
   lengthAdjust: Int,
   maxFrameLength: Int,
-  bigEndian: Boolean
-) extends Framer {
+  bigEndian: Boolean)
+    extends Framer {
   import LengthFieldFramer._
 
   private[this] var accum = Buf.Empty
@@ -68,7 +68,7 @@ private[finagle] class LengthFieldFramer(
 
   require(lengthAdjust >= 0, s"Invalid lengthAdjust: $lengthAdjust. must be >= 0.")
 
-  require(maxFrameLength > 0, s"Invalid lengthFieldlength: $maxFrameLength. must be > 0.")
+  require(maxFrameLength > 0, s"Invalid maxFrameLength: $maxFrameLength. must be > 0.")
 
   require(
     lengthFieldBegin >= 0 && lengthFieldEnd <= maxFrameLength,

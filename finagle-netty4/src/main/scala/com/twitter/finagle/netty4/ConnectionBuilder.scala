@@ -10,6 +10,7 @@ import com.twitter.finagle.{
 }
 import com.twitter.finagle.client.{LatencyCompensation, Transporter}
 import com.twitter.finagle.netty4.Netty4Transporter.Backpressure
+import com.twitter.finagle.netty4.channel.RawNetty4ClientChannelInitializer
 import com.twitter.finagle.param.Stats
 import com.twitter.finagle.transport.Transport
 import com.twitter.logging.Level
@@ -20,9 +21,11 @@ import io.netty.channel.{
   ChannelFuture,
   ChannelFutureListener,
   ChannelInitializer,
-  ChannelOption
+  ChannelOption,
+  ChannelPipeline
 }
 import io.netty.channel.epoll.{Epoll, EpollSocketChannel}
+import io.netty.channel.local.{LocalAddress, LocalChannel}
 import io.netty.channel.socket.nio.NioSocketChannel
 import java.lang.{Boolean => JBool, Integer => JInt}
 import java.net.SocketAddress
@@ -37,17 +40,21 @@ import scala.util.control.NonFatal
  * @param addr Destination `SocketAddress` for new connections.
  * @param params Configuration parameters.
  */
-private final class ConnectionBuilder(
+private[finagle] final class ConnectionBuilder(
   init: ChannelInitializer[Channel],
   addr: SocketAddress,
-  params: Stack.Params
-) {
+  params: Stack.Params) {
 
   private[this] val statsReceiver = params[Stats].statsReceiver
   private[this] val connectLatencyStat = statsReceiver.stat("connect_latency_ms")
   private[this] val failedConnectLatencyStat = statsReceiver.stat("failed_connect_latency_ms")
   private[this] val cancelledConnects = statsReceiver.counter("cancelled_connects")
-  private[this] val bootstrap = ConnectionBuilder.makeBootstrap(init, params)
+  private[this] val bootstrap = ConnectionBuilder.makeBootstrap(init, addr, params)
+
+  /**
+   * The socket address targeted for connection establishment.
+   */
+  def remoteAddress: SocketAddress = addr
 
   /**
    * Creates a new connection then, from within the channels event loop, passes it to the
@@ -100,8 +107,7 @@ private final class ConnectionBuilder(
         } else if (!channelF.channel.isOpen) {
           // Somehow the channel ended up closed before we got here, likely as
           // a result of `init` `ChannelInitializer` behavior.
-          transportP.setException(
-            Failure.rejected("Netty4 Channel was found in a closed state"))
+          transportP.setException(Failure.rejected("Netty4 Channel was found in a closed state"))
         } else {
           connectLatencyStat.add(latency)
           val ch = channelF.channel
@@ -133,10 +139,31 @@ private final class ConnectionBuilder(
   }
 }
 
-private object ConnectionBuilder {
+private[finagle] object ConnectionBuilder {
+
+  /** Build a raw form of the connection builder */
+  def rawClient(
+    init: ChannelPipeline => Unit,
+    addr: SocketAddress,
+    params: Stack.Params
+  ): ConnectionBuilder =
+    new ConnectionBuilder(
+      new RawNetty4ClientChannelInitializer(init, params),
+      addr,
+      params
+    )
+
+  private def isLocal(addr: SocketAddress): Boolean = addr match {
+    case _: LocalAddress => true
+    case _ => false
+  }
 
   // Construct an appropriate `Bootstrap` from the provided params
-  private def makeBootstrap(init: ChannelInitializer[Channel], params: Stack.Params): Bootstrap = {
+  private def makeBootstrap(
+    init: ChannelInitializer[Channel],
+    addr: SocketAddress,
+    params: Stack.Params
+  ): Bootstrap = {
     val Transport.Options(noDelay, reuseAddr, _) = params[Transport.Options]
     val LatencyCompensation.Compensation(compensation) = params[LatencyCompensation.Compensation]
     val Transporter.ConnectTimeout(connectTimeout) = params[Transporter.ConnectTimeout]
@@ -149,18 +176,31 @@ private object ConnectionBuilder {
       (compensation + connectTimeout).inMillis.min(Int.MaxValue)
 
     val channelClass =
-      if (useNativeEpoll() && Epoll.isAvailable) classOf[EpollSocketChannel]
+      if (isLocal(addr)) classOf[LocalChannel]
+      else if (useNativeEpoll() && Epoll.isAvailable) classOf[EpollSocketChannel]
       else classOf[NioSocketChannel]
 
     val bootstrap = new Bootstrap()
       .group(params[param.WorkerPool].eventLoopGroup)
       .channel(channelClass)
       .option(ChannelOption.ALLOCATOR, allocator)
-      .option[JBool](ChannelOption.TCP_NODELAY, noDelay)
-      .option[JBool](ChannelOption.SO_REUSEADDR, reuseAddr)
-      .option[JBool](ChannelOption.AUTO_READ, !backpressure) // backpressure! no reads on transport => no reads on the socket
       .option[JInt](ChannelOption.CONNECT_TIMEOUT_MILLIS, compensatedConnectTimeoutMs.toInt)
       .handler(init)
+
+    if (!isLocal(addr)) {
+      // Trying to set SO_REUSEADDR and TCP_NODELAY gives 'Unkonwn channel option' warnings
+      // when used with `LocalServerChannel`. So skip setting them at all.
+      bootstrap.option[JBool](ChannelOption.TCP_NODELAY, noDelay)
+      bootstrap.option[JBool](ChannelOption.SO_REUSEADDR, reuseAddr)
+
+      // Turning off AUTO_READ causes SSL/TLS errors in Finagle when using `LocalChannel`.
+      // So skip setting it at all.
+      bootstrap
+        .option[JBool](
+          ChannelOption.AUTO_READ,
+          !backpressure
+        ) // backpressure! no reads on transport => no reads on the socket
+    }
 
     val Transport.Liveness(_, _, keepAlive) = params[Transport.Liveness]
     keepAlive.foreach(bootstrap.option[JBool](ChannelOption.SO_KEEPALIVE, _))

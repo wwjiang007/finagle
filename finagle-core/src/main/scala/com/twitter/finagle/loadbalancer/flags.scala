@@ -9,7 +9,11 @@ import com.twitter.app.GlobalFlag
  */
 /**
  * A [[GlobalFlag]] that changes the default balancer for every client in the process.
- * Valid choices are ['heap', 'choice', and 'aperture'].
+ * Valid choices are ['heap', 'choice', 'aperture', and 'random_aperture'].
+ *
+ * @note that 'random_aperture' should only be used in unusual situations such as for
+ *       testing instances and requires extra configuration. See the aperture
+ *       documentation for more information.
  *
  * To configure the load balancer on a per-client granularity instead, use the
  * `withLoadBalancer` method like so:
@@ -38,9 +42,23 @@ object perHostStats
     )
 
 package exp {
+
+  import com.twitter.finagle.loadbalancer.aperture.EagerConnectionsType
+
   object loadMetric
       extends GlobalFlag(
         "leastReq",
         "Metric used to measure load across endpoints (leastReq | ewma)"
       )
+
+  object apertureEagerConnections
+      extends GlobalFlag[EagerConnectionsType.Value](
+        EagerConnectionsType.Enable,
+        "enable aperture eager connections\n" +
+          "\tAccepts one of 3 values of EagerConnectionType: Enable, Disable, and ForceWithDtab.\n" +
+          "\tWhen enabled, the aperture load balancer will eagerly establish connections with\n" +
+          "\tall endpoints in the aperture. This does not typically apply for hosts resolved in\n" +
+          "\tresult of request-leve dtab overrides unless set to ForceWithDtab."
+      )
+
 }

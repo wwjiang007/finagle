@@ -1,12 +1,13 @@
 package com.twitter.finagle.http
 
-import com.twitter.finagle.{ListeningServer, Service}
+import com.twitter.conversions.StorageUnitOps._
 import com.twitter.finagle.stats.NullStatsReceiver
-import com.twitter.io.Buf
-import com.twitter.io.Reader.ReaderDiscarded
-import com.twitter.util.{Future, Promise, Return, Throw}
+import com.twitter.finagle.{ListeningServer, Service}
+import com.twitter.io.{Buf, BufReader, ReaderDiscardedException}
+import com.twitter.util.{Future, Promise, Return, StorageUnit, Throw}
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
+import org.scalatest.prop.TableDrivenPropertyChecks._
 
 abstract class AbstractHttp1EndToEndTest extends AbstractEndToEndTest {
 
@@ -79,9 +80,7 @@ abstract class AbstractHttp1EndToEndTest extends AbstractEndToEndTest {
     // This is a similar to a test in AbstractEndToEndTest, but checks the status of
     // the connection in a manner that is specific to HTTP/1.x
     test(prefix + ": closes the connection on request header fields too large") {
-      val service = Service.mk { _: Request =>
-        Future.value(Response())
-      }
+      val service = Service.mk { _: Request => Future.value(Response()) }
 
       val client = connect(service)
       val request = Request("/")
@@ -111,7 +110,10 @@ abstract class AbstractHttp1EndToEndTest extends AbstractEndToEndTest {
     }
   }
 
-  private def connectionCloseTest(request: Request, service: HttpService)(
+  private def connectionCloseTest(
+    request: Request,
+    service: HttpService
+  )(
     connect: HttpService => HttpService
   ): Unit = {
     val client = connect(service)
@@ -131,9 +133,8 @@ abstract class AbstractHttp1EndToEndTest extends AbstractEndToEndTest {
     val streamS = if (streaming) "streaming" else "non-streaming"
     val continueS = if (autoContinueEnabled) "enabled" else "disabled"
     val label = s"$streamS server handles expect continue header when autoContinue is $continueS"
-    val feature = if (autoContinueEnabled) AutomaticContinue else DisableAutomaticContinue
 
-    testIfImplemented(feature)(label) {
+    test(label) {
       val sawExpectHeaderP = new Promise[Boolean]
 
       val svc = new HttpService {
@@ -214,7 +215,8 @@ abstract class AbstractHttp1EndToEndTest extends AbstractEndToEndTest {
         } yield ()
 
         f.respond {
-          case Return(_) | Throw(_: ReaderDiscarded) => writerFinished.set(true) // must finish
+          case Return(_) | Throw(_: ReaderDiscardedException) =>
+            writerFinished.set(true) // must finish
           case _ => ()
         }
 
@@ -235,6 +237,75 @@ abstract class AbstractHttp1EndToEndTest extends AbstractEndToEndTest {
     assert(await(client(Request(Method.Get, "/"))).contentString == responseString)
     await(client.close())
     await(server.close())
+  }
+
+  test(s"streaming server does not stream sufficiently small fixed length messages") {
+    val fixedLengthStreamedAfter: StorageUnit = 4.bytes
+    Table(
+      ("body", "expectChunked"),
+      ("", false),
+      ("hal", false),
+      ("hall", false),
+      ("hello", true)
+    ).forEvery { (body, expectChunked) =>
+      val receivedRequestFuture: Promise[Request] = Promise()
+      // given
+      val svc = Service.mk[Request, Response] { req =>
+        receivedRequestFuture.setValue(req)
+        Future.value(Response(req))
+      }
+
+      val server = serverImpl()
+        .withStreaming(fixedLengthStreamedAfter)
+        .serve("localhost:*", svc)
+
+      val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
+      val client = clientImpl().newService(s"${addr.getHostName}:${addr.getPort}", "client")
+      initClient(client)
+
+      val req = Request()
+      req.contentString = body
+      req.headerMap.put("Content-Length", body.length.toString)
+
+      // when
+      client(req)
+
+      // then
+      val receivedRequest = await(receivedRequestFuture)
+      assert(receivedRequest.isChunked == expectChunked)
+      val receivedBody = await(BufReader.readAll(receivedRequest.reader))
+      assert(receivedBody == Buf.Utf8(body))
+
+      await(server.close())
+      await(client.close())
+    }
+  }
+
+  test(s"streaming server will accept fixed length messages that exceed maxRequestSize") {
+    // given
+    val svc = Service.mk[Request, Response] { req => Future.value(Response(req)) }
+
+    val server = serverImpl()
+      .withStreaming(1.gigabyte)
+      .withMaxRequestSize(4.bytes)
+      .serve("localhost:*", svc)
+
+    val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
+    val client = clientImpl().newService(s"${addr.getHostName}:${addr.getPort}", "client")
+    initClient(client)
+
+    val req = Request()
+    req.contentString = "hello"
+    req.headerMap.put("Content-Length", "5")
+
+    // when
+    val resp = await(client(req))
+
+    // then
+    assert(resp.statusCode == 200)
+
+    await(server.close())
+    await(client.close())
   }
 
   run(multiplePipelines(implName, _))(nonStreamingConnect)

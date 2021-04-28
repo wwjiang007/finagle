@@ -11,18 +11,18 @@ import com.twitter.io.{Buf, ByteReader}
 private object NonNegotiatingServer {
 
   private val NonNegotiatingSessionFactory: SessionF = (
-  ref: RefPushSession[ByteReader, Buf],
-  params: Stack.Params,
-  handle: MuxChannelHandle,
-  service: Service[Request, Response]
+    ref: RefPushSession[ByteReader, Buf],
+    params: Stack.Params,
+    sharedStats: SharedNegotiationStats,
+    handle: MuxChannelHandle,
+    service: Service[Request, Response]
   ) => {
-    val statsReceiver = params.apply[fparam.Stats].statsReceiver.scope("mux")
-    val framingStats = statsReceiver.scope("framer")
+    val statsReceiver = params.apply[fparam.Stats].statsReceiver
 
     val session = new MuxServerSession(
       params,
-      new FragmentDecoder(framingStats),
-      new FragmentingMessageWriter(handle, Int.MaxValue, framingStats),
+      new FragmentDecoder(sharedStats),
+      new FragmentingMessageWriter(handle, Int.MaxValue, sharedStats),
       handle,
       service
     )

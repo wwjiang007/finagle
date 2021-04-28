@@ -1,6 +1,6 @@
 scala_library(
-    sources = rglobs("*.scala"),
-    compiler_option_sets = {"fatal_warnings"},
+    sources = ["**/*.scala"],
+    compiler_option_sets = ["fatal_warnings"],
     # NB: This is not an actual dependency, but is necessary to have Pants behave
     #     like SBT, throwing an error for "import java.*" statements.
     java_sources = ["finagle/finagle-memcached/src/main/java"],
@@ -22,16 +22,17 @@ scala_library(
         "3rdparty/jvm/io/netty:netty4-handler-proxy",
         "3rdparty/jvm/org/apache/thrift:libthrift",
         "3rdparty/jvm/org/apache/zookeeper:zookeeper-client",
-        "finagle/finagle-core/src/main/scala",
+        "finagle/finagle-core/src/main",
+        "finagle/finagle-memcached/src/main/java:pants-workaround",
         "finagle/finagle-memcached/src/main/resources",
         "finagle/finagle-netty4",
+        "finagle/finagle-partitioning",
         "finagle/finagle-serversets",
         "finagle/finagle-serversets/src/main/java",
         "finagle/finagle-serversets/src/main/thrift:thrift-java",
         "finagle/finagle-toggle/src/main/scala",
         "util/util-app/src/main/scala",
-        "util/util-collection/src/main/scala",
-        "util/util-core/src/main/scala",
+        "util/util-core:scala",
         "util/util-function/src/main/java",
         "util/util-hashing",
         "util/util-logging/src/main/scala",
@@ -40,7 +41,8 @@ scala_library(
     ],
     exports = [
         "3rdparty/jvm/com/twitter/bijection:core",
-        "finagle/finagle-core/src/main/scala",
-        "util/util-core/src/main/scala",
+        "finagle/finagle-core/src/main",
+        "finagle/finagle-partitioning",
+        "util/util-core:scala",
     ],
 )

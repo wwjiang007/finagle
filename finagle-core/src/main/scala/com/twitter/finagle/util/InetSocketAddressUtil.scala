@@ -1,23 +1,56 @@
 package com.twitter.finagle.util
 
-import java.net.{InetAddress, InetSocketAddress, SocketAddress, UnknownHostException}
-import scala.collection.breakOut
+import com.twitter.logging.Logger
+import java.net._
+import scala.collection.JavaConverters._
+import scala.util.control.NonFatal
 
 object InetSocketAddressUtil {
 
   type HostPort = (String, Int)
 
+  private[this] val log = Logger()
+
   private[finagle] val unconnected =
     new SocketAddress { override def toString = "unconnected" }
+
+  private[this] val anyInterfaceSupportsIpV6: Boolean = {
+    try {
+      val interfaces = NetworkInterface.getNetworkInterfaces().asScala
+      interfaces.exists { interface =>
+        val addresses = interface.getInetAddresses().asScala
+        addresses.exists { inetAddress =>
+          inetAddress.isInstanceOf[Inet6Address] && !inetAddress.isAnyLocalAddress() &&
+            !inetAddress.isLoopbackAddress() && !inetAddress.isLinkLocalAddress()
+        }
+      }
+    } catch {
+      case NonFatal(e) => {
+        log.debug(e, s"Unable to detect if any interface supports IPv6, assuming IPv4-only")
+        false
+      }
+    }
+  }
+
+  /**
+   * A proxy for InetAddress#getAllByName. Includes IPv6 Addresses only if a network interface
+   * supports it
+   */
+  private[finagle] def getAllByName(host: String): Array[InetAddress] = {
+    val allHosts = InetAddress.getAllByName(host)
+    if (anyInterfaceSupportsIpV6) allHosts
+    else allHosts.filter(_.isInstanceOf[Inet4Address])
+  }
 
   /** converts 0.0.0.0 -> public ip in bound ip */
   def toPublic(bound: SocketAddress): SocketAddress = {
     bound match {
       case addr: InetSocketAddress if addr.getAddress().isAnyLocalAddress() =>
-        val host = try InetAddress.getLocalHost()
-        catch {
-          case _: UnknownHostException => InetAddress.getLoopbackAddress
-        }
+        val host =
+          try InetAddress.getLocalHost()
+          catch {
+            case _: UnknownHostException => InetAddress.getLoopbackAddress
+          }
         new InetSocketAddress(host, addr.getPort())
       case _ => bound
     }
@@ -55,13 +88,12 @@ object InetSocketAddressUtil {
     resolveHostPortsSeq(hostPorts).flatten.toSet
 
   private[finagle] def resolveHostPortsSeq(hostPorts: Seq[HostPort]): Seq[Seq[SocketAddress]] =
-    hostPorts map {
+    hostPorts.map {
       case (host, port) =>
-        InetAddress
-          .getAllByName(host)
-          .map { addr =>
-            new InetSocketAddress(addr, port)
-          }(breakOut)
+          getAllByName(host)
+          .iterator
+          .map { addr => new InetSocketAddress(addr, port) }
+          .toSeq
     }
 
   /**
@@ -77,12 +109,12 @@ object InetSocketAddressUtil {
   def parseHosts(hosts: String): Seq[InetSocketAddress] = {
     if (hosts == ":*") return Seq(new InetSocketAddress(0))
 
-    parseHostPorts(hosts).map[InetSocketAddress, List[InetSocketAddress]] {
+    parseHostPorts(hosts).map {
       case (host, port) =>
         if (host == "")
           new InetSocketAddress(port)
         else
           new InetSocketAddress(host, port)
-    }(breakOut)
+    }
   }
 }

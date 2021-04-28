@@ -1,28 +1,34 @@
 package com.twitter.finagle.zookeeper
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.{Announcer, Addr, Address}
+import com.twitter.finagle.addr.WeightedAddress
+import com.twitter.finagle.partitioning.zk.ZkMetadata
+import com.twitter.finagle.{Addr, Address, Announcer, Name, Resolver}
 import com.twitter.util.{Await, Duration, Var}
-import java.io.{InputStreamReader, BufferedReader}
+import java.io.{BufferedReader, InputStreamReader}
 import java.net.{InetSocketAddress, URL}
-import org.junit.runner.RunWith
 import org.scalactic.source.Position
 import org.scalatest.concurrent.Eventually._
+import org.scalatest.concurrent.PatienceConfiguration
 import org.scalatest.exceptions.TestFailedDueToTimeoutException
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.time._
+import org.scalatest.time.{Span, SpanSugar}
 import org.scalatest.{BeforeAndAfter, FunSuite, Tag}
 
-@RunWith(classOf[JUnitRunner])
-class ZkAnnouncerTest extends FunSuite with BeforeAndAfter {
+class ZkAnnouncerTest
+    extends FunSuite
+    with BeforeAndAfter
+    with SpanSugar
+    with PatienceConfiguration {
+
+  val zkTimeout: Span = 100.milliseconds
+  implicit val config = PatienceConfig(timeout = 45.seconds, interval = zkTimeout)
+
+  @volatile var inst: ZkInstance = _
   val port1 = 80
   val port2 = 81
-  val zkTimeout = 100.milliseconds
-  var inst: ZkInstance = _
-  val factory = new ZkClientFactory(zkTimeout)
-
-  implicit val patienceConfig =
-    PatienceConfig(timeout = toSpan(zkTimeout * 3), interval = toSpan(zkTimeout))
+  val shardId = 0
+  val path = "/foo/bar/baz"
+  val emptyMetadata = Map.empty[String, String]
+  val factory = new ZkClientFactory(toDuration(zkTimeout))
 
   before {
     inst = new ZkInstance
@@ -33,14 +39,24 @@ class ZkAnnouncerTest extends FunSuite with BeforeAndAfter {
     inst.stop()
   }
 
-  def toSpan(d: Duration): Span = Span(d.inNanoseconds, Nanoseconds)
-  def hostPath = "localhost:%d!/foo/bar/baz".format(inst.zookeeperAddress.getPort)
+  def toDuration(s: Span): Duration = Duration.fromNanoseconds(s.totalNanos)
 
-  // TODO: remove when no longer flaky.
-  override def test(testName: String, testTags: Tag*)(f: => Any)(implicit pos: Position): Unit = {
-    if (!sys.props.contains("SKIP_FLAKY"))
-      super.test(testName, testTags: _*)(f)
-  }
+  private[this] def zk2resolve(path: String): Name =
+    Resolver.eval("zk2!" + inst.zookeeperConnectString + "!" + path)
+
+  private[this] def zk2resolve(path: String, endpoint: String): Name =
+    Resolver.eval("zk2!" + inst.zookeeperConnectString + "!" + path + "!" + endpoint)
+
+  def hostPath = "localhost:%d!%s".format(inst.zookeeperAddress.getPort, path)
+
+  private[this] def zk2ResolvedAddress(
+    ia: InetSocketAddress,
+    shardIdOpt: Option[Int] = Some(shardId),
+    metadata: Map[String, String] = emptyMetadata
+  ): Address =
+    WeightedAddress(
+      Address.Inet(ia, ZkMetadata.toAddrMetadata(ZkMetadata(shardIdOpt, metadata))),
+      1.0)
 
   test("announce a primary endpoint") {
     val ann = new ZkAnnouncer(factory)
@@ -55,6 +71,44 @@ class ZkAnnouncerTest extends FunSuite with BeforeAndAfter {
           assert(sockaddrs == Set(addr))
         case _ => fail()
       }
+    }
+  }
+
+  test("announce a primary endpoint with metadata") {
+    val ann = new ZkAnnouncer(factory)
+    val metadata = Map("keyA" -> "valueA")
+    val addrInet = new InetSocketAddress(port1)
+    val addr = Address.Inet(addrInet, Addr.Metadata.empty)
+    Await.result(ann.announce(addr.addr, "%s!%d".format(hostPath, shardId), metadata))
+
+    val Name.Bound(va) = zk2resolve(path)
+    eventually {
+      assert(
+        va.sample() == Addr.Bound(zk2ResolvedAddress(addrInet, Some(shardId), metadata))
+      )
+    }
+  }
+
+  test("announce a primary endpoint with metadata and additional endpoints") {
+    val ann = new ZkAnnouncer(factory)
+    val metadata = Map("keyA" -> "valueA")
+    val addrInet = new InetSocketAddress(port1)
+    val addr = Address.Inet(addrInet, Addr.Metadata.empty)
+    val additionalEndpointInet = new InetSocketAddress(port2)
+    val additionalEndpointAddr = Address.Inet(additionalEndpointInet, Addr.Metadata.empty)
+    Await.result(
+      ann.announce(
+        addr.addr,
+        "%s!%d".format(hostPath, shardId),
+        metadata,
+        Map("endpoint" -> additionalEndpointAddr.addr)))
+
+    val Name.Bound(va) = zk2resolve(path, "endpoint")
+    eventually {
+      assert(
+        va.sample() ==
+          Addr.Bound(zk2ResolvedAddress(additionalEndpointInet, Some(shardId), metadata))
+      )
     }
   }
 

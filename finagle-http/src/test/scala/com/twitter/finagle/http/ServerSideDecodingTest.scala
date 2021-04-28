@@ -1,6 +1,6 @@
 package com.twitter.finagle.http
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle
 import com.twitter.finagle.Service
 import com.twitter.finagle.builder.ClientBuilder
@@ -11,7 +11,7 @@ import java.net.InetSocketAddress
 import java.util.zip.{DeflaterOutputStream, GZIPOutputStream}
 import org.scalacheck.{Arbitrary, Gen}
 import org.scalatest.FunSuite
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 
 /**
  * Provides tests for server side content decoding.
@@ -21,7 +21,7 @@ import org.scalatest.prop.GeneratorDrivenPropertyChecks
  * compression is currently made problematic by netty
  * (see https://github.com/netty/netty/issues/4970).
  */
-class ServerSideDecodingTest extends FunSuite with GeneratorDrivenPropertyChecks {
+class ServerSideDecodingTest extends FunSuite with ScalaCheckDrivenPropertyChecks {
   // Helper class - might be overkill to have a sum type for just one test, but
   // it makes it simple to provide an Arbitrary instance for encoders and to
   // make the actual test that much more readable.
@@ -82,7 +82,7 @@ class ServerSideDecodingTest extends FunSuite with GeneratorDrivenPropertyChecks
       s"http://${addr.getHostName}:${addr.getPort}/"
     }
 
-    forAll { (content: String, encoder: Encoder) ⇒
+    forAll { (content: String, encoder: Encoder) =>
       val req = RequestBuilder()
         .setHeader("Content-Encoding", encoder.name)
         .setHeader("Content-Type", "text/plain;charset=utf-8")

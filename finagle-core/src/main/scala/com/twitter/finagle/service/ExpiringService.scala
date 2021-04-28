@@ -58,6 +58,15 @@ object ExpiringService {
       }
     }
 
+  // scoped this way for testing
+  private[service] def closeOnReleaseSvc[Req, Rep](
+    service: Service[Req, Rep]
+  ): Service[Req, Rep] = {
+    new ClosableService(service) {
+      def closedException = WriteException(new ServiceClosedException)
+    }
+  }
+
   /**
    * Creates a [[com.twitter.finagle.Stackable]] [[com.twitter.finagle.service.ExpiringService]]
    * which simply extracts the service from the underlying `ServiceFactory` and calls
@@ -84,7 +93,8 @@ object ExpiringService {
           case (None, None) => next
           case _ =>
             next.map { service =>
-              val closeOnRelease = new CloseOnReleaseService(service)
+              val closeOnRelease = closeOnReleaseSvc[Req, Rep](service)
+
               new ExpiringService(closeOnRelease, idle, life, timer, statsReceiver) {
                 def onExpire(): Unit = { closeOnRelease.close() }
               }
@@ -108,8 +118,8 @@ abstract class ExpiringService[Req, Rep](
   maxIdleTime: Option[Duration],
   maxLifeTime: Option[Duration],
   timer: Timer,
-  stats: StatsReceiver
-) extends ServiceProxy[Req, Rep](self) {
+  stats: StatsReceiver)
+    extends ServiceProxy[Req, Rep](self) {
   private[this] var active = true
   private[this] val latch = new AsyncLatch
 
@@ -122,9 +132,7 @@ abstract class ExpiringService[Req, Rep](
 
   private[this] def startTimer(duration: Option[Duration], counter: Counter) =
     duration
-      .map { t: Duration =>
-        timer.schedule(t.fromNow) { expire(counter) }
-      }
+      .map { t: Duration => timer.schedule(t.fromNow) { expire(counter) } }
       .getOrElse { NullTimerTask }
 
   private[this] def expire(counter: Counter): Unit = {

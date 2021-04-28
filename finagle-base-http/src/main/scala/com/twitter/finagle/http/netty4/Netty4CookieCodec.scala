@@ -1,6 +1,6 @@
 package com.twitter.finagle.http.netty4
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.http.{Cookie, CookieCodec, CookieMap}
 import com.twitter.finagle.http.cookie.SameSiteCodec
 import io.netty.handler.codec.http.cookie.{
@@ -30,7 +30,7 @@ private[finagle] object Netty4CookieCodec extends CookieCodec {
   }
 
   def encodeClient(cookies: Iterable[Cookie]): String =
-  // N4 Encoder returns null if cookies is empty
+    // N4 Encoder returns null if cookies is empty
     if (cookies.isEmpty) ""
     else clientEncoder.encode(cookies.map(cookieToNetty).asJava)
 
@@ -48,8 +48,7 @@ private[finagle] object Netty4CookieCodec extends CookieCodec {
         if (CookieMap.includeSameSite) SameSiteCodec.decodeSameSite(header, decoded)
         else decoded
       Some(Seq(finagleCookie))
-    }
-    else None
+    } else None
   }
 
   def decodeServer(header: String): Option[Iterable[Cookie]] = {
@@ -65,7 +64,10 @@ private[finagle] object Netty4CookieCodec extends CookieCodec {
     val nc = new NettyDefaultCookie(c.name, c.value)
     nc.setDomain(c.domain)
     nc.setPath(c.path)
-    if (c.maxAge != Cookie.DefaultMaxAge) {
+    // We convert the Durations to Ints to circumvent maxAge being
+    // Int.MinValue.seconds, which does not equal Duration.Bottom, even though
+    // they have the same integer value in seconds.
+    if (c.maxAge.inSeconds != Cookie.DefaultMaxAge.inSeconds) {
       nc.setMaxAge(c.maxAge.inSeconds)
     }
     nc.setSecure(c.secure)
@@ -81,8 +83,10 @@ private[finagle] object Netty4CookieCodec extends CookieCodec {
       domain = Option(nc.domain()),
       path = Option(nc.path()),
       secure = nc.isSecure(),
-      httpOnly = nc.isHttpOnly())
+      httpOnly = nc.isHttpOnly()
+    )
 
+    // Note: Long.MinValue is what Netty 4 uses to indicate "never expires."
     if (nc.maxAge() != Long.MinValue) cookie.maxAge(Some(nc.maxAge().seconds))
     else cookie
   }

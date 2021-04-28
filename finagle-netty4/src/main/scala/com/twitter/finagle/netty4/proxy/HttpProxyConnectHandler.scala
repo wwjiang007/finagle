@@ -31,7 +31,7 @@ import java.net.SocketAddress
  *       channel handlers that write on `channelAdded` or `channelActive`.
  *
  * [1]: https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01
- * [2]: http://wiki.squid-cache.org/Features/HTTPS
+ * [2]: https://wiki.squid-cache.org/Features/HTTPS
  * [3]: https://github.com/netty/netty/blob/4.1/handler-proxy/src/main/java/io/netty/handler/proxy/HttpProxyHandler.java
  *
  * @param host the ultimate host a remote proxy server connects to
@@ -41,8 +41,7 @@ import java.net.SocketAddress
 private[netty4] class HttpProxyConnectHandler(
   host: String,
   credentialsOption: Option[Transporter.Credentials],
-  httpClientCodec: ChannelHandler = new HttpClientCodec()
-) // exposed for testing
+  httpClientCodec: ChannelHandler = new HttpClientCodec()) // exposed for testing
     extends ChannelDuplexHandler
     with BufferingChannelOutboundHandler { self =>
 
@@ -86,9 +85,8 @@ private[netty4] class HttpProxyConnectHandler(
           // Create new connect HTTP proxy connect request.
           val req = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.CONNECT, host)
           req.headers().set(HttpHeaderNames.HOST, host)
-          credentialsOption.foreach(
-            c => req.headers().add(HttpHeaderNames.PROXY_AUTHORIZATION, proxyAuthorizationHeader(c))
-          )
+          credentialsOption.foreach(c =>
+            req.headers().add(HttpHeaderNames.PROXY_AUTHORIZATION, proxyAuthorizationHeader(c)))
 
           ctx.writeAndFlush(req)
           readIfNeeded(ctx)

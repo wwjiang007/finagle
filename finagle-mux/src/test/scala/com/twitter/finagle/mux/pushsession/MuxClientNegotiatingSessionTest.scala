@@ -1,8 +1,9 @@
 package com.twitter.finagle.mux.pushsession
 
-import com.twitter.conversions.storage._
-import com.twitter.conversions.time._
-import com.twitter.finagle.Mux.param.{MaxFrameSize, OppTls}
+import com.twitter.conversions.StorageUnitOps._
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.Mux.param.{CompressionPreferences, MaxFrameSize, OppTls}
+import com.twitter.finagle.mux.transport.CompressionNegotiation
 import com.twitter.finagle.Stack.Params
 import com.twitter.finagle.pushsession.PushChannelHandle
 import com.twitter.finagle.pushsession.utils.MockChannelHandle
@@ -13,9 +14,9 @@ import com.twitter.finagle.mux.transport.{Message, MuxFramer, OpportunisticTls}
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.finagle.{ChannelClosedException, Failure, FailureFlags, Mux, Path, liveness}
 import com.twitter.io.{Buf, ByteReader}
-import com.twitter.util.{Await, Awaitable, Future, Promise}
+import com.twitter.util.{Await, Awaitable, Future, Promise, Try}
 import org.scalactic.source.Position
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 import org.scalatest.{FunSuite, Tag}
 
 class MuxClientNegotiatingSessionTest extends FunSuite with MockitoSugar {
@@ -32,9 +33,10 @@ class MuxClientNegotiatingSessionTest extends FunSuite with MockitoSugar {
     (PushChannelHandle[ByteReader, Buf], Option[Headers]) => Future[MuxClientSession]
 
   private[this] val fragmentingParams = Mux.client.params + MaxFrameSize(2.megabytes)
+  private[this] val sharedStats = new SharedNegotiationStats(NullStatsReceiver)
 
   private[this] val newClientSession: Negotiator = (handle, hs) => {
-    new Negotiation.Client(fragmentingParams).negotiateAsync(handle, hs)
+    new Negotiation.Client(fragmentingParams, sharedStats).negotiateAsync(handle, hs)
   }
 
   // Used to observe the headers received from the Server
@@ -64,10 +66,13 @@ class MuxClientNegotiatingSessionTest extends FunSuite with MockitoSugar {
   private[this] def withMockHandle(
     negotiator: Negotiator,
     params: Params
-  ): (MockChannelHandle[ByteReader, Buf], MuxClientNegotiatingSession, InMemoryStatsReceiver) = {
-    val handle = new MockChannelHandle[ByteReader, Buf](null)
+  ): (MockNegotiatingChannelHandle, MuxClientNegotiatingSession, InMemoryStatsReceiver) = {
+    val handle = new MockNegotiatingChannelHandle()
     val headers = Mux.Client.headers(
-      params[MaxFrameSize].size, params[OppTls].level.getOrElse(OpportunisticTls.Off))
+      params[MaxFrameSize].size,
+      params[OppTls].level.getOrElse(OpportunisticTls.Off),
+      params[CompressionPreferences].compressionPreferences
+    )
     val stats = new InMemoryStatsReceiver
     val session = new MuxClientNegotiatingSession(
       handle = handle,
@@ -143,16 +148,18 @@ class MuxClientNegotiatingSessionTest extends FunSuite with MockitoSugar {
 
     // Make sure we are fragmenting the messages
 
-    // Server only wants 100 byte chunks, so make the message at lest 150 bytes
+    // Server only wants 100 byte chunks, so make the message at least 150 bytes
     val decoder = new FragmentDecoder(NullStatsReceiver)
-    val data = Buf.ByteArray((0 until 150).map(_.toByte):_*)
+    val data = Buf.ByteArray((0 until 150).map(_.toByte): _*)
 
     service.apply(Request(Path(), data))
     handle.serialExecutor.executeAll()
 
     // Chunk 1 shouldn't be a complete message
-    assert(decoder.decode(
-      ByteReader(handle.dequeAndCompleteWrite().foldLeft(Buf.Empty)(_.concat(_)))) == null)
+    assert(
+      decoder
+        .decode(ByteReader(handle.dequeAndCompleteWrite().foldLeft(Buf.Empty)(_.concat(_)))) == null
+    )
 
     handle.serialExecutor.executeAll()
 
@@ -189,8 +196,11 @@ class MuxClientNegotiatingSessionTest extends FunSuite with MockitoSugar {
   }
 
   test("Handle onClose failure cancels the handshake") {
-    val negotiate: Negotiator = (handle, hs) =>
-      Future.value(new Negotiation.Client(fragmentingParams).negotiate(handle, hs))
+    val negotiate: Negotiator =
+      (handle, hs) =>
+        Future.value(
+          new Negotiation.Client(fragmentingParams, sharedStats).negotiate(handle, hs)
+        )
 
     val (handle, negotiatingSession, stats) = withMockHandle(negotiate, fragmentingParams)
     assert(stats.gauges(Seq("negotiating")).apply() == 0.0f)
@@ -276,7 +286,7 @@ class MuxClientNegotiatingSessionTest extends FunSuite with MockitoSugar {
     val p = Promise[MuxClientSession]
     @volatile var setNegotiatePromise: () => Unit = null
     val negotiate: Negotiator = (handle, hs) => {
-      val n = new Negotiation.Client(fragmentingParams).negotiate(handle, hs)
+      val n = new Negotiation.Client(fragmentingParams, sharedStats).negotiate(handle, hs)
       setNegotiatePromise = () => p.setValue(n)
       p
     }
@@ -300,7 +310,70 @@ class MuxClientNegotiatingSessionTest extends FunSuite with MockitoSugar {
     handle.serialExecutor.executeAll()
     await(sessionF)
     assert(!stats.gauges.contains(Seq("negotiating")))
+    assert(!stats.gauges.contains(Seq("negotiating_queue_size")))
 
     assert(handle.currentSession.isInstanceOf[MuxClientSession])
+  }
+
+  test("Will enable compression when compression is negotiated") {
+    val negotiate = new HeaderObserver(fragmentingParams)
+    val (handle, negotiatingSession, stats) = withMockHandle(negotiate, fragmentingParams)
+    val fmt = CompressionNegotiation.CompressionFormats(Some("foo"), Some("foo"))
+
+    val serverHeaders = Seq(
+      MuxFramer.Header.KeyBuf -> MuxFramer.Header.encodeFrameSize(100),
+      CompressionNegotiation.ServerHeader.KeyBuf -> CompressionNegotiation.ServerHeader.encode(fmt)
+    )
+    val clientFrameSizeBuf = MuxFramer.Header.encodeFrameSize(2.megabytes.bytes.toInt)
+
+    assert(stats.gauges(Seq("negotiating")).apply() == 0.0f)
+    val sessionF = negotiatingSession.negotiate()
+
+    assert(stats.gauges(Seq("negotiating")).apply() == 1.0f)
+
+    assert(decodeClientWrite(handle.dequeAndCompleteWrite()).isInstanceOf[Message.Rerr])
+
+    negotiatingSession.receive(asByteReader(Message.Rerr(TinitTag, CanTinitMsg)))
+
+    // Make sure the client sent its max frame size header
+    decodeClientWrite(handle.dequeAndCompleteWrite()) match {
+      case Message.Tinit(_, _, hs) =>
+        val frameSizeValue = hs.collectFirst { case (MuxFramer.Header.KeyBuf, v) => v }
+        assert(frameSizeValue.get == clientFrameSizeBuf)
+
+      case other =>
+        fail(s"Unexpected message: $other")
+    }
+
+    assert(!handle.compressionOn && !handle.decompressionOn)
+    negotiatingSession.receive(asByteReader(Message.Rinit(TinitTag, 1, serverHeaders)))
+
+    handle.serialExecutor.executeAll()
+    val service = await(sessionF.flatMap(_.asService))
+    assert(!stats.gauges.contains(Seq("negotiating")))
+
+    assert(negotiate.observedHeaders == Some(serverHeaders))
+
+    assert(handle.compressionOn && handle.decompressionOn)
+  }
+}
+
+class MockNegotiatingChannelHandle
+    extends MockChannelHandle[ByteReader, Buf](
+      null
+    )
+    with NegotiatingHandle {
+  var tlsOn = false
+  var compressionOn = false
+  var decompressionOn = false
+
+  def turnOnTls(onHandshakeComplete: Try[Unit] => Unit): Unit = {
+    tlsOn = true
+  }
+  def turnOnCompression(format: String): Unit = {
+    compressionOn = true
+  }
+  def turnOnDecompression(format: String): Unit = {
+    decompressionOn = true
   }
 }

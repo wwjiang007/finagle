@@ -24,7 +24,7 @@ object LogFormatter {
     var index = 0
     s.foreach { c =>
       val i = c.toInt
-      if (i >= 0x20 && i <= 0x7E && i != 0x22 && i != 0x5C) {
+      if (i >= 0x20 && i <= 0x7e && i != 0x22 && i != 0x5c) {
         if (builder == null) {
           index += 1 // common case
         } else {
@@ -63,7 +63,7 @@ object LogFormatter {
 
 /** Apache-style common log formatter */
 class CommonLogFormatter extends LogFormatter {
-  /* See http://httpd.apache.org/docs/2.0/logs.html
+  /* See https://httpd.apache.org/docs/2.0/logs.html
    *
    * Apache common log format is: "%h %l %u %t \"%r\" %>s %b"
    *   %h: remote host
@@ -129,11 +129,15 @@ class CommonLogFormatter extends LogFormatter {
  */
 class LoggingFilter[REQUEST <: Request](
   val log: Logger,
-  val formatter: CoreLogFormatter[REQUEST, Response]
-) extends CoreLoggingFilter[REQUEST, Response] {
+  val formatter: CoreLogFormatter[REQUEST, Response])
+    extends CoreLoggingFilter[REQUEST, Response] {
 
   // Treat exceptions as empty 500 errors
-  override protected def logException(duration: Duration, request: REQUEST, throwable: Throwable): Unit = {
+  override protected def logException(
+    duration: Duration,
+    request: REQUEST,
+    throwable: Throwable
+  ): Unit = {
     val response = Response(request.version, Status.InternalServerError)
     val line = formatter.format(request, response, duration)
     log.info(line)
@@ -141,8 +145,10 @@ class LoggingFilter[REQUEST <: Request](
 }
 
 object LoggingFilter
-    extends LoggingFilter[Request]({
-      val log = Logger("access")
-      log.setUseParentHandlers(false)
-      log
-    }, new CommonLogFormatter)
+    extends LoggingFilter[Request](
+      {
+        val log = Logger("access")
+        log.setUseParentHandlers(false)
+        log
+      },
+      new CommonLogFormatter)

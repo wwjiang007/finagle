@@ -9,8 +9,8 @@ import java.util.TimeZone;
 
 import scala.Array;
 import scala.Option;
-import scala.collection.IndexedSeq;
-import scala.collection.JavaConversions;
+import scala.collection.JavaConverters;
+import scala.collection.immutable.IndexedSeq;
 import scala.math.BigDecimal;
 import scala.math.BigDecimal$;
 import scala.math.BigInt;
@@ -30,11 +30,11 @@ public final class RowCompilationTest {
     }
 
     public IndexedSeq<Field> fields() {
-      return JavaConversions.asScalaBuffer(fields).toIndexedSeq();
+      return JavaConverters.asScalaBufferConverter(fields).asScala().toIndexedSeq();
     }
 
     public IndexedSeq<Value> values() {
-      return JavaConversions.asScalaBuffer(values).toIndexedSeq();
+      return JavaConverters.asScalaBufferConverter(values).asScala().toIndexedSeq();
     }
 
     public Option<Object> indexOf(String columnName) {
@@ -93,13 +93,13 @@ public final class RowCompilationTest {
   private final Row bytesRow = new RowImpl(
       fields,
       Collections.singletonList(new RawValue(
-          Type.TinyBlob(), Charset.Binary(), true, new byte[] {0, 1, 2 }))
+          Type.TinyBlob(), MysqlCharset.Binary(), true, new byte[] {0, 1, 2 }))
   );
 
   private final Row timestampRow = new RowImpl(
       fields,
       Collections.singletonList(new RawValue(
-          Type.Timestamp(), Charset.Utf8_bin(), false,
+          Type.Timestamp(), MysqlCharset.Utf8_bin(), false,
           "2018-05-05 10:20:30".getBytes(StandardCharsets.UTF_8))
       )
   );

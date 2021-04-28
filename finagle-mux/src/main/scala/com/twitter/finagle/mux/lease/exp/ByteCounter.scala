@@ -1,6 +1,6 @@
 package com.twitter.finagle.mux.lease.exp
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.util._
 import com.twitter.util.Local.Context
 
@@ -33,18 +33,14 @@ private[lease] trait ByteCounter {
  * running.
  */
 // It might be simpler to just make it an exponential moving average.
-private[lease] class WindowedByteCounter private[lease] (
-  val info: JvmInfo,
-  ctx: Context
-) extends Thread("WindowedByteClock")
+private[lease] class WindowedByteCounter private[lease] (val info: JvmInfo, ctx: Context)
+    extends Thread("WindowedByteClock")
     with ByteCounter
     with Closable {
 
   import WindowedByteCounter._
 
-  def this(
-    info: JvmInfo
-  ) = this(info, Local.Context.empty)
+  def this(info: JvmInfo) = this(info, Local.Context.empty)
 
   /*
    Should we be conservative wrt. count vs. usage?

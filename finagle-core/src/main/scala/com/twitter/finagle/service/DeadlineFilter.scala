@@ -1,6 +1,6 @@
 package com.twitter.finagle.service
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.context.Deadline
 import com.twitter.finagle.stats.StatsReceiver
@@ -110,8 +110,8 @@ object DeadlineFilter {
       DeadlineFilter.RejectPeriod,
       DeadlineFilter.MaxRejectFraction,
       DeadlineFilter.Mode,
-      ServiceFactory[Req, Rep]]
-    {
+      ServiceFactory[Req, Rep]
+    ] {
       val role = new Stack.Role("DeadlineFilter")
       val description = "Reject requests when their deadline has passed"
 
@@ -141,19 +141,19 @@ object DeadlineFilter {
                       rejectPeriod = rejectPeriod,
                       maxRejectFraction = maxRejectFraction,
                       statsReceiver = scopedStatsReceiver,
-                      isDarkMode = darkMode)
-                      .andThen(service)
+                      isDarkMode = darkMode
+                    ).andThen(service)
 
                 override def apply(conn: ClientConnection): Future[Service[Req, Rep]] =
-                // Create a DeadlineFilter per connection, so we don't share the state of the token
-                // bucket for rejecting requests.
+                  // Create a DeadlineFilter per connection, so we don't share the state of the token
+                  // bucket for rejecting requests.
                   next(conn).map(newDeadlineFilter)
               }
             }
 
           case _ =>
             next
-      }
+        }
     }
 
   class DeadlineExceededException private[DeadlineFilter] (
@@ -161,8 +161,8 @@ object DeadlineFilter {
     deadline: Time,
     elapsed: Duration,
     now: Time,
-    val flags: Long = FailureFlags.DeadlineExceeded
-  ) extends Exception(
+    val flags: Long = FailureFlags.DeadlineExceeded)
+      extends Exception(
         s"exceeded request deadline of ${deadline - timestamp} "
           + s"by $elapsed. Deadline expired at $deadline and now it is $now."
       )
@@ -196,8 +196,8 @@ class DeadlineFilter[Req, Rep](
   maxRejectFraction: Double = DeadlineFilter.DefaultMaxRejectFraction,
   statsReceiver: StatsReceiver,
   nowMillis: () => Long = Stopwatch.systemMillis,
-  isDarkMode: Boolean
-) extends SimpleFilter[Req, Rep] {
+  isDarkMode: Boolean)
+    extends SimpleFilter[Req, Rep] {
 
   def this(
     rejectPeriod: Duration,
@@ -205,12 +205,7 @@ class DeadlineFilter[Req, Rep](
     statsReceiver: StatsReceiver,
     nowMillis: () => Long
   ) =
-    this(
-      rejectPeriod,
-      maxRejectFraction,
-      statsReceiver,
-      nowMillis,
-      false)
+    this(rejectPeriod, maxRejectFraction, statsReceiver, nowMillis, false)
 
   import DeadlineFilter.DeadlineExceededException
 
@@ -223,9 +218,10 @@ class DeadlineFilter[Req, Rep](
     s"maxRejectFraction must be between 0.0 and 1.0: $maxRejectFraction"
   )
 
-  private[this] val exceededStat = statsReceiver.counter("exceeded")
-  private[this] val rejectedStat = statsReceiver.counter("rejected")
+  private[this] val exceededCounter = statsReceiver.counter("exceeded")
+  private[this] val rejectedCounter = statsReceiver.counter("rejected")
   private[this] val expiredTimeStat = statsReceiver.stat("expired_ms")
+  private[this] val remainingTimeStat = statsReceiver.stat("remaining_ms")
 
   private[this] val serviceDeposit =
     DeadlineFilter.RejectBucketScaleFactor.toInt
@@ -241,16 +237,15 @@ class DeadlineFilter[Req, Rep](
     Deadline.current match {
       case Some(Deadline(timestamp, deadline)) =>
         val now = Time.now
-        val remaining = deadline - now
 
         if (deadline < now) {
           val exceeded = now - deadline
-          exceededStat.incr()
+          exceededCounter.incr()
           expiredTimeStat.add(exceeded.inMillis)
 
           // There are enough tokens to reject the request
           if (rejectBucket.tryGet(rejectWithdrawal)) {
-            rejectedStat.incr()
+            rejectedCounter.incr()
             if (isDarkMode)
               service(request)
             else
@@ -263,6 +258,8 @@ class DeadlineFilter[Req, Rep](
           }
         } else {
           rejectBucket.put(serviceDeposit)
+          val remaining = deadline - now
+          remainingTimeStat.add(remaining.inMillis)
           service(request)
         }
       case None =>

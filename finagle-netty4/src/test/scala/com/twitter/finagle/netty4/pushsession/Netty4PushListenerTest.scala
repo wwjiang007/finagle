@@ -14,20 +14,20 @@ class Netty4PushListenerTest extends AbstractNetty4ListenerTest {
   // for the benefit of the "notices when the client cuts the connection" test.
   private class SimpleSession[Req, Rep](
     handle: PushChannelHandle[Req, Rep],
-    service: Service[Req, Rep]
-  ) extends PushSession[Req, Rep](handle) {
+    service: Service[Req, Rep])
+      extends PushSession[Req, Rep](handle) {
 
     @volatile
     private[this] var currentDispatch: Future[Rep] = Future.never
 
     handle.onClose.respond { r =>
       val exc = r match {
-        case Throw(t)=> t
+        case Throw(t) => t
         case Return(_) => new ChannelClosedException()
       }
       currentDispatch.raise(exc)
     }
-    
+
     def receive(message: Req): Unit = {
       currentDispatch = service(message)
       currentDispatch.respond {
@@ -48,7 +48,7 @@ class Netty4PushListenerTest extends AbstractNetty4ListenerTest {
     service: Service[Req, Rep]
   ): ListeningServer = {
     val listener = new Netty4PushListener[Req, Rep](init, params, identity)
-    listener.listen(address){ handle =>
+    listener.listen(address) { handle =>
       Future.value(new SimpleSession[Req, Rep](handle, service))
     }
   }

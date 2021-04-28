@@ -1,11 +1,6 @@
 package com.twitter.finagle.loadbalancer.aperture
 
-import com.twitter.finagle.loadbalancer.{
-  EndpointFactory,
-  FailingEndpointFactory,
-  PeakEwma,
-  Updating
-}
+import com.twitter.finagle.loadbalancer.{EndpointFactory, PeakEwma, Updating}
 import com.twitter.finagle.{NoBrokersAvailableException, ServiceFactoryProxy}
 import com.twitter.finagle.stats.{Counter, StatsReceiver}
 import com.twitter.finagle.util.Rng
@@ -23,15 +18,16 @@ private[loadbalancer] final class AperturePeakEwma[Req, Rep](
   protected val nanoTime: () => Long,
   protected val lowLoad: Double,
   protected val highLoad: Double,
-  protected val minAperture: Int,
+  private[aperture] val minAperture: Int,
   protected val maxEffort: Int,
-  protected val rng: Rng,
+  private[aperture] val rng: Rng,
   protected val statsReceiver: StatsReceiver,
   protected val label: String,
   protected val timer: Timer,
   protected val emptyException: NoBrokersAvailableException,
-  protected val useDeterministicOrdering: Option[Boolean]
-) extends Aperture[Req, Rep]
+  protected val useDeterministicOrdering: Option[Boolean],
+  private[aperture] val eagerConnections: Boolean)
+    extends Aperture[Req, Rep]
     with PeakEwma[Req, Rep]
     with LoadBand[Req, Rep]
     with Expiration[Req, Rep]
@@ -54,10 +50,11 @@ private[loadbalancer] final class AperturePeakEwma[Req, Rep](
       with PeakEwmaNode
       with LoadBandNode
       with ExpiringNode
-      with ApertureNode
+      with ApertureNode[Req, Rep] {
+    override def tokenRng: Rng = rng
+  }
 
   protected def newNode(factory: EndpointFactory[Req, Rep]): Node = Node(factory)
-  protected def failingNode(cause: Throwable): Node = Node(new FailingEndpointFactory(cause))
 
   override def close(deadline: Time): Future[Unit] = {
     expiryTask.cancel()

@@ -3,9 +3,9 @@ package com.twitter.finagle.http.codec
 import com.twitter.finagle.Service
 import com.twitter.finagle.http._
 import com.twitter.finagle.http.exp.{GenStreamingSerialServerDispatcher, StreamTransport}
-import com.twitter.finagle.stats.{RollupStatsReceiver, StatsReceiver}
+import com.twitter.finagle.stats.{CategorizingExceptionStatsHandler, StatsReceiver}
 import com.twitter.logging.Logger
-import com.twitter.util.{Future, Promise, Throwables}
+import com.twitter.util.{Future, Promise}
 
 private[http] object HttpServerDispatcher {
   val handleHttp10: PartialFunction[Throwable, Response] = {
@@ -15,19 +15,17 @@ private[http] object HttpServerDispatcher {
   val handleHttp11: PartialFunction[Throwable, Response] = {
     case _ => Response(Version.Http11, Status.InternalServerError)
   }
+
+  private val logger = Logger.get(getClass())
+  private val exceptionStatsHandler = new CategorizingExceptionStatsHandler()
 }
 
 private[finagle] class HttpServerDispatcher(
   trans: StreamTransport[Response, Request],
   underlying: Service[Request, Response],
-  stats: StatsReceiver
-) extends GenStreamingSerialServerDispatcher[Request, Response, Response, Request](trans) {
+  statsReceiver: StatsReceiver)
+    extends GenStreamingSerialServerDispatcher[Request, Response, Response, Request](trans) {
   import HttpServerDispatcher._
-
-  private[this] val logger = Logger.get(this.getClass.getName)
-
-  private[this] val failureReceiver =
-    new RollupStatsReceiver(stats.scope("stream")).scope("failures")
 
   // Response conformance (length headers, etc) is performed by the `ResponseConformanceFilter`
   private[this] val service = ResponseConformanceFilter.andThen(underlying)
@@ -56,7 +54,7 @@ private[finagle] class HttpServerDispatcher(
       // an outstanding read (e.g. read-write race).
       f.onFailure { t =>
         logger.debug(t, "Failed mid-stream. Terminating stream, closing connection")
-        failureReceiver.counter(Throwables.mkString(t): _*).incr()
+        exceptionStatsHandler.record(statsReceiver.scope("stream"), t)
         rep.reader.discard()
       }
       p.setInterruptHandler {
@@ -79,12 +77,12 @@ private[finagle] class HttpServerDispatcher(
     if (connectionHeaders.isEmpty || !connectionHeaders.exists("close".equalsIgnoreCase(_))) {
       rep.version match {
         case Version.Http10 if keepAlive =>
-          rep.headerMap.set(Fields.Connection, "keep-alive")
+          rep.headerMap.setUnsafe(Fields.Connection, "keep-alive")
 
-        case Version.Http11 if (!keepAlive) =>
+        case Version.Http11 if !keepAlive =>
           // The connection header may contain additional information, so add
           // rather than set.
-          rep.headerMap.add(Fields.Connection, "close")
+          rep.headerMap.addUnsafe(Fields.Connection, "close")
 
         case _ =>
       }

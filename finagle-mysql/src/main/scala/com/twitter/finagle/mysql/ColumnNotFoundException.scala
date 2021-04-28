@@ -8,9 +8,9 @@ import java.sql.SQLNonTransientException
  */
 class ColumnNotFoundException private[mysql] (
   columnName: String,
-  val flags: Long = FailureFlags.NonRetryable
-) extends SQLNonTransientException(s"Column not found: '$columnName'")
-  with FailureFlags[ColumnNotFoundException] {
+  val flags: Long = FailureFlags.NonRetryable)
+    extends SQLNonTransientException(s"Column not found: '$columnName'")
+    with FailureFlags[ColumnNotFoundException] {
 
   protected def copyWithFlags(flags: Long): ColumnNotFoundException =
     new ColumnNotFoundException(columnName, flags)

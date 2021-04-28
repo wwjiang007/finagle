@@ -1,7 +1,11 @@
 package com.twitter.finagle.loadbalancer
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.loadbalancer.aperture.{ApertureLeastLoaded, AperturePeakEwma}
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.loadbalancer.aperture.{
+  ApertureLeastLoaded,
+  AperturePeakEwma,
+  EagerConnections
+}
 import com.twitter.finagle.loadbalancer.heap.HeapLeastLoaded
 import com.twitter.finagle.loadbalancer.p2c.{P2CLeastLoaded, P2CPeakEwma}
 import com.twitter.finagle.loadbalancer.roundrobin.RoundRobinBalancer
@@ -87,21 +91,20 @@ object Balancers {
    * Randomized Load Balancing. IEEE Trans. Parallel Distrib. Syst. 12,
    * 10 (October 2001), 1094-1104.
    */
-  def p2c(
-    maxEffort: Int = MaxEffort,
-    rng: Rng = Rng.threadLocal
-  ): LoadBalancerFactory = new LoadBalancerFactory {
-    override def toString: String = "P2CLeastLoaded"
-    def newBalancer[Req, Rep](
-      endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
-      exc: NoBrokersAvailableException,
-      params: Stack.Params
-    ): ServiceFactory[Req, Rep] = {
-      val sr = params[param.Stats].statsReceiver
-      val balancer = new P2CLeastLoaded(endpoints, maxEffort, rng, sr, exc)
-      newScopedBal(params[param.Label].label, sr, "p2c_least_loaded", balancer)
+  def p2c(maxEffort: Int = MaxEffort, rng: Rng = Rng.threadLocal): LoadBalancerFactory =
+    new LoadBalancerFactory {
+      override def toString: String = "P2CLeastLoaded"
+
+      def newBalancer[Req, Rep](
+        endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
+        exc: NoBrokersAvailableException,
+        params: Stack.Params
+      ): ServiceFactory[Req, Rep] = {
+        val sr = params[param.Stats].statsReceiver
+        val balancer = new P2CLeastLoaded(endpoints, maxEffort, rng, sr, exc)
+        newScopedBal(params[param.Label].label, sr, "p2c_least_loaded", balancer)
+      }
     }
-  }
 
   /**
    * Like [[p2c]] but using the Peak EWMA (exponentially weight moving average)
@@ -135,6 +138,7 @@ object Balancers {
     rng: Rng = Rng.threadLocal
   ): LoadBalancerFactory = new LoadBalancerFactory {
     override def toString: String = "P2CPeakEwma"
+
     def newBalancer[Req, Rep](
       endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
       exc: NoBrokersAvailableException,
@@ -148,7 +152,6 @@ object Balancers {
         sr,
         "p2c_peak_ewma",
         balancer
-
       )
     }
   }
@@ -163,6 +166,7 @@ object Balancers {
   def heap(rng: Random = new Random): LoadBalancerFactory =
     new LoadBalancerFactory {
       override def toString: String = "HeapLeastLoaded"
+
       def newBalancer[Req, Rep](
         endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
         exc: NoBrokersAvailableException,
@@ -173,7 +177,8 @@ object Balancers {
           params[param.Label].label,
           sr,
           "heap_least_loaded",
-          new HeapLeastLoaded(endpoints, sr, exc, rng))
+          new HeapLeastLoaded(endpoints, sr, exc, rng)
+        )
       }
     }
 
@@ -244,6 +249,8 @@ object Balancers {
     useDeterministicOrdering: Option[Boolean] = None
   ): LoadBalancerFactory = new LoadBalancerFactory {
     override def toString: String = "ApertureLeastLoaded"
+    override def supportsEagerConnections: Boolean = true
+
     def newBalancer[Req, Rep](
       endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
       exc: NoBrokersAvailableException,
@@ -252,6 +259,8 @@ object Balancers {
       val sr = params[param.Stats].statsReceiver
       val timer = params[param.Timer].timer
       val label = params[param.Label].label
+      val eagerConnections = params[EagerConnections].enabled
+
       val balancer = new ApertureLeastLoaded(
         endpoints,
         smoothWin,
@@ -264,7 +273,8 @@ object Balancers {
         label,
         timer,
         exc,
-        useDeterministicOrdering
+        useDeterministicOrdering,
+        eagerConnections
       )
       newScopedBal(
         label,
@@ -335,6 +345,8 @@ object Balancers {
     useDeterministicOrdering: Option[Boolean] = None
   ): LoadBalancerFactory = new LoadBalancerFactory {
     override def toString: String = "AperturePeakEwma"
+    override def supportsEagerConnections: Boolean = true
+
     def newBalancer[Req, Rep](
       endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
       exc: NoBrokersAvailableException,
@@ -343,6 +355,8 @@ object Balancers {
       val sr = params[param.Stats].statsReceiver
       val timer = params[param.Timer].timer
       val label = params[param.Label].label
+      val eagerConnections = params[EagerConnections].enabled
+
       val balancer = new AperturePeakEwma(
         endpoints,
         smoothWin,
@@ -357,7 +371,8 @@ object Balancers {
         label,
         timer,
         exc,
-        useDeterministicOrdering
+        useDeterministicOrdering,
+        eagerConnections
       )
       newScopedBal(
         label,
@@ -381,10 +396,9 @@ object Balancers {
    * if an unavailable node (Status != Open) is returned from the underlying pick.
    * See the constant [[MaxEffort]] for more details on how we pick the default.
    */
-  def roundRobin(
-    maxEffort: Int = MaxEffort
-  ): LoadBalancerFactory = new LoadBalancerFactory {
+  def roundRobin(maxEffort: Int = MaxEffort): LoadBalancerFactory = new LoadBalancerFactory {
     override def toString: String = "RoundRobin"
+
     def newBalancer[Req, Rep](
       endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
       exc: NoBrokersAvailableException,

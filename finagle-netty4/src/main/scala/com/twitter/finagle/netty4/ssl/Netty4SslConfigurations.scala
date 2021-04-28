@@ -35,6 +35,8 @@ private[finagle] object Netty4SslConfigurations {
         builder.trustManager(InsecureTrustManagerFactory.INSTANCE)
       case TrustCredentials.CertCollection(file) =>
         builder.trustManager(file)
+      case TrustCredentials.X509Certificates(x509Certs) =>
+        builder.trustManager(x509Certs: _*)
       case TrustCredentials.TrustManagerFactory(trustManagerFactory) =>
         builder.trustManager(trustManagerFactory)
     }
@@ -75,7 +77,7 @@ private[finagle] object Netty4SslConfigurations {
    */
   def configureProvider(builder: SslContextBuilder, forceJdk: Boolean): SslContextBuilder =
     if (forceJdk) builder.sslProvider(SslProvider.JDK)
-    else builder
+    else builder.sslProvider(SslProvider.OPENSSL_REFCNT)
 
   /**
    * Unwraps the `Try[SslContextBuilder]` and throws an `SslConfigurationException` for

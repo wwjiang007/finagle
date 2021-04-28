@@ -38,7 +38,7 @@ private[finagle] object SingletonPool {
    * from crossing the 0 boundary multiple times -- it may thus call
    * 'close' on the underlying service multiple times.
    */
-  class RefcountedService[Req, Rep](underlying: Service[Req, Rep])
+  private class RefcountedService[Req, Rep](underlying: Service[Req, Rep])
       extends ServiceProxy[Req, Rep](underlying) {
     private[this] val count = new AtomicInteger(1)
     private[this] val future = Future.value(this)
@@ -60,11 +60,11 @@ private[finagle] object SingletonPool {
       }
   }
 
-  sealed trait State[-Req, +Rep]
-  case object Idle extends State[Any, Nothing]
-  case object Closed extends State[Any, Nothing]
-  case class Awaiting(done: Future[Unit]) extends State[Any, Nothing]
-  case class Open[Req, Rep](service: RefcountedService[Req, Rep]) extends State[Req, Rep]
+  private sealed trait State[-Req, +Rep]
+  private case object Idle extends State[Any, Nothing]
+  private case object Closed extends State[Any, Nothing]
+  private case class Awaiting(done: Future[Unit]) extends State[Any, Nothing]
+  private case class Open[Req, Rep](service: RefcountedService[Req, Rep]) extends State[Req, Rep]
 }
 
 /**
@@ -86,8 +86,8 @@ private[finagle] object SingletonPool {
 class SingletonPool[Req, Rep](
   underlying: ServiceFactory[Req, Rep],
   allowInterrupts: Boolean,
-  statsReceiver: StatsReceiver
-) extends ServiceFactory[Req, Rep] {
+  statsReceiver: StatsReceiver)
+    extends ServiceFactory[Req, Rep] {
   import SingletonPool._
 
   private[this] val scoped = statsReceiver.scope("connects")
@@ -142,9 +142,17 @@ class SingletonPool[Req, Rep](
     // `f` represents a request to `underlying` to acquire a new service.
     val f = done.before(apply(conn))
     // if we allow interrupts, we return a direct handle to the process. Otherwise,
-    // we returned a derivative future which can be interruptible but doesn't forward
-    // the interrupts to `f`.
-    if (allowInterrupts) f else f.interruptible
+    // we returned a derivative future which can be interrupted immediately, but will
+    // ensure the release of its interest in any ref-counted session that materializes.
+    if (allowInterrupts) f
+    else
+      f.interruptible().onFailure {
+        case _: Throwable =>
+          // If this fails it is either because `f` failed or we were interrupted. If `f`
+          // does succeed we need to release the ref-count since the caller will never
+          // get a reference to the `Service` to release it.
+          f.onSuccess(_.close())
+      }
   }
 
   @tailrec

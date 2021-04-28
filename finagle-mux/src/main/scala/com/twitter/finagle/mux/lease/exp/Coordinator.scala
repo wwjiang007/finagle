@@ -1,16 +1,13 @@
 package com.twitter.finagle.mux.lease.exp
 
-import com.twitter.conversions.storage.intToStorageUnitableWholeNumber
+import com.twitter.conversions.StorageUnitOps._
 import com.twitter.util.{Duration, Stopwatch}
 import java.lang.management.{GarbageCollectorMXBean, MemoryPoolMXBean, ManagementFactory}
 import java.util.logging.Logger
 import scala.collection.JavaConverters._
 import scala.collection.mutable.Buffer
 
-private[lease] class Coordinator(
-  val counter: ByteCounter,
-  verbose: Boolean = false
-) {
+private[lease] class Coordinator(val counter: ByteCounter, verbose: Boolean = false) {
 
   /**
    * Wait until at least 80% of the committed space is
@@ -30,17 +27,14 @@ private[lease] class Coordinator(
       new BytesAlarm(
         counter, {
           val saved = counter.info.remaining()
-          () =>
-            saved - 1.byte
+          () => saved - 1.byte
         }
       )
     }
   }
 
   def sleepUntilGc(gc: () => Unit, interval: Duration): Unit = {
-    Alarm.armAndExecute({ () =>
-      new GenerationAlarm(counter) min new IntervalAlarm(interval)
-    }, gc)
+    Alarm.armAndExecute({ () => new GenerationAlarm(counter) min new IntervalAlarm(interval) }, gc)
   }
 
   // TODO: given that discount should be consistent for a generation, it doesn't
@@ -54,9 +48,7 @@ private[lease] class Coordinator(
     //
     // TODO: wake up more often to see if the target
     // has changed.
-    Alarm.armAndExecute({ () =>
-      new BytesAlarm(counter, () => space.discount())
-    }, fn)
+    Alarm.armAndExecute({ () => new BytesAlarm(counter, () => space.discount()) }, fn)
   }
 
   def sleepUntilFinishedDraining(
@@ -73,7 +65,8 @@ private[lease] class Coordinator(
           new DurationAlarm((maxWait - elapsed()) / 2) min
           new GenerationAlarm(counter) min
           new PredicateAlarm(() => npending() == 0)
-      }, { () =>
+      },
+      { () =>
         // TODO MN: reenable
         if (verbose) {
           log.info(

@@ -1,16 +1,14 @@
 package com.twitter.finagle.service
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
+import com.twitter.finagle.tracing.{Trace, TraceId}
 import com.twitter.finagle.util.DefaultTimer
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.util._
 import java.io.IOException
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class RequeueFilterTest extends FunSuite {
 
   test("respects maxRetriesPerReq") {
@@ -21,11 +19,10 @@ class RequeueFilterTest extends FunSuite {
     val filter = new RequeueFilter[Throwable, Int](
       RetryBudget(1.second, minRetries, 0.0, Stopwatch.timeMillis),
       Backoff.constant(Duration.Zero),
-      stats,
-      () => true,
       percentRequeues,
-      DefaultTimer
-    )
+      ResponseClassifier.Default,
+      stats,
+      DefaultTimer)
 
     val svc = filter.andThen(Service.mk(Future.exception))
 
@@ -51,11 +48,10 @@ class RequeueFilterTest extends FunSuite {
     val filter = new RequeueFilter[Throwable, Int](
       RetryBudget(1.second, minRetries, 0.0, Stopwatch.timeMillis),
       Backoff.constant(Duration.Zero),
-      stats,
-      () => true,
       percentRequeues,
-      DefaultTimer
-    )
+      ResponseClassifier.Default,
+      stats,
+      DefaultTimer)
 
     val svc = filter.andThen(Service.mk(Future.exception))
 
@@ -80,11 +76,10 @@ class RequeueFilterTest extends FunSuite {
     val filter = new RequeueFilter[String, Int](
       retryBudget,
       Backoff.constant(Duration.Zero),
-      stats,
-      () => true,
       percentRequeues,
-      DefaultTimer
-    )
+      ResponseClassifier.Default,
+      stats,
+      DefaultTimer)
 
     var numNos = 0
     val svc = filter.andThen(Service.mk { s: String =>
@@ -126,11 +121,10 @@ class RequeueFilterTest extends FunSuite {
       val filter = new RequeueFilter[Throwable, Int](
         RetryBudget(1.second, 10, 0.0, Stopwatch.timeMillis),
         schedule,
-        stats,
-        () => true,
         1.0,
-        timer
-      )
+        ResponseClassifier.Default,
+        stats,
+        timer)
 
       val svc = filter.andThen(Service.mk(Future.exception))
       val response = svc(new FailedFastException("12345"))
@@ -164,11 +158,10 @@ class RequeueFilterTest extends FunSuite {
     val filter = new RequeueFilter[Throwable, Int](
       RetryBudget(1.second, minRetries, 0.0, Stopwatch.timeMillis),
       Backoff.constant(Duration.Zero),
-      NullStatsReceiver,
-      () => true,
       percentRequeues,
-      DefaultTimer
-    )
+      ResponseClassifier.Default,
+      NullStatsReceiver,
+      DefaultTimer)
 
     val stats = new InMemoryStatsReceiver()
 
@@ -176,9 +169,7 @@ class RequeueFilterTest extends FunSuite {
 
     val svcFactory = ServiceFactory.const(
       filter.andThen(Service.mk[Throwable, Int] { req =>
-        context.Retries.current.foreach { retries =>
-          retriesStat.add(retries.attempt)
-        }
+        context.Retries.current.foreach { retries => retriesStat.add(retries.attempt) }
         Future.exception(req)
       })
     )
@@ -195,6 +186,113 @@ class RequeueFilterTest extends FunSuite {
 
       assert(stats.stat("retry_context_retries")().map(_.toInt) == retriesInContext)
     }
+  }
+
+  test("requeued requests generate a new span") {
+    val minRetries = 10
+    val percentRequeues = 0.5
+    val filter = new RequeueFilter[Throwable, Int](
+      RetryBudget(1.second, minRetries, percentRequeues, Stopwatch.timeMillis),
+      Backoff.constant(Duration.Zero),
+      percentRequeues,
+      ResponseClassifier.Default,
+      NullStatsReceiver,
+      DefaultTimer)
+
+    var recordedTraces: Seq[TraceId] = Seq.empty
+    val svcFactory = ServiceFactory.const(
+      filter.andThen(Service.mk[Throwable, Int] { req =>
+        // capture the trace for this request
+        recordedTraces = recordedTraces :+ Trace.id
+        Future.exception(req)
+      })
+    )
+
+    val svc = Await.result(svcFactory(), 5.seconds)
+    val rootTrace = Trace.nextId
+    Time.withCurrentTimeFrozen { _ =>
+      intercept[FailedFastException] {
+        // set the root trace
+        Trace.letId(rootTrace) {
+          Await.result(svc(new FailedFastException("boom")), 5.seconds)
+        }
+      }
+    }
+
+    val triedRequests = 6
+    assert(recordedTraces.size == triedRequests)
+    assert(recordedTraces.head == rootTrace)
+    assert(recordedTraces.map(_.spanId.toLong).distinct.size == triedRequests)
+  }
+
+  test("requeued requests have their parent trace ids set correctly") {
+    val minRetries = 10
+    val percentRequeues = 0.5
+    val filter = new RequeueFilter[Throwable, Int](
+      RetryBudget(1.second, minRetries, percentRequeues, Stopwatch.timeMillis),
+      Backoff.constant(Duration.Zero),
+      percentRequeues,
+      ResponseClassifier.Default,
+      NullStatsReceiver,
+      DefaultTimer)
+
+    var recordedTraces: Seq[TraceId] = Seq.empty
+    val svcFactory = ServiceFactory.const(
+      filter.andThen(Service.mk[Throwable, Int] { req =>
+        // capture the trace for this request
+        recordedTraces = recordedTraces :+ Trace.id
+        Future.exception(req)
+      })
+    )
+
+    val svc = Await.result(svcFactory(), 5.seconds)
+    Time.withCurrentTimeFrozen { _ =>
+      intercept[FailedFastException] {
+        // set the root trace
+        Trace.letId(Trace.nextId) {
+          Await.result(svc(new FailedFastException("boom")), 5.seconds)
+        }
+      }
+    }
+
+    // the root trace does not have a parent.
+    for (i <- 1 until 6) {
+      val span = recordedTraces(i)
+      val parentSpan = recordedTraces(i - 1)
+      assert(span.parentId == parentSpan.spanId)
+    }
+  }
+
+  test("requeueable only if the service is available") {
+    val stats = new InMemoryStatsReceiver()
+    val svc = new Service[Unit, Unit] {
+      var used: Boolean = false
+      def apply(req: Unit): Future[Unit] = {
+        used = true
+        Future.exception(new ChannelWriteException(None))
+      }
+
+      override def status = if (used) Status.Closed else Status.Open
+    }
+
+    val minRetries = 10
+    val percentRequeues = 0.5
+    val retryBudget = RetryBudget(1.second, minRetries, 0.0, Stopwatch.timeMillis)
+    val filter = new RequeueFilter[Unit, Unit](
+      retryBudget,
+      Backoff.constant(Duration.Zero),
+      percentRequeues,
+      ResponseClassifier.Default,
+      stats,
+      DefaultTimer)
+
+    val requeueableSvc = filter.andThen(svc)
+    for (_ <- 0 until 5)
+      intercept[ChannelWriteException] {
+        Await.result(requeueableSvc(), 5.seconds)
+      }
+
+    assert(stats.counter("requeues")() == 0)
   }
 
   test("Requeueable.unapply for retryable exceptions") {
@@ -217,5 +315,4 @@ class RequeueFilterTest extends FunSuite {
       case _ =>
     }
   }
-
 }

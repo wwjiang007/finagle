@@ -1,6 +1,6 @@
 package com.twitter.finagle.thriftmux.pushsession
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.pushsession.utils.MockChannelHandle
 import com.twitter.finagle.{Service, Stack, Status, Thrift, ThriftMux, mux, param => fparam}
 import com.twitter.finagle.mux.{ClientDiscardedRequestException, Request, Response}
@@ -153,9 +153,7 @@ class VanillaThriftSessionTest extends FunSuite {
     Time.withCurrentTimeFrozen { timeControl =>
       new Ctx {
         val p = Promise[Response]()
-        override lazy val service = Service.mk[Request, Response] { _ =>
-          p
-        }
+        override lazy val service = Service.mk[Request, Response] { _ => p }
 
         session.receive(ByteReader(data))
         handle.serialExecutor.executeAll()
@@ -174,11 +172,14 @@ class VanillaThriftSessionTest extends FunSuite {
         handle.onClosePromise.setDone()
         handle.serialExecutor.executeAll()
 
-        assert(statsReceiver.gauges.get(Seq("pending")).isEmpty) // should have been removed in the close
+        assert(
+          statsReceiver.gauges.get(Seq("pending")).isEmpty
+        ) // should have been removed in the close
         assert(handle.pendingWrites.isEmpty)
         p.isInterrupted match {
           case Some(_: ClientDiscardedRequestException) => // nop OK
-          case other => fail(s"Expected the service to have interrupted dispatches. Instead found $other")
+          case other =>
+            fail(s"Expected the service to have interrupted dispatches. Instead found $other")
         }
         assert(session.status == Status.Closed)
       }
@@ -193,10 +194,12 @@ class VanillaThriftSessionTest extends FunSuite {
       header.setClient_id(new thrift.ClientId("clientId"))
 
       val protocolFactory = params[Thrift.param.ProtocolFactory].protocolFactory
-      val msg = Buf.ByteArray.Owned(ByteArrays.concat(
-        OutputBuffer.messageToArray(header, protocolFactory),
-        "body".getBytes(StandardCharsets.UTF_8)
-      ))
+      val msg = Buf.ByteArray.Owned(
+        ByteArrays.concat(
+          OutputBuffer.messageToArray(header, protocolFactory),
+          "body".getBytes(StandardCharsets.UTF_8)
+        )
+      )
 
       session.receive(ByteReader(msg))
       handle.serialExecutor.executeAll()

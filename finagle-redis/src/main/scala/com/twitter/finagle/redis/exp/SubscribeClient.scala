@@ -1,6 +1,6 @@
 package com.twitter.finagle.redis.exp
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{Service, ServiceClosedException}
 import com.twitter.finagle.redis.Client
 import com.twitter.finagle.redis.protocol._
@@ -95,7 +95,9 @@ trait SubscribeCommands {
    */
   def subscribe(
     channels: Seq[Buf]
-  )(handler: subManager.typ.MessageHandler): Future[Map[Buf, Throwable]] = {
+  )(
+    handler: subManager.typ.MessageHandler
+  ): Future[Map[Buf, Throwable]] = {
     val notSubscribed = subManager.uniquify(channels, handler)
     val subscriptions = notSubscribed.map(subManager.subscribe)
     Futures
@@ -129,7 +131,9 @@ trait SubscribeCommands {
    */
   def pSubscribe(
     patterns: Seq[Buf]
-  )(handler: pSubManager.typ.MessageHandler): Future[Map[Buf, Throwable]] = {
+  )(
+    handler: pSubManager.typ.MessageHandler
+  ): Future[Map[Buf, Throwable]] = {
     val notSubscribed = pSubManager.uniquify(patterns, handler)
     val subscriptions = notSubscribed.map(pSubManager.subscribe)
     Futures
@@ -217,13 +221,14 @@ trait SubscribeCommands {
     def onMessage(message: Reply): Unit = {
       message match {
         case MBulkReply(
-            BulkReply(MessageBytes.MESSAGE) :: BulkReply(channel) :: BulkReply(message) :: Nil
+              BulkReply(MessageBytes.MESSAGE) :: BulkReply(channel) :: BulkReply(message) :: Nil
             ) =>
           subManager.handleMessage(channel, (channel, message))
         case MBulkReply(
-            BulkReply(MessageBytes.PMESSAGE) :: BulkReply(pattern) :: BulkReply(channel) :: BulkReply(
-              message
-            ) :: Nil
+              BulkReply(MessageBytes.PMESSAGE) :: BulkReply(pattern) :: BulkReply(
+                channel) :: BulkReply(
+                message
+              ) :: Nil
             ) =>
           pSubManager.handleMessage(pattern, (pattern, channel, message))
         case MBulkReply(BulkReply(tpe) :: BulkReply(channel) :: IntegerReply(count) :: Nil) =>

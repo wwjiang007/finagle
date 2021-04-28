@@ -82,9 +82,9 @@ private final class Netty4Init extends FinagleInit {
         new StatsLeakDetectorFactory(
           ResourceLeakDetectorFactory.instance(),
           { () =>
-          referenceLeaks.incr()
-          referenceLeakLintRule.leakDetected()
-        })
+            referenceLeaks.incr()
+            referenceLeakLintRule.leakDetected()
+          })
       )
     } else {
       // If our leak detection is disabled, disable Netty's leak detection as well

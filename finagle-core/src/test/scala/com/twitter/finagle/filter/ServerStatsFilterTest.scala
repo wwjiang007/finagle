@@ -3,12 +3,9 @@ package com.twitter.finagle.filter
 import com.twitter.finagle.Service
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.util.{Stopwatch, Time, Future}
-import com.twitter.conversions.time._
-import org.junit.runner.RunWith
+import com.twitter.conversions.DurationOps._
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class ServerStatsFilterTest extends FunSuite {
   test("Records handletime for a service") {
     Time.withCurrentTimeFrozen { ctl =>

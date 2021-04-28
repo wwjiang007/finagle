@@ -1,6 +1,6 @@
 package com.twitter.finagle.pushsession
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.pushsession.utils.MockChannelHandle
 import com.twitter.finagle.{Failure, IndividualRequestTimeoutException => FinagleTimeoutException}
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
@@ -8,7 +8,7 @@ import com.twitter.util.{Await, MockTimer, Promise, Time, TimeoutException => Ut
 import java.net.{InetSocketAddress, SocketAddress}
 import org.mockito.Mockito.never
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 class PipeliningMockChannelHandle[In, Out] extends MockChannelHandle[In, Out] {
 
@@ -33,9 +33,10 @@ class PipeliningClientPushSessionTest extends FunSuite with MockitoSugar {
             new PipeliningClientPushSession[Unit, Unit](
               handle,
               NullStatsReceiver,
-              10.seconds, timer
+              10.seconds,
+              timer
             ).toService
-          val f = session()
+          val f = session(())
           f.raise(exc)
           assert(!handle.closedCalled)
         }
@@ -90,7 +91,6 @@ class PipeliningClientPushSessionTest extends FunSuite with MockitoSugar {
     val stallTimeout = 10.seconds
     val timer = new MockTimer
     Time.withCurrentTimeFrozen { ctl =>
-
       val handle = new PipeliningMockChannelHandle[Unit, Unit]()
       val session =
         new PipeliningClientPushSession[Unit, Unit](
@@ -135,7 +135,6 @@ class PipeliningClientPushSessionTest extends FunSuite with MockitoSugar {
 
     session.receive("resp")
     assert(session.getQueueSize == 2)
-
 
     session.receive("resp")
     assert(session.getQueueSize == 1)

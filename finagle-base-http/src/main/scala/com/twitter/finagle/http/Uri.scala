@@ -4,6 +4,7 @@ import java.util.{Map => JMap, List => JList, Collections}
 import scala.collection.JavaConverters._
 
 object Uri {
+
   /**
    * Constructs a Uri from the Host header and path component of a Request.
    */
@@ -19,7 +20,7 @@ object Uri {
 /**
  * Represents an immutable URI.
  */
-final class Uri private(host: Option[String], path: String, query: Option[String]) {
+final class Uri private (host: Option[String], val path: String, query: Option[String]) {
 
   def this(host: String, path: String, query: String) =
     this(Some(host), path, Some(query))
@@ -44,7 +45,9 @@ final class Uri private(host: Option[String], path: String, query: Option[String
       case Some(q) => QueryParamDecoder.decodeParams(q)
       case None => Collections.emptyMap[String, JList[String]]
     }
-    val map: Map[String, Seq[String]] = decoded.asScala.toMap.mapValues(_.asScala)
+    val map: Map[String, Seq[String]] = decoded.asScala.toMap.transform {
+      case (_, v) => v.asScala.toSeq
+    }
     new MapParamMap(map)
   }
 }

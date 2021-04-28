@@ -220,7 +220,7 @@ object TimeoutFilter {
       timeoutTunable() match {
         case Some(duration) => duration
         case None => TimeoutFilter.Param.Default
-    }
+      }
     typeAgnostic(timeoutFn, exceptionFn, timer)
   }
 
@@ -254,8 +254,8 @@ class TimeoutFilter[Req, Rep](
   timeoutFn: () => Duration,
   exceptionFn: Duration => RequestTimeoutException,
   timer: Timer,
-  propagateDeadlines: Boolean
-) extends SimpleFilter[Req, Rep] {
+  propagateDeadlines: Boolean)
+    extends SimpleFilter[Req, Rep] {
 
   def this(
     timeoutFn: () => Duration,
@@ -273,7 +273,8 @@ class TimeoutFilter[Req, Rep](
       () => timeout().getOrElse(TimeoutFilter.Param.Default),
       exceptionFn,
       timer,
-      TimeoutFilter.PropagateDeadlines.Default)
+      TimeoutFilter.PropagateDeadlines.Default
+    )
 
   def this(timeout: Duration, exception: RequestTimeoutException, timer: Timer) =
     this(() => timeout, _ => exception, timer, TimeoutFilter.PropagateDeadlines.Default)

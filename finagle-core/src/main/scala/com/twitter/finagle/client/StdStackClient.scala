@@ -4,10 +4,10 @@ import com.twitter.finagle.{Service, ServiceFactory, Stack, Stackable}
 import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.param.{Label, ProtocolLibrary}
 import com.twitter.finagle.transport.{Transport, TransportContext}
-import java.net.{InetSocketAddress, SocketAddress}
+import java.net.SocketAddress
 
 trait StdStackClient[Req, Rep, This <: StdStackClient[Req, Rep, This]]
-  extends EndpointerStackClient[Req, Rep, This] { self =>
+    extends EndpointerStackClient[Req, Rep, This] { self =>
 
   /**
    * The type we write into the transport.
@@ -38,9 +38,11 @@ trait StdStackClient[Req, Rep, This <: StdStackClient[Req, Rep, This]]
    *
    * @see [[com.twitter.finagle.dispatch.GenSerialServerDispatcher]]
    */
-  protected def newDispatcher(transport: Transport[In, Out] {
-    type Context <: self.Context
-  }): Service[Req, Rep]
+  protected def newDispatcher(
+    transport: Transport[In, Out] {
+      type Context <: self.Context
+    }
+  ): Service[Req, Rep]
 
   /**
    * A copy constructor in lieu of defining StackClient as a
@@ -57,24 +59,22 @@ trait StdStackClient[Req, Rep, This <: StdStackClient[Req, Rep, This]]
    */
   protected final def endpointer: Stackable[ServiceFactory[Req, Rep]] =
     new EndpointerModule[Req, Rep](
-      Seq(implicitly[Stack.Param[ProtocolLibrary]], implicitly[Stack.Param[Label]]), {
-        (prms: Stack.Params, ia: InetSocketAddress) =>
-          val endpointClient = self.copy1(params = prms)
-          val transporter = endpointClient.newTransporter(ia)
-          // This assumes that the `toString` of the implementation is sufficiently descriptive.
-          // Note: this should be kept in sync with the equivalent `PushStackClient` logic.
-          endpointClient.registerTransporter(transporter.toString)
-          // Note, this ensures that session establishment is lazy (i.e.,
-          // on the service acquisition path).
-          ServiceFactory.apply[Req, Rep] { () =>
-            // we do not want to capture and request specific Locals
-            // that would live for the life of the session.
-            Contexts.letClearAll {
-              transporter().map { trans =>
-                endpointClient.newDispatcher(trans)
-              }
-            }
+      Seq(implicitly[Stack.Param[ProtocolLibrary]], implicitly[Stack.Param[Label]]),
+      { (prms: Stack.Params, sa: SocketAddress) =>
+        val endpointClient = self.copy1(params = prms)
+        val transporter = endpointClient.newTransporter(sa)
+        // This assumes that the `toString` of the implementation is sufficiently descriptive.
+        // Note: this should be kept in sync with the equivalent `PushStackClient` logic.
+        endpointClient.registerTransporter(transporter.toString)
+        // Note, this ensures that session establishment is lazy (i.e.,
+        // on the service acquisition path).
+        ServiceFactory.apply[Req, Rep] { () =>
+          // we do not want to capture and request specific Locals
+          // that would live for the life of the session.
+          Contexts.letClearAll {
+            transporter().map { trans => endpointClient.newDispatcher(trans) }
           }
+        }
       }
     )
 }

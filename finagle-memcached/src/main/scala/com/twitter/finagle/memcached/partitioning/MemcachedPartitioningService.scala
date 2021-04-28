@@ -2,11 +2,16 @@ package com.twitter.finagle.memcached.partitioning
 
 import com.twitter.finagle.Stack.Params
 import com.twitter.finagle.memcached.protocol._
-import com.twitter.finagle.param.Logger
-import com.twitter.finagle.{Memcached, _}
+import com.twitter.finagle.partitioning.ConsistentHashPartitioningService.NoPartitioningKeys
+import com.twitter.finagle.partitioning.PartitioningService.PartitionedResults
+import com.twitter.finagle.partitioning.param.NumReps
+import com.twitter.finagle.partitioning.{ConsistentHashPartitioningService, param}
+import com.twitter.finagle.util.DefaultLogger
+import com.twitter.finagle.{param => _, _}
 import com.twitter.hashing.KeyHasher
 import com.twitter.io.Buf
 import com.twitter.logging.Level
+import com.twitter.util.Future
 
 /**
  * MemcachedPartitioningService provides Ketama consistent hashing based partitioning for the
@@ -23,18 +28,18 @@ private[finagle] object MemcachedPartitioningService {
     "Partitioning Service based on Ketama consistent hashing for memcached protocol"
 
   def module: Stackable[ServiceFactory[Command, Response]] =
-    new KetamaPartitioningService.Module[Command, Response, Buf] {
+    new ConsistentHashPartitioningService.Module[Command, Response, Buf] {
 
       override val role: Stack.Role = MemcachedPartitioningService.role
       override val description: String = MemcachedPartitioningService.description
 
-      def newKetamaPartitioningService(
+      def newConsistentHashPartitioningService(
         underlying: Stack[ServiceFactory[Command, Response]],
         params: Params
-      ): KetamaPartitioningService[Command, Response, Buf] = {
+      ): ConsistentHashPartitioningService[Command, Response, Buf] = {
 
-        val Memcached.param.KeyHasher(hasher) = params[Memcached.param.KeyHasher]
-        val Memcached.param.NumReps(numReps) = params[Memcached.param.NumReps]
+        val param.KeyHasher(hasher) = params[param.KeyHasher]
+        val param.NumReps(numReps) = params[param.NumReps]
 
         new MemcachedPartitioningService(underlying, params, hasher, numReps)
       }
@@ -45,8 +50,8 @@ private[finagle] class MemcachedPartitioningService(
   underlying: Stack[ServiceFactory[Command, Response]],
   params: Stack.Params,
   keyHasher: KeyHasher = KeyHasher.KETAMA,
-  numReps: Int = KetamaPartitioningService.DefaultNumReps
-) extends KetamaPartitioningService[Command, Response, Buf](
+  numReps: Int = NumReps.Default)
+    extends ConsistentHashPartitioningService[Command, Response, Buf](
       underlying,
       params,
       keyHasher,
@@ -54,7 +59,7 @@ private[finagle] class MemcachedPartitioningService(
     ) {
   import MemcachedPartitioningService._
 
-  private[this] val logger = params[Logger].log
+  private[this] val logger = DefaultLogger
 
   final override protected def getKeyBytes(key: Buf): Array[Byte] = {
     Buf.ByteArray.Owned.extract(key)
@@ -104,26 +109,28 @@ private[finagle] class MemcachedPartitioningService(
    * (get/getv/gets). It barfs upon unexpected invocations.
    */
   final override protected def mergeResponses(
-    successes: Seq[Response],
-    failures: Map[Command, Throwable]
+    origReq: Command,
+    pr: PartitionedResults[Command, Response]
   ): Response = {
     ValuesAndErrors(
-      successes.flatMap {
-        case Values(values) =>
-          values
-        case nonValue =>
+      values = pr.successes.flatMap {
+        case (_, Values(values)) => values
+        case (_, nonValue) =>
           if (logger.isLoggable(Level.DEBUG))
-            logger.log(Level.DEBUG, s"UnsupportedResponse: Expected Values, instead found $nonValue")
+            logger
+              .log(Level.DEBUG, s"UnsupportedResponse: Expected Values, instead found $nonValue")
           throw new UnsupportedResponse(s"Expected Values, instead found $nonValue")
       },
-      failures.flatMap { case (command, t) =>
-        getPartitionKeys(command).map(_ -> t)
-      }
+      errors = pr.failures.flatMap {
+        case (cmd, t) => getPartitionKeys(cmd).map(_ -> t)
+      }.toMap
     )
   }
 
-  protected def isSinglePartition(request: Command): Boolean = request match {
-    case _: StorageCommand | _: ArithmeticCommand | _: Delete => true
-    case _ => false
+  final protected def noPartitionInformationHandler(req: Command): Future[Nothing] = {
+    val ex = new NoPartitioningKeys(s"NoPartitioningKeys in for the thrift method: ${req.name}")
+    if (logger.isLoggable(Level.DEBUG))
+      logger.log(Level.DEBUG, "partitionRequest failed: ", ex)
+    Future.exception(ex)
   }
 }

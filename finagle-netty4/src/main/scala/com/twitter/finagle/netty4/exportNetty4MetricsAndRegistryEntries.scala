@@ -1,7 +1,12 @@
 package com.twitter.finagle.netty4
 
 import com.twitter.concurrent.Once
-import com.twitter.finagle.stats.{FinagleStatsReceiver, Gauge, Verbosity, VerbosityAdjustingStatsReceiver}
+import com.twitter.finagle.stats.{
+  FinagleStatsReceiver,
+  Gauge,
+  Verbosity,
+  VerbosityAdjustingStatsReceiver
+}
 import com.twitter.util.registry.GlobalRegistry
 import io.netty.buffer.{PoolArenaMetric, PooledByteBufAllocator}
 import io.netty.channel.epoll.Epoll
@@ -22,8 +27,7 @@ private object exportNetty4MetricsAndRegistryEntries {
   private[this] val gauges = mutable.Set.empty[Gauge]
 
   private[this] def buildAccumulator(f: PoolArenaMetric => Long) = {
-    (acc: Float, pa: PoolArenaMetric) =>
-      acc + f(pa)
+    (acc: Float, pa: PoolArenaMetric) => acc + f(pa)
   }
 
   private[this] val sumHugeAllocations = buildAccumulator(_.numHugeAllocations())
@@ -94,11 +98,15 @@ private object exportNetty4MetricsAndRegistryEntries {
     )
 
     // Used.
-
     gauges.add(
-      poolingStats.addGauge("used")(
-        metric.usedDirectMemory()
-      )
+      poolingStats.addGauge("used") {
+        val threadLocalCacheSize =
+          metric.tinyCacheSize() + metric.smallCacheSize() + metric.normalCacheSize()
+        val threadLocalCaches =
+          metric.directArenas().asScala.foldLeft(0)((acc, c) => acc + c.numThreadCaches())
+
+        metric.usedDirectMemory() + (threadLocalCaches * threadLocalCacheSize)
+      }
     )
   }
 

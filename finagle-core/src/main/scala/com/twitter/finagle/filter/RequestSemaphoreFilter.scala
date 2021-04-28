@@ -3,6 +3,7 @@ package com.twitter.finagle.filter
 import com.twitter.concurrent.AsyncSemaphore
 import com.twitter.finagle._
 import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
+import com.twitter.finagle.tracing.Trace
 import com.twitter.util.{Future, Return, Throw}
 
 object RequestSemaphoreFilter {
@@ -25,10 +26,8 @@ object RequestSemaphoreFilter {
  * unable to acquire a permit are failed immediately with a [[com.twitter.finagle.Failure]]
  * that signals a restartable or idempotent process.
  */
-class RequestSemaphoreFilter[Req, Rep](
-  sem: AsyncSemaphore,
-  stats: StatsReceiver
-) extends SimpleFilter[Req, Rep] {
+class RequestSemaphoreFilter[Req, Rep](sem: AsyncSemaphore, stats: StatsReceiver)
+    extends SimpleFilter[Req, Rep] {
 
   def this(sem: AsyncSemaphore) =
     this(sem, NullStatsReceiver)
@@ -44,6 +43,11 @@ class RequestSemaphoreFilter[Req, Rep](
   def apply(req: Req, service: Service[Req, Rep]): Future[Rep] =
     sem.acquire().transform {
       case Return(permit) => service(req).ensure { permit.release() }
-      case Throw(noPermit) => Future.exception(Failure.rejected(noPermit))
+      case Throw(noPermit) => {
+        val tracing = Trace()
+        if (tracing.isActivelyTracing)
+          tracing.recordBinary("clnt/RequestSemaphoreFilter_rejected", noPermit.getMessage)
+        Future.exception(Failure.rejected(noPermit))
+      }
     }
 }

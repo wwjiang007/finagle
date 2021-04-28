@@ -131,7 +131,7 @@ object TraceId {
  *              be moved in here.
  * @param traceIdHigh The high 64bits of the id for this request, when the id is 128bits.
  *
- * @param terminal Whether this trace id is terminal. Any attemtps to override a terminal trace id
+ * @param terminal Whether this trace id is terminal. Any attempts to override a terminal trace id
  *                 will be ignored.
  */
 final case class TraceId(
@@ -141,8 +141,7 @@ final case class TraceId(
   _sampled: Option[Boolean],
   flags: Flags,
   traceIdHigh: Option[SpanId] = None,
-  terminal: Boolean = false
-) {
+  terminal: Boolean = false) {
 
   def this(
     _traceId: Option[SpanId],
@@ -151,7 +150,7 @@ final case class TraceId(
     _sampled: Option[Boolean],
     flags: Flags,
     traceIdHigh: Option[SpanId]
-  ) = this(_traceId, _parentId, spanId, _sampled: Option[Boolean], flags: Flags, None, false)
+  ) = this(_traceId, _parentId, spanId, _sampled: Option[Boolean], flags: Flags, traceIdHigh, false)
 
   def this(
     _traceId: Option[SpanId],
@@ -199,5 +198,6 @@ final case class TraceId(
   override def hashCode(): Int =
     ids.hashCode()
 
-  override def toString = s"${if (traceIdHigh.isEmpty) "" else traceIdHigh.get}$traceId.$spanId<:$parentId"
+  override def toString =
+    s"${if (traceIdHigh.isEmpty) "" else traceIdHigh.get}$traceId.$spanId<:$parentId"
 }

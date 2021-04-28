@@ -1,6 +1,6 @@
 package com.twitter.finagle.service
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stack.nilStack
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.finagle._
@@ -35,9 +35,7 @@ class RetriesTest extends FunSuite {
   private val end: Stack[ServiceFactory[Exception, Int]] = Stack.leaf(
     Stack.Role("test"),
     ServiceFactory.const(
-      Service.mk[Exception, Int] { req =>
-        Future.exception(req)
-      }
+      Service.mk[Exception, Int] { req => Future.exception(req) }
     )
   )
 
@@ -51,7 +49,8 @@ class RetriesTest extends FunSuite {
       nowMillis = Stopwatch.timeMillis
     )
 
-  test("moduleRequeable retries service acquisition `Retries.Effort` times on retryable failure") {
+  test(
+    "moduleRequeueable retries service acquisition `Retries.Effort` times on retryable failure") {
     val stats = new InMemoryStatsReceiver()
 
     val params = Stack.Params.empty +
@@ -74,7 +73,7 @@ class RetriesTest extends FunSuite {
   }
 
   test(
-    "moduleRequeable retries service acquisition `Retries.Effort` times on retryable failure " +
+    "moduleRequeueable retries service acquisition `Retries.Effort` times on retryable failure " +
       "for each service application when using FactoryToService"
   ) {
     val stats = new InMemoryStatsReceiver()
@@ -231,7 +230,7 @@ class RetriesTest extends FunSuite {
     assert(1 == stats.counter("retries", "budget_exhausted")())
   }
 
-  test("moduleWithRetryPolicy neither requeued nor netried") {
+  test("moduleWithRetryPolicy neither requeued nor retried") {
     val stats = new InMemoryStatsReceiver()
 
     val params = Stack.Params.empty +
@@ -290,9 +289,7 @@ class RetriesTest extends FunSuite {
   }
 
   private def nRetries(retriesStat: Seq[Float]): Int = {
-    retriesStat.foldLeft(0) { (sum, next) =>
-      sum + next.toInt
-    }
+    retriesStat.foldLeft(0) { (sum, next) => sum + next.toInt }
   }
 
   test("moduleWithRetryPolicy end to end to end with RetryBudget") {
@@ -307,7 +304,7 @@ class RetriesTest extends FunSuite {
         Stopwatch.timeMillis
       )
 
-    val svc = endToEndToEndSvc(stats, backReqs, mkBudget)
+    val svc = endToEndToEndSvc(stats, backReqs, mkBudget _)
 
     val numReqs = 100
     Time.withCurrentTimeFrozen { _ =>
@@ -330,7 +327,7 @@ class RetriesTest extends FunSuite {
     val backReqs = new AtomicInteger()
     def mkBudget() = RetryBudget.Infinite
 
-    val svc = endToEndToEndSvc(stats, backReqs, mkBudget)
+    val svc = endToEndToEndSvc(stats, backReqs, mkBudget _)
 
     val retries = 4
     val numReqs = 100

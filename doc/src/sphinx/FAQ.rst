@@ -6,7 +6,7 @@ General Finagle FAQ
 
 .. _propagate_failure:
 
-What are CancelledRequestException and CancelledConnectionException?
+What are CancelledRequestException, CancelledConnectionException, and ClientDiscardedRequestException?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 When a client connected to a Finagle server disconnects, the server raises
@@ -51,12 +51,27 @@ A simplified code snippet that exemplifies the intra-process structure:
        the RPC call to the client. This is clearly the case in the above
        example where the call to the client is indeed the returned Future.
        However, this will still hold if the client call was in the context
-       of a Future combinator (ex. `Future#select`, `Future#join`, etc.)
+       of a Future combinator (e.g. `Future#select`, `Future#join`, etc.)
 
-This is the source of the :API:`CancelledRequestException <com/twitter/finagle/CancelledRequestException>` --
+This is the source of the :API:`CancelledRequestException <com/twitter/finagle/CancelledRequestException>` –
 when a Finagle client receives the cancellation interrupt while a request is pending, it
 fails that request with this exception. A special case of this is when a request is in the process
 of establishing a session and is instead interrupted with a :API:`CancelledConnectionException <com/twitter/finagle/CancelledConnectionException>`
+
+Note, in mux, when work is interrupted/cancelled on behalf of a request we encode this failure with
+a :API:`ClientDiscardedRequestException <com/twitter/finagle/mux/ClientDiscardedRequestException>`. The concept
+is the same as above though.
+
+Server operators may prefer to measure their server side success rates excluding these classes of
+exceptions. The rationale is that these failures don't necessarily represent a server side issue
+and are dependent on client side configuration (e.g. timeouts). The recommended way to achieve this
+is to configure a custom `com.twitter.finagle.service.ResponseClassifier` via `$Protocol.server.withResponseClassifier(...)`.
+
+An important note is that these failures may sometimes show up in client stats! The interrupt will
+propagate through the call graph until it finds an unsatisfied future. In some cases, that outstanding
+future will have originated from a client backend within a server (i.e. `Finagle Client` in the topology
+above). Thus, when the interrupt reaches the client future, all references to the future will see
+the interrupt with the cancellation exception.
 
 You can disable this behavior by using the :API:`MaskCancelFilter <com/twitter/finagle/filter/MaskCancelFilter>`:
 
@@ -76,19 +91,6 @@ You can disable this behavior by using the :API:`MaskCancelFilter <com/twitter/f
           protocols like :doc:`Mux <Protocols>` do). In practice, this means that for these
           protocols, we need to disconnect the client to signal cancellation, which in turn
           can cause undue connection churn.
-
-Why is com.twitter.common.zookeeper#server-set not found?
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Some of our libraries weren't published to maven central before finagle 6.39.0. If you add
-
-.. code-block:: scala
-
-	resolvers += "twitter" at "https://maven.twttr.com"
-
-to your sbt configuration, it will be able to pick up the libraries which were
-published externally, but weren't yet published to maven central.  Note that if you use
-finagle-thrift{,mux}, you will still need it for our patched libthrift.
 
 .. _configuring_finagle6:
 
@@ -176,11 +178,6 @@ A common cause is when all endpoints in the load balancer's pool are
 marked down as fail fast, then the load balancer will pass requests through, resulting in a
 ``com.twitter.finagle.FailedFastException``.
 
-A related issue is when the load balancer's pool is a single endpoint that is itself a
-load balancer (for example an Nginx server or a hardware load balancer).
-It is important to disable fail fast as the remote load balancer has
-the visibility into which endpoints are up.
-
 See :ref:`this example <disabling_fail_fast>` on how to disable `Fail Fast` for a given client.
 
 Refer to the :ref:`fail fast <client_fail_fast>` section for further context.
@@ -194,6 +191,10 @@ While typically, a :src:`StatsFilter <com/twitter/finagle/service/StatsFilter.sc
 that treats non-Exceptions as failures. In that case, while no exceptions have occurred, a
 `ResponseClassificationSyntheticException` is used as a "synthetic" exception for
 bookkeeping purposes.
+
+One specific example can be seen when using the ThriftResponseClassifier.ThriftExceptionsAsFailures.
+Successful ThriftResponses which deserialize into Thrift Exceptions use this exception to
+be counted as failures in StatsFilter.
 
 How long should my Clients live?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -220,7 +221,24 @@ Finagle's :ref:`clients  <client_modules>` and :ref:`servers <server_modules>`
 have many modules that are tasked with a wide assortment of jobs. When there
 is unexpected latency, it can be useful to have visibility into where time
 is spent. Finagle's `RequestLogger` can help with this. It can be enabled by
-setting the ``com.twitter.finagle.request.Logger`` level to ``TRACE``.
+setting the ``com.twitter.finagle.request.Logger`` level to ``TRACE`` and
+enabling the stack param:
+
+.. code-block:: scala
+
+  // scala
+  import com.twitter.finagle.filter.RequestLogger
+
+  Protocol.client.configured(RequestLogger.Enabled)
+  Protocol.server.configured(RequestLogger.Enabled)
+
+.. code-block:: java
+
+  // java
+  import com.twitter.finagle.filter.RequestLogger;
+
+  Protocol.client.configured(RequestLogger.Enabled().mk());
+  Protocol.server.configured(RequestLogger.Enabled().mk());
 
 The logs include synchronous and asynchronous time for each stack module's
 `Filter`. Synchronous here means the time spent from the beginning of the
@@ -232,7 +250,7 @@ As an example, given this stack module with the name "slow-down-module":
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.Filter
   import com.twitter.finagle.util.DefaultTimer
 

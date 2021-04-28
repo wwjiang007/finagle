@@ -1,19 +1,17 @@
 package com.twitter.finagle
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.util.{Await, Return}
-import org.junit.runner.RunWith
 import org.scalacheck.Gen
 import org.scalatest.FunSuite
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.junit.{AssertionsForJUnit, JUnitRunner}
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.junit.AssertionsForJUnit
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 
-@RunWith(classOf[JUnitRunner])
 class StatusTest
     extends FunSuite
     with AssertionsForJUnit
-    with GeneratorDrivenPropertyChecks
+    with ScalaCheckDrivenPropertyChecks
     with Eventually
     with IntegrationPatience {
 

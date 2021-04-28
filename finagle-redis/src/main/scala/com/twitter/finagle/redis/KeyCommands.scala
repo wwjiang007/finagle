@@ -8,7 +8,7 @@ import com.twitter.io.Buf
 import com.twitter.util.{Duration, Future, Time}
 
 private[redis] trait KeyCommands { self: BaseClient =>
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
 
   /**
    * Removes keys
@@ -84,7 +84,11 @@ private[redis] trait KeyCommands { self: BaseClient =>
    * @param timeout timeout before failing, defaults to 5 seconds
    * @return unit
    */
-  def migrate(destAddr: InetSocketAddress, keys: Seq[Buf], timeout: Duration = 5.seconds): Future[Unit] = {
+  def migrate(
+    destAddr: InetSocketAddress,
+    keys: Seq[Buf],
+    timeout: Duration = 5.seconds
+  ): Future[Unit] = {
     doRequest(Migrate(destAddr, keys, timeout)) {
       case StatusReply(_) => Future.Unit
       case ErrorReply(msg) => Future.exception(new ServerError(msg))
@@ -111,7 +115,7 @@ private[redis] trait KeyCommands { self: BaseClient =>
    * @param key, milliseconds
    * @return true if the timeout was set.
    *         false if key does not exist or the timeout could not be set.
-   * @see http://redis.io/commands/pexpire
+   * @see https://redis.io/commands/pexpire
    */
   def pExpire(key: Buf, milliseconds: JLong): Future[JBoolean] =
     doRequest(PExpire(key, milliseconds)) {
@@ -125,7 +129,7 @@ private[redis] trait KeyCommands { self: BaseClient =>
    * @return true if the timeout was set.
    *         false if key does not exist or the timeout could not be set
    *         (see: EXPIRE).
-   * @see http://redis.io/commands/pexpireat
+   * @see https://redis.io/commands/pexpireat
    */
   def pExpireAt(key: Buf, timestamp: JLong): Future[JBoolean] =
     doRequest(PExpireAt(key, Time.fromMilliseconds(timestamp))) {
@@ -179,6 +183,6 @@ private[redis] trait KeyCommands { self: BaseClient =>
    */
   def persist(key: Buf): Future[JLong] =
     doRequest(Persist(key)) {
-      case IntegerReply(n) =>  Future.value(n)
+      case IntegerReply(n) => Future.value(n)
     }
 }

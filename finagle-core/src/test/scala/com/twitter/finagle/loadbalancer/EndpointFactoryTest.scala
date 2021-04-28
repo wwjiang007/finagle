@@ -1,6 +1,6 @@
 package com.twitter.finagle.loadbalancer
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.util.{Await, Future, Time}
 import java.net.InetSocketAddress
@@ -27,7 +27,7 @@ class EndpointFactoryTest extends FunSuite with OneInstancePerTest {
       }
 
       override def status = if (closed) Status.Closed else Status.Open
-  }
+    }
 
   private[this] val ef = new LazyEndpointFactory(make, address)
 
@@ -59,6 +59,17 @@ class EndpointFactoryTest extends FunSuite with OneInstancePerTest {
     val exc = new Exception("boom")
     val failingMk: () => ServiceFactory[Int, Int] = () => throw exc
     val failingEf = new LazyEndpointFactory(failingMk, address)
-    assert(exc == intercept[Exception] { Await.result(failingEf(), 1.second) })
+    assert(exc eq intercept[Exception] { Await.result(failingEf(), 1.second) })
+  }
+
+  test("handles when mk throws fatal exceptions") {
+    var exc: Throwable = new InterruptedException
+    val failingMk: () => ServiceFactory[Int, Int] = () => throw exc
+    val failingEf = new LazyEndpointFactory(failingMk, address)
+    assert(exc eq intercept[InterruptedException] { failingEf() })
+
+    // Now we try again with a non-fatal exception and we should get a result
+    exc = new Exception("boom")
+    assert(exc eq intercept[Exception] { Await.result(failingEf(), 1.second) })
   }
 }

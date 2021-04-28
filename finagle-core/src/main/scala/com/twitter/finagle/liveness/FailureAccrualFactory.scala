@@ -1,18 +1,18 @@
 package com.twitter.finagle.liveness
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Stack.{Params, Role}
 import com.twitter.finagle._
 import com.twitter.finagle.client.Transporter
-import com.twitter.finagle.service.{Backoff, ResponseClass, ResponseClassifier, ReqRep}
-import com.twitter.finagle.server.ServerInfo
+import com.twitter.finagle.service.{ReqRep, ResponseClass, ResponseClassifier}
 import com.twitter.finagle.stats.StatsReceiver
-import com.twitter.logging.Level
+import com.twitter.logging.Logger
 import com.twitter.util._
 import scala.util.Random
 
 object FailureAccrualFactory {
   private[this] val rng = new Random
+  private[this] val logger = Logger.get(this.getClass.getName)
 
   private[this] val DefaultConsecutiveFailures = FailureAccrualPolicy.DefaultConsecutiveFailures
   private[this] val DefaultSuccessRateThreshold = FailureAccrualPolicy.DefaultSuccessRateThreshold
@@ -20,52 +20,36 @@ object FailureAccrualFactory {
   private[this] val DefaultMinimumRequestThreshold =
     FailureAccrualPolicy.DefaultMinimumRequestThreshold
 
-  private[this] val UseHybridDefaultPolicyId =
-    "com.twitter.finagle.core.UseHybridFailureAccrual"
-  private[this] def useHybridDefaultPolicy: Boolean =
-    CoreToggles(UseHybridDefaultPolicyId)(ServerInfo().id.hashCode)
-
   // Use equalJittered backoff in order to wait more time in between
   // each revival attempt on successive failures; if an endpoint has failed
   // previous requests, it is likely to do so again. The recent
   // "failure history" should influence how long to mark the endpoint
   // dead for.
-  private[finagle] val jitteredBackoff: Stream[Duration] =
-    Backoff.equalJittered(5.seconds, 300.seconds)
+  private[finagle] val jitteredBackoff: Backoff = Backoff.equalJittered(5.seconds, 300.seconds)
 
-  private[finagle] def defaultPolicy: Function0[FailureAccrualPolicy] = {
-    if (useHybridDefaultPolicy) {
-      new Function0[FailureAccrualPolicy] {
-        def apply(): FailureAccrualPolicy =
-          FailureAccrualPolicy
-            .successRateWithinDuration(
-              DefaultSuccessRateThreshold,
-              DefaultSuccessRateWindow,
-              jitteredBackoff,
-              DefaultMinimumRequestThreshold)
-            .orElse(FailureAccrualPolicy
-              .consecutiveFailures(DefaultConsecutiveFailures, jitteredBackoff))
+  private[finagle] def defaultPolicy: Function0[FailureAccrualPolicy] =
+    new Function0[FailureAccrualPolicy] {
+      def apply(): FailureAccrualPolicy =
+        FailureAccrualPolicy
+          .successRateWithinDuration(
+            DefaultSuccessRateThreshold,
+            DefaultSuccessRateWindow,
+            jitteredBackoff,
+            DefaultMinimumRequestThreshold
+          )
+          .orElse(
+            FailureAccrualPolicy
+              .consecutiveFailures(DefaultConsecutiveFailures, jitteredBackoff)
+          )
 
-        override def toString: String =
-          "FailureAccrualPolicy" +
-            ".successRateWithinDuration(" +
-            s"successRate = $DefaultSuccessRateThreshold, window = $DefaultSuccessRateWindow, " +
-            s"markDeadFor = $jitteredBackoff)" +
-            ".orElse(FailureAccrualPolicy" +
-            s".consecutiveFailures(numFailures: $DefaultConsecutiveFailures, markDeadFor: $jitteredBackoff)"
-      }
-    } else {
-      new Function0[FailureAccrualPolicy] {
-        def apply(): FailureAccrualPolicy =
-          FailureAccrualPolicy
-            .consecutiveFailures(DefaultConsecutiveFailures, jitteredBackoff)
-
-        override def toString: String =
-          s"FailureAccrualPolicy.consecutiveFailures(numFailures: " +
-            s"$DefaultConsecutiveFailures, markDeadFor: $jitteredBackoff)"
-      }
+      override def toString: String =
+        "FailureAccrualPolicy" +
+          ".successRateWithinDuration(" +
+          s"successRate = $DefaultSuccessRateThreshold, window = $DefaultSuccessRateWindow, " +
+          s"markDeadFor = $jitteredBackoff)" +
+          ".orElse(FailureAccrualPolicy" +
+          s".consecutiveFailures(numFailures: $DefaultConsecutiveFailures, markDeadFor: $jitteredBackoff)"
     }
-  }
 
   /**
    * Add jitter in `markDeadFor` to reduce correlation.
@@ -110,7 +94,7 @@ object FailureAccrualFactory {
   //  1. The param inserted into Stack.Params should be casted to its base type in order to tell
   //     the compiler what implicit value to look up.
   //  2. It's not possible to construct a triply-nested Scala class in Java using the sane API.
-  //     See http://stackoverflow.com/questions/30809070/accessing-scala-nested-classes-from-java
+  //     See https://stackoverflow.com/questions/30809070/accessing-scala-nested-classes-from-java
 
   // Create a consecutiveFailures FailureAccrualPolicy, helper method used by Param to provide
   // description details, without overriding toString method description will only show function0
@@ -197,7 +181,6 @@ object FailureAccrualFactory {
         implicitly[Stack.Param[FailureAccrualFactory.Param]],
         implicitly[Stack.Param[param.Timer]],
         implicitly[Stack.Param[param.Label]],
-        implicitly[Stack.Param[param.Logger]],
         implicitly[Stack.Param[param.ResponseClassifier]],
         implicitly[Stack.Param[Transporter.EndpointAddr]]
       )
@@ -208,26 +191,28 @@ object FailureAccrualFactory {
             val timer = params[param.Timer].timer
             val statsReceiver = params[param.Stats].statsReceiver
             val classifier = params[param.ResponseClassifier].responseClassifier
-
-            // extract some info useful for logging
-            val logger = params[param.Logger].log
             val endpoint = params[Transporter.EndpointAddr].addr
             val label = params[param.Label].label
 
+            val failureAccrualPolicy: FailureAccrualPolicy = policy()
+
             new FailureAccrualFactory[Req, Rep](
               underlying = next,
-              policy = policy(),
+              policy = failureAccrualPolicy,
               responseClassifier = classifier,
               timer = timer,
               statsReceiver = statsReceiver.scope("failure_accrual")
             ) {
-              override def didMarkDead(): Unit = {
-                logger.log(
-                  Level.INFO,
-                  s"""FailureAccrualFactory marking connection to "$label" as dead. """ +
+              override def didMarkDead(duration: Duration): Unit = {
+                // acceptable race condition here for the right `policy.show()`. A policy's
+                // state is only reset after it is revived,`policy.revived()` which is called
+                // after `duration` and a successful probe.
+                logger.info(
+                  s"""marking connection to "$label" as dead for ${duration.inSeconds} seconds. """ +
+                    s"""Policy: ${failureAccrualPolicy.show()}. """ +
                     s"""Remote Address: $endpoint"""
                 )
-                super.didMarkDead()
+                super.didMarkDead(duration)
               }
             }
 
@@ -241,8 +226,8 @@ object FailureAccrualFactory {
     }
 
   // The FailureAccrualFactory transitions between Alive, Dead, ProbeOpen,
-  // and ProbeClosed. The factory starts in the Alive state. After numFailures
-  // failures, the factory transitions to Dead. When it is revived,
+  // and ProbeClosed. The factory starts in the Alive state. After the failure policy is
+  // triggered, the factory transitions to Dead. When it is revived,
   // it transitions to ProbeOpen. After a request is received,
   // it transitions to ProbeClosed and cannot accept any further requests until
   // the initial request is satisfied. If the request is successful, it
@@ -265,14 +250,16 @@ object FailureAccrualFactory {
 
 /**
  * A [[com.twitter.finagle.ServiceFactory]] that accrues failures, marking
- * itself unavailable when deemed unhealthy according to its configuration.
+ * itself unavailable when deemed unhealthy according to the configured `policy`.
  *
  * This acts as a request driven
- * [[http://martinfowler.com/bliki/CircuitBreaker.html circuit breaker]].
+ * [[https://martinfowler.com/bliki/CircuitBreaker.html circuit breaker]].
  *
- * When used in a typical Finagle client, there is one instance per node
- * and as such, the load balancer will avoid nodes that are marked down
- * via failure accrual.
+ * Note this module fails open – that is,  even if it transitions into a
+ * closed state, requests will still be allowed to flow through it. Although,
+ * when used in a typical Finagle client, there is one instance of this module
+ * per node and as such, the load balancer will avoid nodes where the status is
+ * not open.
  *
  * @param responseClassifier used to determine which request/response pairs
  * are successful or not.
@@ -285,8 +272,8 @@ class FailureAccrualFactory[Req, Rep](
   policy: FailureAccrualPolicy,
   responseClassifier: ResponseClassifier,
   timer: Timer,
-  statsReceiver: StatsReceiver
-) extends ServiceFactory[Req, Rep] { self =>
+  statsReceiver: StatsReceiver)
+    extends ServiceFactory[Req, Rep] { self =>
   import FailureAccrualFactory._
 
   // writes to `state` and `reviveTimerTask` are synchronized on `self`
@@ -298,7 +285,7 @@ class FailureAccrualFactory[Req, Rep](
   private[this] val probesCounter = statsReceiver.counter("probes")
   private[this] val removedForCounter = statsReceiver.counter("removed_for_ms")
 
-  private[this] def didFail() = self.synchronized {
+  private[this] def didFail(): Unit = self.synchronized {
     state match {
       case Alive | ProbeClosed =>
         policy.markDeadOnFailure() match {
@@ -315,16 +302,10 @@ class FailureAccrualFactory[Req, Rep](
     }
   }
 
-  private[this] val onServiceAcquisitionFailure: Throwable => Unit = self.synchronized { _ =>
+  private[this] def onServiceAcquisitionFailure(): Unit = self.synchronized {
     stopProbing()
     didFail()
   }
-
-  protected def isSuccess(reqRep: ReqRep): Boolean =
-    responseClassifier.applyOrElse(reqRep, ResponseClassifier.Default) match {
-      case ResponseClass.Successful(_) => true
-      case ResponseClass.Failed(_) => false
-    }
 
   protected def didSucceed(): Unit = self.synchronized {
     // Only count revivals when the probe succeeds.
@@ -362,14 +343,14 @@ class FailureAccrualFactory[Req, Rep](
 
     removedForCounter.incr(duration.inMilliseconds.toInt)
 
-    didMarkDead()
+    didMarkDead(duration)
   }
 
   /**
    * Called by FailureAccrualFactory after marking an endpoint dead. Override
    * this method to perform additional actions.
    */
-  protected def didMarkDead() = {}
+  protected def didMarkDead(duration: Duration) = {}
 
   /**
    * Enter 'Probing' state.
@@ -395,6 +376,9 @@ class FailureAccrualFactory[Req, Rep](
     }
   }
 
+  protected def classify(reqRep: ReqRep): ResponseClass =
+    responseClassifier.applyOrElse(reqRep, ResponseClassifier.Default)
+
   private[this] def makeService(service: Service[Req, Rep]): Service[Req, Rep] = {
     // N.B. the reason we can't simply filter the service factory is so that
     // we can override the session status to reflect the broader endpoint status.
@@ -408,13 +392,17 @@ class FailureAccrualFactory[Req, Rep](
         // (unsuccessful).
         stopProbing()
 
-        service(request).respond {
-          // Don't count `FailureFlags.Ignorable` responses as either successful or failed
-          case Throw(f: FailureFlags[_]) if f.isFlagged(FailureFlags.Ignorable) =>
-            didReceiveIgnorable()
-          case rep =>
-            if (isSuccess(ReqRep(request, rep))) didSucceed()
-            else didFail()
+        service(request).respond { rep =>
+          classify(ReqRep(request, rep)) match {
+            case ResponseClass.Successful(_) =>
+              didSucceed()
+
+            case ResponseClass.Failed(_) =>
+              didFail()
+
+            case ResponseClass.Ignorable =>
+              didReceiveIgnorable()
+          }
         }
       }
 
@@ -427,19 +415,13 @@ class FailureAccrualFactory[Req, Rep](
 
   private[this] val applyService: Try[Service[Req, Rep]] => Future[Service[Req, Rep]] = {
     case Return(svc) => Future.value(makeService(svc))
-    case t @ Throw(_) => Future.const(t.cast[Service[Req, Rep]])
+    case t @ Throw(_) =>
+      onServiceAcquisitionFailure()
+      Future.const(t.cast[Service[Req, Rep]])
   }
 
-  private[this] val handleFailure: Try[Service[Req, Rep]] => Unit = {
-    case Throw(t) => onServiceAcquisitionFailure(t)
-    case _ =>
-  }
-
-  def apply(conn: ClientConnection): Future[Service[Req, Rep]] = {
-    underlying(conn)
-      .transform(applyService)
-      .respond(handleFailure)
-  }
+  def apply(conn: ClientConnection): Future[Service[Req, Rep]] =
+    underlying(conn).transform(applyService)
 
   override def status: Status = state match {
     case Alive | ProbeOpen => underlying.status

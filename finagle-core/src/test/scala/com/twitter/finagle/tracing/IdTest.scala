@@ -2,10 +2,7 @@ package com.twitter.finagle.tracing
 
 import scala.util.Random
 import org.scalatest.FunSuite
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class IdTest extends FunSuite {
   test("compare unequal ids") {
     assert(TraceId(None, None, SpanId(0L), None) != TraceId(None, None, SpanId(1L), None))
@@ -72,7 +69,7 @@ class IdTest extends FunSuite {
   test("extract 128bit ids") {
     val low = 5208512171318403364L
     val high = 5060571933882717101L
-    val spanId =  hex(high) + hex(low)
+    val spanId = hex(high) + hex(low)
     val traceId = TraceId128(spanId)
 
     assert(traceId.high.isDefined)
@@ -100,8 +97,21 @@ class IdTest extends FunSuite {
 
   test("hashCode only accounts for id fields") {
     assert(
-      TraceId(Some(SpanId(1L)), Some(SpanId(2L)), SpanId(3L), Some(true), Flags(), Some(SpanId(4L))).hashCode ==
-        TraceId(Some(SpanId(1L)), Some(SpanId(2L)), SpanId(3L), Some(false), Flags(Flags.Debug), Some(SpanId(4L))).hashCode
+      TraceId(
+        Some(SpanId(1L)),
+        Some(SpanId(2L)),
+        SpanId(3L),
+        Some(true),
+        Flags(),
+        Some(SpanId(4L))).hashCode ==
+        TraceId(
+          Some(SpanId(1L)),
+          Some(SpanId(2L)),
+          SpanId(3L),
+          Some(false),
+          Flags(Flags.Debug),
+          Some(SpanId(4L))
+        ).hashCode
     )
   }
 }

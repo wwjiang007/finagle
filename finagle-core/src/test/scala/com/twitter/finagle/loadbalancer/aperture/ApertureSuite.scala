@@ -14,11 +14,12 @@ private[loadbalancer] trait ApertureSuite {
    * via proxy methods.
    */
   trait TestBal extends Aperture[Unit, Unit] {
-    protected val rng = Rng(12345L)
-    protected val emptyException = new Empty
+    private[aperture] val rng = Rng(12345L)
+    protected def emptyException = new Empty
+    private[aperture] def eagerConnections = false
     protected def maxEffort = 5
-    protected def minAperture = 1
-    protected def useDeterministicOrdering: Option[Boolean] = None
+    private[aperture] def minAperture = 1
+    protected val useDeterministicOrdering: Option[Boolean] = None
     protected def label = ""
 
     protected[this] val maxEffortExhausted = statsReceiver.counter("max_effort_exhausted")
@@ -35,8 +36,9 @@ private[loadbalancer] trait ApertureSuite {
     def maxUnitsx: Int = maxUnits
     def distx: Distributor = dist
     def rebuildx(): Unit = rebuild()
-    def isDeterministicAperture: Boolean = dist.isInstanceOf[DeterministicAperture]
-    def isRandomAperture: Boolean = dist.isInstanceOf[RandomAperture]
+    def isDeterministicAperture: Boolean =
+      dist.isInstanceOf[DeterministicAperture[Unit, Unit, Node]]
+    def isRandomAperture: Boolean = dist.isInstanceOf[RandomAperture[Unit, Unit, Node]]
   }
 
   case class Factory(i: Int) extends EndpointFactory[Unit, Unit] {
@@ -123,9 +125,7 @@ private[loadbalancer] trait ApertureSuite {
     def apply(i: Int) = factories.getOrElseUpdate(i, Factory(i))
 
     def range(n: Int): IndexedSeq[EndpointFactory[Unit, Unit]] =
-      Vector.tabulate(n) { i =>
-        apply(i)
-      }
+      Vector.tabulate(n) { i => apply(i) }
   }
 
 }

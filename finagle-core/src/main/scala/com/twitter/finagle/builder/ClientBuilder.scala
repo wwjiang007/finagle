@@ -1,26 +1,30 @@
 package com.twitter.finagle.builder
 
-import com.twitter.conversions.time._
-import com.twitter.finagle._
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.{Backoff, _}
 import com.twitter.finagle.client.Transporter.Credentials
-import com.twitter.finagle.client.{DefaultPool, StackClient}
-import com.twitter.finagle.client.{StackBasedClient, Transporter}
+import com.twitter.finagle.client.{DefaultPool, StackBasedClient, StackClient, Transporter}
 import com.twitter.finagle.factory.TimeoutFactory
 import com.twitter.finagle.filter.ExceptionSourceFilter
 import com.twitter.finagle.liveness.FailureAccrualFactory
 import com.twitter.finagle.loadbalancer.LoadBalancerFactory
 import com.twitter.finagle.naming.BindingFactory
-import com.twitter.finagle.service._
 import com.twitter.finagle.service.FailFastFactory.FailFast
+import com.twitter.finagle.service._
+import com.twitter.finagle.ssl.TrustCredentials
 import com.twitter.finagle.ssl.client.{
   SslClientConfiguration,
   SslClientEngineFactory,
   SslClientSessionVerifier,
   SslContextClientEngineFactory
 }
-import com.twitter.finagle.ssl.TrustCredentials
-import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
-import com.twitter.finagle.tracing.NullTracer
+import com.twitter.finagle.stats.{
+  NullStatsReceiver,
+  RelativeNameMarkingStatsReceiver,
+  RoleConfiguredStatsReceiver,
+  StatsReceiver,
+  Client => ClientRole
+}
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.util._
 import com.twitter.util
@@ -72,8 +76,8 @@ object ClientConfig {
 
   private case class NilClient[Req, Rep](
     stack: Stack[ServiceFactory[Req, Rep]] = StackClient.newStack[Req, Rep],
-    params: Stack.Params = DefaultParams
-  ) extends StackBasedClient[Req, Rep] {
+    params: Stack.Params = DefaultParams)
+      extends StackBasedClient[Req, Rep] {
 
     def withParams(ps: Stack.Params): StackBasedClient[Req, Rep] = copy(params = ps)
     def transformed(t: Stack.Transformer): StackBasedClient[Req, Rep] = copy(stack = t(stack))
@@ -82,10 +86,8 @@ object ClientConfig {
       newClient(dest, label).toService
 
     def newClient(dest: Name, label: String): ServiceFactory[Req, Rep] =
-      ServiceFactory(
-        () =>
-          Future.value(Service.mk[Req, Rep](_ => Future.exception(new Exception("unimplemented"))))
-      )
+      ServiceFactory(() =>
+        Future.value(Service.mk[Req, Rep](_ => Future.exception(new Exception("unimplemented")))))
   }
 
   def nilClient[Req, Rep]: StackBasedClient[Req, Rep] = NilClient[Req, Rep]()
@@ -126,7 +128,6 @@ object ClientConfig {
       idleTime = 5.seconds,
       maxWaiters = Int.MaxValue
     ) +
-    param.Tracer(NullTracer) +
     param.Monitor(NullMonitor) +
     param.Reporter(NullReporterFactory) +
     Daemonize(false)
@@ -224,7 +225,7 @@ private[builder] final class ClientConfig[Req, Rep, HasCluster, HasCodec, HasHos
  * users.''
  *
  *  - `keepAlive`: Unspecified, in which case the
- *    [[http://docs.oracle.com/javase/7/docs/api/java/net/StandardSocketOptions.html?is-external=true#SO_KEEPALIVE Java default]]
+ *    [[https://docs.oracle.com/javase/7/docs/api/java/net/StandardSocketOptions.html?is-external=true#SO_KEEPALIVE Java default]]
  *    of `false` is used
  *  - `hostConnectionMaxIdleTime`: [[com.twitter.util.Duration.Top Duration.Top]]
  *  - `hostConnectionMaxLifeTime`: [[com.twitter.util.Duration.Top Duration.Top]]
@@ -235,8 +236,7 @@ private[builder] final class ClientConfig[Req, Rep, HasCluster, HasCodec, HasHos
  * client-construction APIs.
  */
 class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] private[finagle] (
-  private[finagle] val client: StackBasedClient[Req, Rep]
-) {
+  private[finagle] val client: StackBasedClient[Req, Rep]) {
   import ClientConfig._
   import com.twitter.finagle.param._
 
@@ -368,9 +368,7 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    * }}}
    */
   @varargs
-  def addrs(
-    addrs: Address*
-  ): ClientBuilder[Req, Rep, Yes, HasCodec, HasHostConnectionLimit] =
+  def addrs(addrs: Address*): ClientBuilder[Req, Rep, Yes, HasCodec, HasHostConnectionLimit] =
     dest(Name.bound(addrs: _*))
 
   /**
@@ -389,9 +387,7 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    *   .newService(name)
    * }}}
    */
-  def dest(
-    addr: String
-  ): ClientBuilder[Req, Rep, Yes, HasCodec, HasHostConnectionLimit] = {
+  def dest(addr: String): ClientBuilder[Req, Rep, Yes, HasCodec, HasHostConnectionLimit] = {
     Resolver.evalLabeled(addr) match {
       case (n, "") => dest(n)
       case (n, l) =>
@@ -418,9 +414,7 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    * Http.client.newService(name)
    * }}}
    */
-  def dest(
-    name: Name
-  ): ClientBuilder[Req, Rep, Yes, HasCodec, HasHostConnectionLimit] =
+  def dest(name: Name): ClientBuilder[Req, Rep, Yes, HasCodec, HasHostConnectionLimit] =
     _configured(DestName(name))
 
   /**
@@ -835,7 +829,7 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    * @see [[retryPolicy]] for per-request rules on which failures are
    * eligible for retries.
    */
-  def retryBudget(budget: RetryBudget, backoffSchedule: Stream[Duration]): This =
+  def retryBudget(budget: RetryBudget, backoffSchedule: Backoff): This =
     configured(Retries.Budget(budget, backoffSchedule))
 
   /**
@@ -878,10 +872,7 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    * Http.client.withTransport.tls(config, sessionVerifier)
    * }}}
    */
-  def tls(
-    config: SslClientConfiguration,
-    sessionVerifier: SslClientSessionVerifier
-  ): This =
+  def tls(config: SslClientConfiguration, sessionVerifier: SslClientSessionVerifier): This =
     configured(Transport.ClientSsl(Some(config)))
       .configured(SslClientSessionVerifier.Param(sessionVerifier))
 
@@ -1021,21 +1012,6 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
     configured(MonitorFactory(mFactory))
 
   /**
-   * Log very detailed debug information to the given logger.
-   *
-   * To migrate to the Stack-based APIs, use `configured`.
-   * For example:
-   * {{{
-   * import com.twitter.finagle.Http
-   * import com.twitter.finagle.param.Logger
-   *
-   * Http.client.configured(Logger(logger))
-   * }}}
-   */
-  def logger(logger: java.util.logging.Logger): This =
-    configured(Logger(logger))
-
-  /**
    * Use the given parameters for failure accrual.  The first parameter
    * is the number of *successive* failures that are required to mark
    * a host failed.  The second parameter specifies how long the host
@@ -1135,7 +1111,10 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
   private[finagle] lazy val statsReceiver = {
     val Stats(sr) = params[Stats]
     val Label(label) = params[Label]
-    sr.scope(label)
+    new RoleConfiguredStatsReceiver(
+      new RelativeNameMarkingStatsReceiver(sr.scope(label)),
+      ClientRole,
+      Some(label))
   }
 
   /**
@@ -1150,7 +1129,8 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    * Http.client.newClient(destination)
    * }}}
    */
-  def buildFactory()(
+  def buildFactory(
+  )(
     implicit THE_BUILDER_IS_NOT_FULLY_SPECIFIED_SEE_ClientBuilder_DOCUMENTATION: ClientConfigEvidence[
       HasCluster,
       HasCodec,
@@ -1173,7 +1153,8 @@ class ClientBuilder[Req, Rep, HasCluster, HasCodec, HasHostConnectionLimit] priv
    * Http.client.newService(destination)
    * }}}
    */
-  def build()(
+  def build(
+  )(
     implicit THE_BUILDER_IS_NOT_FULLY_SPECIFIED_SEE_ClientBuilder_DOCUMENTATION: ClientConfigEvidence[
       HasCluster,
       HasCodec,
@@ -1245,7 +1226,8 @@ private[finagle] object ClientBuilderClient {
       val Stats(statsReceiver) = statsP
       val ExceptionStatsHandler(categorizer) = exceptionStatsHandlerP
 
-      val stats = new StatsFilter[Req, Rep](statsReceiver.scope("tries"), categorizer)
+      val stats =
+        new StatsFilter[Req, Rep](statsReceiver.scope("tries"), categorizer)
       stats.andThen(next)
     }
   }
@@ -1278,10 +1260,7 @@ private[finagle] object ClientBuilderClient {
     val role: Stack.Role = Stack.Role("ClientBuilder ExceptionSourceFilter")
     val description: String = "Exception source filter"
 
-    def make(
-      labelP: Label,
-      next: ServiceFactory[Req, Rep]
-    ): ServiceFactory[Req, Rep] = {
+    def make(labelP: Label, next: ServiceFactory[Req, Rep]): ServiceFactory[Req, Rep] = {
       val Label(label) = labelP
 
       val exceptionSource = new ExceptionSourceFilter[Req, Rep](label)
@@ -1296,7 +1275,7 @@ private[finagle] object ClientBuilderClient {
   ): ServiceFactory[Req, Rep] = {
     val params = client.params
     val Daemonize(daemon) = params[Daemonize]
-    val Logger(logger) = params[Logger]
+    val logger = DefaultLogger
     val MonitorFactory(mFactory) = params[MonitorFactory]
 
     val clientParams = params + Monitor(mFactory(label))
@@ -1347,7 +1326,7 @@ private[finagle] object ClientBuilderClient {
       private[this] val released = new AtomicBoolean(false)
       override def close(deadline: Time): Future[Unit] = {
         if (!released.compareAndSet(false, true)) {
-          val Logger(logger) = client.params[Logger]
+          val logger = DefaultLogger
           logger.log(
             java.util.logging.Level.WARNING,
             "Release on Service called multiple times!",

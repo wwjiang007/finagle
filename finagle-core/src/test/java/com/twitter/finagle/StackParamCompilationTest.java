@@ -23,14 +23,12 @@ import com.twitter.finagle.loadbalancer.WhenNoNodesOpens;
 import com.twitter.finagle.naming.BindingFactory;
 import com.twitter.finagle.param.ExceptionStatsHandler;
 import com.twitter.finagle.param.Label;
-import com.twitter.finagle.param.Logger;
 import com.twitter.finagle.param.Monitor;
 import com.twitter.finagle.param.Reporter;
 import com.twitter.finagle.param.Stats;
 import com.twitter.finagle.param.Timer;
 import com.twitter.finagle.param.Tracer;
 import com.twitter.finagle.server.Listener;
-import com.twitter.finagle.service.Backoff;
 import com.twitter.finagle.service.ExpiringService;
 import com.twitter.finagle.service.FailFastFactory;
 import com.twitter.finagle.service.Retries;
@@ -57,7 +55,6 @@ public class StackParamCompilationTest {
       ClientBuilder.get()
         .configured(new Label("").mk())
         .configured(new Timer(DefaultTimer.getInstance()).mk())
-        .configured(new Logger(java.util.logging.Logger.getLogger("com.twitter.finagle")).mk())
         .configured(new Stats(com.twitter.finagle.stats.DefaultStatsReceiver.get()).mk())
         .configured(new Monitor(RootMonitor.getInstance()).mk())
         .configured(new Monitor(NullMonitor.getInstance()).mk())
@@ -70,14 +67,14 @@ public class StackParamCompilationTest {
           new DefaultPool.Param(0, Integer.MAX_VALUE, 0, Duration.Top(), Integer.MAX_VALUE).mk())
         .configured(new Transporter.ConnectTimeout(Duration.Top()).mk())
         .configured(
-          new Transporter.SocksProxy(Option.empty(), Option.empty()).mk())
+          new Transporter.SocksProxy(Option.empty(), Option.empty(), true).mk())
         .configured(
           new Transporter.HttpProxy(
             Option.<SocketAddress>empty(),
             Option.<Transporter.Credentials>empty()).mk())
         .configured(
           new BindingFactory.BaseDtab(new Function0<Dtab>() {
-              public Dtab apply() { return Dtab.empty(); }
+              public Dtab apply() { return Dtab.emptyDtab(); }
           }).mk())
         .configured(new TimeoutFactory.Param(Duration.Top()).mk())
         .configured(new MaskCancelFilter.Param(false).mk())

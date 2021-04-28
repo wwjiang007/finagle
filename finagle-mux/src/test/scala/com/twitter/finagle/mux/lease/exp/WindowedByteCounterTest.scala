@@ -1,8 +1,8 @@
 package com.twitter.finagle.mux.lease.exp
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.util._
-import com.twitter.conversions.storage.intToStorageUnitableWholeNumber
+import com.twitter.conversions.StorageUnitOps._
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
 import org.scalatest.FunSuite
 import scala.util.Random
@@ -16,7 +16,10 @@ class WindowedByteCounterTest extends FunSuite with Eventually with IntegrationP
   }
 
   // cleans up thread
-  private[this] def withCounter(fakeBean: FakeGarbageCollectorMXBean, fakePool: FakeMemoryPool)(
+  private[this] def withCounter(
+    fakeBean: FakeGarbageCollectorMXBean,
+    fakePool: FakeMemoryPool
+  )(
     fn: (ByteCounter, () => Any) => Unit
   ): Unit = {
     Time.withCurrentTimeFrozen { ctl =>

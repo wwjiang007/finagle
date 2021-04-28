@@ -1,6 +1,6 @@
 package com.twitter.finagle.redis.integration
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.redis.ClientError
 import com.twitter.finagle.redis.RedisClientTest
 import com.twitter.finagle.redis.tags.{ClientTest, RedisTest}
@@ -44,7 +44,10 @@ final class SetClientIntegrationSuite extends RedisClientTest {
     }
   }
 
-  test("Correctly add and pop members from a set, while looking at the set", RedisTest, ClientTest) {
+  test(
+    "Correctly add and pop members from a set, while looking at the set",
+    RedisTest,
+    ClientTest) {
     withRedisClient { client =>
       assert(Await.result(client.sAdd(key, List(bufFoo))) == oneElemAdded, oneElemAddErrorMessage)
       assert(Await.result(client.sIsMember(key, bufFoo)) == true, "Foo was not a member of the set")

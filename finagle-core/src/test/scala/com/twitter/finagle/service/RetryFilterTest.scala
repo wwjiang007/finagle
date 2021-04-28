@@ -1,21 +1,25 @@
 package com.twitter.finagle.service
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stats.InMemoryStatsReceiver
-import com.twitter.finagle.{FailedFastException, Failure, FailureFlags, Service, WriteException}
+import com.twitter.finagle.{
+  Backoff,
+  FailedFastException,
+  Failure,
+  FailureFlags,
+  Service,
+  WriteException
+}
 import com.twitter.util._
-import org.junit.runner.RunWith
 import org.mockito.Matchers.anyObject
 import org.mockito.Mockito.{times, verify, when}
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mockito.MockitoSugar
 import org.scalatest.{BeforeAndAfter, FunSpec}
+import org.scalatestplus.mockito.MockitoSugar
 import scala.language.reflectiveCalls
 
-@RunWith(classOf[JUnitRunner])
 class RetryFilterTest extends FunSpec with MockitoSugar with BeforeAndAfter {
   var timer: JavaTimer = _
-  val backoffs = Stream(1.second, 2.seconds, 3.seconds)
+  val backoffs = Backoff.linear(1.second, 1.second).take(3)
   val shouldRetryException: PartialFunction[Try[Nothing], Boolean] = {
     case Throw(WriteException(_)) => true
     case _ => false
@@ -263,9 +267,11 @@ class RetryFilterTest extends FunSpec with MockitoSugar with BeforeAndAfter {
           Future.exception(new RuntimeException("never gonna be seen"))
         )
 
-        val policy = RetryPolicy.tries[Try[Nothing]](3, {
-          case Throw(_) => true
-        })
+        val policy = RetryPolicy.tries[Try[Nothing]](
+          3,
+          {
+            case Throw(_) => true
+          })
         val retryFilter =
           new RetryExceptionsFilter[Int, Int](policy, timer, stats, RetryBudget.Infinite)
         val retryingSvc = retryFilter.andThen(svc)

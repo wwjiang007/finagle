@@ -3,11 +3,11 @@ package com.twitter.finagle.http
 import com.twitter.finagle.http.Message.BufOutputStream
 import com.twitter.finagle.http.util.StringUtil
 import com.twitter.io.{Buf, BufInputStream, Reader, Writer}
-import com.twitter.util.{Closable, Duration, Future}
-import java.util.{Date, Locale, Iterator => JIterator}
-import java.nio.charset.Charset
-import java.time.{ZoneId, ZoneOffset}
+import com.twitter.util.{Duration, Future}
+import java.nio.charset.{Charset, StandardCharsets}
 import java.time.format.DateTimeFormatter
+import java.time.{Instant, ZoneId, ZoneOffset}
+import java.util.{Date, Locale, Iterator => JIterator}
 import scala.collection.JavaConverters._
 
 /**
@@ -18,24 +18,64 @@ import scala.collection.JavaConverters._
  */
 abstract class Message {
 
-  private[this] var _content: Buf = Buf.Empty
-  private[this] var _version: Version = Version.Http11
-  private[this] var _chunked: Boolean = false
+  @volatile private[this] var _content: Buf = Buf.Empty
+  @volatile private[this] var _version: Version = Version.Http11
+  @volatile private[this] var _chunked: Boolean = false
 
   /**
-   * A read-only handle to the internal stream of bytes, representing the
-   * message body. See [[com.twitter.io.Reader]] for more information.
+   * A read-only handle to a stream of [[Chunk]], representing the message body. This stream is only
+   * populated on chunked messages (`isChunked == true`). Use [[content]] to access a payload of
+   * a fully-buffered message (`isChunked == false`).
+   *
+   * Prefer this API over [[reader]] when application needs to receive trailing headers (trailers).
+   * Trailers are transmitted in the very last chunk (`chunk.isLast == true`) of the stream and
+   * can be retrieved via [[Chunk.trailers]].
+   *
+   * @see [[Reader]] and [[Chunk]]
    **/
-  def reader: Reader[Buf]
+  def chunkReader: Reader[Chunk]
 
   /**
-   * A write-only handle to the internal stream of bytes, representing the
-   * message body. See [[com.twitter.io.Writer]] for more information.
+   * A write-only handle to a stream of [[Chunk]], representing the message body. Only chunked
+   * messages (`isChunked == true`) use this stream as their payload, fully-buffered messages
+   * (`isChunked == false`) use [[content]] instead.
+   *
+   * Prefer this API over [[writer]] when application needs to send trailing headers (trailers).
+   * Trailers are transmitted in the very last chunk of the stream and can be populated via
+   * `Chunk.last` factory method.
+   *
+   * @see [[Reader]] and [[Chunk]]
    **/
-  def writer: Writer[Buf] with Closable
+  def chunkWriter: Writer[Chunk]
+
+  /**
+   * A read-only handle to a stream of [[Buf]], representing the message body. This stream is only
+   * * populated on chunked messages (`isChunked == true`). Use [[content]] to access a payload of
+   * a fully-buffered message (`isChunked == false`).
+   *
+   * Prefer this API over [[chunkReader]] when application doesn't need access to trailing headers
+   * (trailers).
+   *
+   * @see [[Reader]]
+   **/
+  final lazy val reader: Reader[Buf] = chunkReader.flatMap(chunk =>
+    if (chunk.isLast && chunk.content.isEmpty) Reader.empty
+    else Reader.value(chunk.content))
+
+  /**
+   * A write-only handle to the stream of [[Buf]], representing the message body. Only chunked
+   * messages (`isChunked == true`) use this stream as their payload, fully-buffered messages
+   * (`isChunked == false`) use [[content]] instead.
+   *
+   * Prefer this API over [[chunkWriter]] when application doesn't need to send trailing headers
+   * (trailers).
+   *
+   * @see [[Writer]]
+   **/
+  final lazy val writer: Writer[Buf] = chunkWriter.contramap(Chunk.apply)
 
   def isRequest: Boolean
-  def isResponse = !isRequest
+  def isResponse: Boolean = !isRequest
 
   /**
    * Retrieve the current content of this `Message`.
@@ -108,12 +148,23 @@ abstract class Message {
   }
 
   /**
-   * A [[HeaderMap]] (i.e., HTTP headers) associated with this message.
+   * HTTP headers associated with this message.
    *
-   * @note This structure isn't thread-safe. Any concurrent access should be synchronized
+   * @note [[HeaderMap]] isn't thread-safe. Any concurrent access should be synchronized
    *       externally.
    */
   def headerMap: HeaderMap
+
+  /**
+   * Trailing headers (trailers) associated with this message.
+   *
+   * These are only populated on fully-buffered inbound messages that were aggregated
+   * (see `withStreaming(false)`) from HTTP streams terminating with trailers.
+   *
+   * @note [[HeaderMap]] isn't thread-safe. Any concurrent access should be synchronized
+   *       externally.
+   */
+  def trailers: HeaderMap
 
   /**
    * Cookies. In a request, this uses the Cookie headers.
@@ -150,11 +201,11 @@ abstract class Message {
 
   /** Accept header media types (normalized, no parameters) */
   def acceptMediaTypes: Seq[String] =
-    accept.map {
+    accept.flatMap {
       _.split(";", 2).headOption
         .map(_.trim.toLowerCase) // media types are case-insensitive
         .filter(_.nonEmpty) // skip blanks
-    }.flatten
+    }
 
   /** Allow header */
   def allow: Option[String] = headerMap.get(Fields.Allow)
@@ -185,18 +236,19 @@ abstract class Message {
 
   /** Get charset from Content-Type header */
   def charset: Option[String] = {
-    contentType.foreach { contentType =>
-      val parts = StringUtil.split(contentType, ';')
-      1.to(parts.length - 1) foreach { i =>
-        val part = parts(i).trim
-        if (part.startsWith("charset=")) {
-          val equalsIndex = part.indexOf('=')
-          val charset = part.substring(equalsIndex + 1)
-          return Some(charset)
-        }
-      }
-    }
-    None
+    val cType = headerMap.getOrNull(Fields.ContentType)
+    if (cType == null)
+      return None
+
+    // the format is roughly: "value; charset=value"
+    val charsetIdx = cType.indexOf("charset=")
+    if (charsetIdx == -1)
+      return None
+
+    val valueIdx = charsetIdx + "charset=".length
+    val semicolonIdx = cType.indexOf(';', valueIdx)
+    val endIdx = if (semicolonIdx == -1) cType.length else semicolonIdx
+    Some(cType.substring(valueIdx, endIdx).trim)
   }
 
   /** Set charset in Content-Type header.  This does not change the content. */
@@ -209,18 +261,18 @@ abstract class Message {
     }
 
     val builder = new StringBuilder(parts(0))
-    if (!(parts.exists { _.trim.startsWith("charset=") })) {
+    if (!parts.exists(_.trim.startsWith("charset="))) {
       // No charset parameter exist, add charset after media type
       builder.append(";charset=")
       builder.append(value)
       // Copy other parameters
-      1.to(parts.length - 1) foreach { i =>
+      1.until(parts.length).foreach { i =>
         builder.append(";")
         builder.append(parts(i))
       }
     } else {
       // Replace charset= parameter(s)
-      1.to(parts.length - 1) foreach { i =>
+      1.until(parts.length).foreach { i =>
         val part = parts(i)
         if (part.trim.startsWith("charset=")) {
           builder.append(";charset=")
@@ -261,7 +313,7 @@ abstract class Message {
    * @see [[contentLength(Long)]] for Java users.
    */
   def contentLength_=(value: Long): Unit =
-    headerMap.set(Fields.ContentLength, value.toString)
+    headerMap.setUnsafe(Fields.ContentLength, value.toString)
 
   /**
    * Set Content-Length header.  Normally, this is automatically set by the
@@ -285,7 +337,7 @@ abstract class Message {
     headerMap.set(Fields.ContentType, mediaType + ";charset=" + charset)
 
   /** Set Content-Type header to application/json;charset=utf-8 */
-  def setContentTypeJson(): Unit = headerMap.set(Fields.ContentType, Message.ContentTypeJson)
+  def setContentTypeJson(): Unit = headerMap.setUnsafe(Fields.ContentType, Message.ContentTypeJson)
 
   /** Get Date header */
   def date: Option[String] = headerMap.get(Fields.Date)
@@ -437,11 +489,12 @@ abstract class Message {
 
   /** Get the content as a string. */
   def contentString: String = {
-    val encoding = try {
-      Charset.forName(charset getOrElse "UTF-8")
-    } catch {
-      case _: Throwable => Message.Utf8
-    }
+    val encoding =
+      try {
+        Charset.forName(charset.getOrElse("UTF-8"))
+      } catch {
+        case _: Throwable => StandardCharsets.UTF_8
+      }
     Buf.decodeString(content, encoding)
   }
 
@@ -540,7 +593,7 @@ abstract class Message {
   final def withWriter[T](f: java.io.Writer => T): T = {
     // withOutputStream will write() to the message
     withOutputStream { outputStream =>
-      val writer = new java.io.OutputStreamWriter(outputStream, Message.Utf8)
+      val writer = new java.io.OutputStreamWriter(outputStream, StandardCharsets.UTF_8)
       try f(writer)
       finally writer.close()
     }
@@ -555,12 +608,12 @@ abstract class Message {
   final def keepAlive(keepAlive: Boolean): this.type = {
     version match {
       case Version.Http10 =>
-        if (keepAlive) headerMap.set(Fields.Connection, "keep-alive")
+        if (keepAlive) headerMap.setUnsafe(Fields.Connection, "keep-alive")
         else headerMap.remove(Fields.Connection) // HTTP/1.0 defaults to close
 
       case _ =>
         if (keepAlive) headerMap.remove(Fields.Connection)
-        else headerMap.set(Fields.Connection, "close")
+        else headerMap.setUnsafe(Fields.Connection, "close")
     }
     this
   }
@@ -580,12 +633,11 @@ object Message {
     def contentsAsBuf: Buf = Buf.ByteArray.Owned(buf, 0, count)
   }
 
-  private[http] val Utf8 = Charset.forName("UTF-8")
-  val CharsetUtf8 = "charset=utf-8"
-  val ContentTypeJson = MediaType.Json + ";" + CharsetUtf8
-  val ContentTypeJsonPatch = MediaType.JsonPatch + ";" + CharsetUtf8
-  val ContentTypeJavascript = MediaType.Javascript + ";" + CharsetUtf8
-  val ContentTypeWwwForm = MediaType.WwwForm + ";" + CharsetUtf8
+  val CharsetUtf8: String = "charset=utf-8"
+  val ContentTypeJson: String = MediaType.Json + ";" + CharsetUtf8
+  val ContentTypeJsonPatch: String = MediaType.JsonPatch + ";" + CharsetUtf8
+  val ContentTypeJavascript: String = MediaType.Javascript + ";" + CharsetUtf8
+  val ContentTypeWwwForm: String = MediaType.WwwForm + ";" + CharsetUtf8
 
   private val HttpDateFormat: DateTimeFormatter =
     DateTimeFormatter
@@ -593,7 +645,27 @@ object Message {
       .withLocale(Locale.ENGLISH)
       .withZone(ZoneId.of("GMT"))
 
+  /**
+   * Convert a [[java.util.Date]] into an RFC 7231 formatted String representation.
+   *
+   * @param date the [[java.util.Date]] to format.
+   * @return an RFC 7231 formatted String representation of the time represented by the given [[java.util.Date]].
+   *
+   * @see [[https://tools.ietf.org/html/rfc7231#section-7.1.1.1 RFC 7231 Section 7.1.1.1]]
+   */
   def httpDateFormat(date: Date): String = {
     date.toInstant.atOffset(ZoneOffset.UTC).format(HttpDateFormat)
+  }
+
+  /**
+   * Convert epoch milliseconds into an RFC 7231 formatted String representation.
+   *
+   * @param millis the milliseconds to format.
+   * @return an RFC 7231 formatted String representation of the time represented by the given milliseconds.
+   *
+   * @see [[https://tools.ietf.org/html/rfc7231#section-7.1.1.1 RFC 7231 Section 7.1.1.1]]
+   */
+  def httpDateFormat(millis: Long): String = {
+    HttpDateFormat.format(Instant.ofEpochMilli(millis))
   }
 }

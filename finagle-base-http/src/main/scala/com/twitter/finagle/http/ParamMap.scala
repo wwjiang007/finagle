@@ -2,8 +2,7 @@ package com.twitter.finagle.http
 
 import com.twitter.finagle.http.util.StringUtil
 import java.util.{List => JList, Map => JMap}
-import scala.collection.immutable
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 /**
  * Request parameter map.
@@ -12,15 +11,13 @@ import scala.collection.JavaConverters._
  *
  * Use `getAll()` to get all values for a key.
  */
-abstract class ParamMap
-    extends immutable.Map[String, String]
-    with immutable.MapLike[String, String, ParamMap] {
+abstract class ParamMap extends ParamMapVersionSpecific {
 
   /**
    * Add a key/value pair to the map, returning a new map.
    * Overwrites all values if the key exists.
    */
-  def +[B >: String](kv: (String, B)): ParamMap = {
+  protected def setParam[B >: String](kv: (String, B)): ParamMap = {
     val (key, value) = (kv._1, kv._2.toString)
     val map = MapParamMap.tuplesToMultiMap(iterator.toSeq)
     val mapWithKey = map.updated(key, Seq(value))
@@ -28,10 +25,16 @@ abstract class ParamMap
   }
 
   /**
+   * Add a key/value pair to the map, returning a new map.
+   * Overwrites all values if the key exists.
+   */
+  override def +[V1 >: String](kv: (String, V1)): ParamMap = setParam((kv._1, kv._2))
+
+  /**
    * Removes a key from this map, returning a new map.
    * All values for the key are removed.
    */
-  def -(name: String): ParamMap = {
+  protected def clearParam(name: String): ParamMap = {
     val map = MapParamMap.tuplesToMultiMap(iterator.toSeq)
     new MapParamMap(map - name, isValid)
   }
@@ -137,21 +140,21 @@ class MapParamMap(underlying: Map[String, Seq[String]], val isValid: Boolean = t
 }
 
 object MapParamMap {
-  def apply(params: Tuple2[String, String]*): MapParamMap =
+  def apply(params: (String, String)*): MapParamMap =
     new MapParamMap(MapParamMap.tuplesToMultiMap(params))
 
   def apply(map: Map[String, String]): MapParamMap =
-    new MapParamMap(map.mapValues { value =>
-      Seq(value)
+    new MapParamMap(map.transform {
+      case (_, value) =>
+        Seq(value)
     })
 
-  private[http] def tuplesToMultiMap(
-    tuples: Seq[Tuple2[String, String]]
-  ): Map[String, Seq[String]] = {
+  private[http] def tuplesToMultiMap(tuples: Seq[(String, String)]): Map[String, Seq[String]] = {
     tuples
       .groupBy { case (k, v) => k }
-      .mapValues { values =>
-        values.map { _._2 }
+      .transform {
+        case (_, values) =>
+          values.map { _._2 }
       }
   }
 }
@@ -162,7 +165,8 @@ object EmptyParamMap extends ParamMap {
   def get(name: String): Option[String] = None
   def getAll(name: String): Iterable[String] = Nil
   def iterator: Iterator[(String, String)] = Iterator.empty
-  override def -(name: String): ParamMap = this
+  protected override def clearParam(name: String): ParamMap = this
+  override def +[B >: String](kv: (String, B)): ParamMap = MapParamMap(kv._1 -> kv._2.toString)
 }
 
 /**
@@ -248,16 +252,14 @@ class RequestParamMap(val request: Request) extends ParamMap {
   // Get iterable for JMap, which might be null
   private def jiterator(params: JMap[String, JList[String]]): Iterator[(String, String)] =
     params.entrySet.asScala.flatMap { entry =>
-      entry.getValue.asScala map { value =>
-        (entry.getKey, value)
-      }
+      entry.getValue.asScala map { value => (entry.getKey, value) }
     }.toIterator
 }
 
 object ParamMap {
 
   /** Create ParamMap from parameter list. */
-  def apply(params: Tuple2[String, String]*): ParamMap =
+  def apply(params: (String, String)*): ParamMap =
     MapParamMap(params: _*)
 
   /** Create ParamMap from a map. */
@@ -266,16 +268,8 @@ object ParamMap {
 
   private[http] val EmptyJMap = new java.util.HashMap[String, JList[String]]
 
-  private val ToShort = { s: String =>
-    StringUtil.toSomeShort(s)
-  }
-  private val ToInt = { s: String =>
-    StringUtil.toSomeInt(s)
-  }
-  private val ToLong = { s: String =>
-    StringUtil.toSomeLong(s)
-  }
-  private val ToBoolean = { s: String =>
-    StringUtil.toBoolean(s)
-  }
+  private val ToShort = { s: String => StringUtil.toSomeShort(s) }
+  private val ToInt = { s: String => StringUtil.toSomeInt(s) }
+  private val ToLong = { s: String => StringUtil.toSomeLong(s) }
+  private val ToBoolean = { s: String => StringUtil.toBoolean(s) }
 }

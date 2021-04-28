@@ -1,9 +1,12 @@
 package com.twitter.finagle.memcached.integration
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.liveness.FailureAccrualFactory
 import com.twitter.finagle.memcached.Client
+import com.twitter.finagle.param.{Stats, Timer}
+import com.twitter.finagle.partitioning.param
+import com.twitter.finagle.partitioning.param.EjectFailedHost
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.util._
 import java.net.InetSocketAddress
@@ -25,34 +28,28 @@ class MemcachedOldClientTest extends MemcachedTest {
     val sr = new InMemoryStatsReceiver
     val client = Memcached.client
       .configured(FailureAccrualFactory.Param(1, () => 10.minutes))
-      .configured(Memcached.param.EjectFailedHost(true))
+      .configured(param.EjectFailedHost(true))
       .withStatsReceiver(sr)
-      .newRichClient(Name.bound(servers.map { s =>
-        Address(s.address)
-      }: _*), clientName)
+      .newRichClient(Name.bound(servers.map { s => Address(s.address) }: _*), clientName)
     testRehashUponEject(client, sr)
     client.close()
   }
 
   test("host comes back into ring after being ejected") {
-    testRingReEntryAfterEjection(
-      (timer, cacheServer, statsReceiver) =>
-        Memcached.client
-          .configured(FailureAccrualFactory.Param(1, () => 10.minutes))
-          .configured(Memcached.param.EjectFailedHost(true))
-          .configured(param.Timer(timer))
-          .configured(param.Stats(statsReceiver))
-          .newRichClient(
-            Name.bound(Address(cacheServer.boundAddress.asInstanceOf[InetSocketAddress])),
-            clientName
-        )
-    )
+    testRingReEntryAfterEjection((timer, cacheServer, statsReceiver) =>
+      Memcached.client
+        .configured(FailureAccrualFactory.Param(1, () => 10.minutes))
+        .configured(EjectFailedHost(true))
+        .configured(Timer(timer))
+        .configured(Stats(statsReceiver))
+        .newRichClient(
+          Name.bound(Address(cacheServer.boundAddress.asInstanceOf[InetSocketAddress])),
+          clientName
+        ))
   }
 
   test("Add and remove nodes") {
-    val addrs = servers.map { s =>
-      Address(s.address)
-    }
+    val addrs = servers.map { s => Address(s.address) }
 
     // Start with 3 backends
     val mutableAddrs: ReadWriteVar[Addr] = new ReadWriteVar(Addr.Bound(addrs.toSet.drop(2)))

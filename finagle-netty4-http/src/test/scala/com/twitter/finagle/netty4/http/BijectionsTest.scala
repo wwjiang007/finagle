@@ -6,12 +6,10 @@ import io.netty.buffer.Unpooled
 import io.netty.handler.codec.http.{Cookie => _, _}
 import java.net.{InetSocketAddress, URI}
 import java.nio.charset.StandardCharsets.UTF_8
-import org.junit.runner.RunWith
 import org.scalacheck.{Arbitrary, Gen}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
-import scala.collection.JavaConverters._
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
+import scala.jdk.CollectionConverters._
 import scala.util.Random
 
 object BijectionsTest {
@@ -67,9 +65,24 @@ object BijectionsTest {
     headers.foreach { case (k, v) => req.headerMap.add(k, v) }
     req.setChunked(false)
     req.contentString = body
-    req.headerMap.set(Fields.ContentLength, body.length.toString)
+    req.contentLength = req.content.length
     (req, body)
   }
+
+  val arbRequestMoreEmptyNotChunked =
+    for {
+      method <- arbMethod
+      uri <- arbUri
+      version <- Gen.oneOf(Version.Http10, Version.Http11)
+      headers <- Gen.containerOf[Seq, (String, String)](arbHeader)
+      body <- Gen.frequency((3, ""), (1, arbitrary[String]))
+    } yield {
+      val req = Request.apply(version, method, uri, BufReader(Buf.Utf8(body)))
+      headers.foreach { case (k, v) => req.headerMap.add(k, v) }
+      req.setChunked(false)
+      req.contentString = body
+      req
+    }
 
   val arbNettyMethod =
     Gen.oneOf(
@@ -113,7 +126,6 @@ object BijectionsTest {
   }
 
   val arbNettyResponse = for {
-    method <- arbNettyMethod
     version <- arbNettyVersion
     status <- arbNettyStatus
     kvHeaders <- Gen.containerOf[Seq, (String, String)](arbHeader)
@@ -132,8 +144,7 @@ object BijectionsTest {
   }
 }
 
-@RunWith(classOf[JUnitRunner])
-class BijectionsTest extends FunSuite with GeneratorDrivenPropertyChecks {
+class BijectionsTest extends FunSuite with ScalaCheckDrivenPropertyChecks {
   import BijectionsTest._
 
   test("netty http request -> finagle") {
@@ -179,7 +190,7 @@ class BijectionsTest extends FunSuite with GeneratorDrivenPropertyChecks {
               assert(out.headers.getAll(k).asScala.toSet == in.headerMap.getAll(k).toSet)
           }
         } else {
-          val out = Bijections.finagle.responseHeadersToNetty(in)
+          val out = Bijections.finagle.chunkedResponseToNetty(in)
           assert(HttpUtil.isTransferEncodingChunked(out) == false)
           assert(out.protocolVersion == Bijections.finagle.versionToNetty(in.version))
           assert(out.asInstanceOf[FullHttpResponse].content.toString(UTF_8) == body)
@@ -194,7 +205,7 @@ class BijectionsTest extends FunSuite with GeneratorDrivenPropertyChecks {
   test("finagle http request -> netty") {
     forAll(arbRequest) {
       case (in: Request, body: String) =>
-        val out = Bijections.finagle.requestToNetty(in)
+        val out = Bijections.finagle.requestToNetty(in, in.contentLength)
         assert(HttpUtil.isTransferEncodingChunked(out) == false)
         assert(out.protocolVersion == Bijections.finagle.versionToNetty(in.version))
         assert(out.method == Bijections.finagle.methodToNetty(in.method))
@@ -206,9 +217,57 @@ class BijectionsTest extends FunSuite with GeneratorDrivenPropertyChecks {
         }
 
         in.headerMap.foreach {
-          case (k, v) =>
+          case (k, _) =>
             assert(out.headers.getAll(k).asScala.toSet == in.headerMap.getAll(k).toSet)
         }
+    }
+  }
+
+  test("incorrect content-length header is fixed on non-chunked requests") {
+    val in = Request()
+    in.contentString = "foo"
+    in.contentLength = 10
+
+    val out = Bijections.finagle.requestToNetty(in, in.contentLength)
+    assert(out.headers.get(Fields.ContentLength) == "3")
+  }
+
+  test("strips the transfer-encoding header if a content-length header is present") {
+    val in = Request()
+    in.contentString = "foo"
+    in.contentLength = 3
+    in.headerMap.set(Fields.TransferEncoding, "chunked")
+
+    val out = Bijections.finagle.requestToNetty(in, in.contentLength)
+    assert(out.headers.get(Fields.ContentLength) == "3")
+    assert(!HttpUtil.isTransferEncodingChunked(out))
+  }
+
+  test("requests(get) that don't have a body don't get an auto-added content-length header") {
+    val in = Request(Method.Get, "/")
+
+    val out = Bijections.finagle.requestToNetty(in, in.contentLength)
+    assert(!out.headers.contains(Fields.ContentLength))
+  }
+
+  test("requests(post) with empty body get an auto-added content-length header") {
+    val in = Request(Method.Post, "/")
+
+    val out = Bijections.finagle.requestToNetty(in, in.contentLength)
+    assert(out.headers.get(Fields.ContentLength) == "0")
+  }
+
+  test("content-length behaviors") {
+    forAll(arbRequestMoreEmptyNotChunked) { in =>
+      val out = Bijections.finagle.requestToNetty(in, in.contentLength)
+      out.method match {
+        case HttpMethod.POST | HttpMethod.PATCH | HttpMethod.PUT =>
+          assert(out.headers.get(Fields.ContentLength) == in.content.length.toString)
+        case _ if in.content.isEmpty =>
+          assert(!out.headers.contains(Fields.ContentLength))
+        case _ =>
+          assert(out.headers.get(Fields.ContentLength) == in.content.length.toString)
+      }
     }
   }
 
@@ -216,8 +275,9 @@ class BijectionsTest extends FunSuite with GeneratorDrivenPropertyChecks {
     val in = Request()
     in.setChunked(true)
     in.contentLength = 10
+    in.headerMap.set(Fields.TransferEncoding, "chunked")
 
-    val out = Bijections.finagle.requestToNetty(in)
+    val out = Bijections.finagle.requestToNetty(in, in.contentLength)
     assert(!HttpUtil.isTransferEncodingChunked(out))
     assert(out.headers.get(Fields.ContentLength) == "10")
   }
@@ -226,8 +286,28 @@ class BijectionsTest extends FunSuite with GeneratorDrivenPropertyChecks {
     val in = Request()
     in.setChunked(true)
 
-    val out = Bijections.finagle.requestToNetty(in)
+    val out = Bijections.finagle.requestToNetty(in, in.contentLength)
     assert(HttpUtil.isTransferEncodingChunked(out))
     assert(!out.headers.contains(Fields.ContentLength))
+  }
+
+  test("can enable Finagles validation of Netty headers") {
+    revalidateInboundHeaders.let(true) {
+      val out = HeaderMap()
+      val in = new DefaultHttpHeaders( /*validate*/ false)
+      in.add("foo:", "bar")
+      intercept[IllegalArgumentException](Bijections.netty.writeNettyHeadersToFinagle(in, out))
+
+      in.clear()
+      assert(out.isEmpty)
+      in.add("foo", "bar\f")
+      intercept[IllegalArgumentException](Bijections.netty.writeNettyHeadersToFinagle(in, out))
+
+      in.clear()
+      assert(out.isEmpty)
+      in.add("foo", "bar\r\n bar")
+      Bijections.netty.writeNettyHeadersToFinagle(in, out)
+      assert(out("foo") == "bar bar")
+    }
   }
 }

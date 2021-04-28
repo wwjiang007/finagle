@@ -36,19 +36,19 @@ final class LocalContext private[context] extends Context {
   def letClear[R](key: Key[_])(fn: => R): R = letLocal(env - key)(fn)
 
   def letClear[R](keys: Iterable[Key[_]])(fn: => R): R = {
-    val next = keys.foldLeft(env) { (e, k) =>
-      e - k
-    }
+    val next = keys.foldLeft(env) { (e, k) => e - k }
     letLocal(next)(fn)
   }
 
   def letClearAll[R](fn: => R): R = local.letClear(fn)
 
-  private[this] def env: Map[Key[_], Any] = local() match {
+  // Exposed for testing
+  private[context] def env: Map[Key[_], Any] = local() match {
     case Some(env) => env
     case None => Map.empty
   }
 
-  private[this] def letLocal[T](env: Map[Key[_], Any])(fn: => T): T =
+  // Exposed for testing
+  private[context] def letLocal[T](env: Map[Key[_], Any])(fn: => T): T =
     local.let(env)(fn)
 }

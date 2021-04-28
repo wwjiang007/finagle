@@ -1,13 +1,13 @@
 package com.twitter.finagle.loadbalancer.p2c
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
 import com.twitter.finagle.util.Rng
 import com.twitter.finagle.{ClientConnection, Service, ServiceFactory, Status}
 import com.twitter.util.{Activity, Await, Closable, Future, Time, Var}
 import org.scalatest.FunSuite
 import scala.annotation.tailrec
-import scala.collection.SortedMap
+import scala.collection.immutable.SortedMap
 
 class P2CPeakEwmaTest extends FunSuite with P2CSuite {
   override val ε: Double = 0.0005 * R
@@ -15,7 +15,7 @@ class P2CPeakEwmaTest extends FunSuite with P2CSuite {
   override def newBal(
     fs: Var[Vector[P2CServiceFactory]],
     sr: StatsReceiver = NullStatsReceiver,
-    clock: (() => Long) = System.nanoTime
+    clock: (() => Long) = System.nanoTime _
   ): ServiceFactory[Unit, Int] = new P2CPeakEwma(
     Activity(fs.map(Activity.Ok(_))),
     maxEffort = 5,
@@ -48,7 +48,6 @@ class P2CPeakEwmaTest extends FunSuite with P2CSuite {
   }
 
   case class LatentFactory(which: Int, latency: Any => Int) extends P2CServiceFactory {
-    val weight = 1D
     var load = 0
     var sum = 0
     def meanLoad: Double = if (load == 0) 0.0 else sum.toDouble / load.toDouble
@@ -65,17 +64,13 @@ class P2CPeakEwmaTest extends FunSuite with P2CSuite {
   }
 
   test("Balances evenly across identical nodes") {
-    val init = Vector.tabulate(N) { i =>
-      LatentFactory(i, Function.const(5))
-    }
+    val init = Vector.tabulate(N) { i => LatentFactory(i, Function.const(5)) }
     run(init, R)
     assertEven(init)
   }
 
   test("Probe a node without latency history at most once") {
-    val init = Vector.tabulate(N) { i =>
-      LatentFactory(i, Function.const(1))
-    }
+    val init = Vector.tabulate(N) { i => LatentFactory(i, Function.const(1)) }
     val vec = init :+ LatentFactory(N + 1, Function.const(R * 2))
     run(vec, R)
     assertEven(vec.init)
@@ -84,9 +79,7 @@ class P2CPeakEwmaTest extends FunSuite with P2CSuite {
 
   test("Balances proportionally across nodes with varying latencies") {
     val latency = 5
-    val init = Vector.tabulate(N) { i =>
-      LatentFactory(i, Function.const(latency))
-    }
+    val init = Vector.tabulate(N) { i => LatentFactory(i, Function.const(latency)) }
     // This is dependent on decayTime for N+1 to receive 1/2 the the load of the rest.
     // There is probably an elegant way to normalize our load as a function of decayTime,
     // but it wasn't obvious to me. This also verifies that we are actually decaying

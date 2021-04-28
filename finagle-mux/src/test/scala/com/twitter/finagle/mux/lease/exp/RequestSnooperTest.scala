@@ -1,11 +1,11 @@
 package com.twitter.finagle.mux.lease.exp
 
 import com.twitter.util.{MockTimer, Stopwatch, Time}
-import com.twitter.conversions.time.intToTimeableNumber
-import com.twitter.conversions.storage.intToStorageUnitableWholeNumber
+import com.twitter.conversions.DurationOps._
+import com.twitter.conversions.StorageUnitOps._
 import org.mockito.Mockito.when
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 class RequestSnooperTest extends FunSuite with MockitoSugar {
   test("RequestSnooper should compute handleBytes reasonably") {

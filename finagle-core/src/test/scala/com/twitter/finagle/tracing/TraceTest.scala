@@ -1,18 +1,16 @@
 package com.twitter.finagle.tracing
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.tracing.Annotation.BinaryAnnotation
+import com.twitter.finagle.tracing.TraceTest.TraceIdException
 import com.twitter.io.Buf
-import com.twitter.util.Time
-import com.twitter.util.{Return, Throw}
-import org.junit.runner.RunWith
+import com.twitter.util.{Await, Future, MockTimer, Return, Throw, Time}
 import org.mockito.Matchers.any
-import org.mockito.Mockito.{never, times, verify, when, atLeast}
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mockito.MockitoSugar
-import org.scalatest.{OneInstancePerTest, BeforeAndAfter, FunSuite}
+import org.mockito.Mockito.{atLeast, never, times, verify, when}
+import org.scalatest.{BeforeAndAfter, FunSuite, OneInstancePerTest}
+import org.scalatestplus.mockito.MockitoSugar
 import scala.util.Random
 
-@RunWith(classOf[JUnitRunner])
 class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneInstancePerTest {
   val Seq(id0, id1, id2) = 0 until 3 map { i =>
     TraceId(Some(SpanId(i)), Some(SpanId(i)), SpanId(i), None, Flags(i))
@@ -36,6 +34,62 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
     }
 
     assert(runs == 1)
+  }
+
+  test("Trace.letTracers: should enable all tracers in the stack") {
+    var runs = 0
+    val tracers = Seq(mock[Tracer], mock[Tracer])
+
+    assert(Trace.tracers.isEmpty)
+    Trace.letTracers(tracers) {
+      assert(Trace.tracers == tracers)
+      runs += 1
+    }
+
+    assert(runs == 1)
+  }
+
+  test("Trace.letTracers: should not replace existing tracers") {
+    var runs = 0
+    val tracer = mock[Tracer]
+    val otherTracer = mock[Tracer]
+
+    assert(Trace.tracers.isEmpty)
+    Trace.letTracer(tracer) {
+      assert(Trace.tracers == Seq(tracer))
+      Trace.letTracers(Seq(otherTracer)) {
+        assert(Trace.tracers == Seq(otherTracer, tracer))
+        runs += 1
+      }
+      assert(Trace.tracers == Seq(tracer))
+      runs += 1
+    }
+
+    assert(runs == 2)
+  }
+
+  test("Trace.letTracers: should not add any tracers when they already exist") {
+    var runs = 0
+    val tracer = mock[Tracer]
+    val otherTracer = mock[Tracer]
+
+    assert(Trace.tracers.isEmpty)
+    Trace.letTracer(tracer) {
+      assert(Trace.tracers == Seq(tracer))
+      Trace.letTracer(otherTracer) {
+        assert(Trace.tracers == Seq(otherTracer, tracer))
+        Trace.letTracers(Seq(otherTracer, tracer)) {
+          assert(Trace.tracers == Seq(otherTracer, tracer))
+          runs += 1
+        }
+        assert(Trace.tracers == Seq(otherTracer, tracer))
+        runs += 1
+      }
+      assert(Trace.tracers == Seq(tracer))
+      runs += 1
+    }
+
+    assert(runs == 3)
   }
 
   test("Trace.letId") {
@@ -98,7 +152,9 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
   val tracer2 = mock[Tracer]
 
   when(tracer1.isActivelyTracing(any[TraceId])).thenReturn(true)
+  when(tracer1.sampleTrace(any[TraceId])).thenReturn(None)
   when(tracer2.isActivelyTracing(any[TraceId])).thenReturn(true)
+  when(tracer2.sampleTrace(any[TraceId])).thenReturn(None)
 
   test("Trace.traceService") {
     var didRun = false
@@ -168,21 +224,6 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
       }
     }
   }
-
-  /* TODO temporarily disabled until we can mock stopwatches
-      "Trace.time" in Time.withCurrentTimeFrozen { tc =>
-        val tracer = new BufferingTracer()
-        val duration = 1.second
-        Trace.pushTracer(tracer)
-        Trace.time("msg") {
-          tc.advance(duration)
-        }
-        tracer.iterator foreach { r =>
-          r.annotation mustEqual Annotation.Message("msg")
-          r.duration mustEqual Some(duration)
-        }
-      }
-   */
 
   test("pass flags to next id") {
     val flags = Flags().setDebug
@@ -359,13 +400,21 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
     } yield TraceId(traceId, parentId, spanId, sampled, flags)
 
     for (id <- traceIds)
-      assert(Trace.idCtx.tryUnmarshal(Trace.idCtx.marshal(id)) == Return(id))
+      assert(Trace.TraceIdContext.tryUnmarshal(Trace.TraceIdContext.marshal(id)) == Return(id))
   }
 
   test("trace ID serialization: valid ids (128-bit)") {
-    val traceId = TraceId(Some(SpanId(1L)), Some(SpanId(1L)), SpanId(2L), None, Flags(Flags.Debug), Some(SpanId(2L)))
+    val traceId = TraceId(
+      Some(SpanId(1L)),
+      Some(SpanId(1L)),
+      SpanId(2L),
+      None,
+      Flags(Flags.Debug),
+      Some(SpanId(2L))
+    )
 
-    assert(Trace.idCtx.tryUnmarshal(Trace.idCtx.marshal(traceId)) == Return(traceId))
+    assert(
+      Trace.TraceIdContext.tryUnmarshal(Trace.TraceIdContext.marshal(traceId)) == Return(traceId))
   }
 
   // example from X-Amzn-Trace-Id: Root=1-5759e988-bd862e3fe1be46a994272793;Sampled=1
@@ -379,9 +428,189 @@ class TraceTest extends FunSuite with MockitoSugar with BeforeAndAfter with OneI
   test("trace ID serialization: throw in handle on invalid size") {
     val bytes = new Array[Byte](33)
 
-    Trace.idCtx.tryUnmarshal(Buf.ByteArray.Owned(bytes)) match {
+    Trace.TraceIdContext.tryUnmarshal(Buf.ByteArray.Owned(bytes)) match {
       case Throw(_: IllegalArgumentException) =>
       case rv => fail(s"Got $rv")
     }
   }
+
+  test("trace local span") {
+    val startTime = Time.now
+    Time.withTimeAt(startTime) { ctrl =>
+      val tracer = new BufferingTracer()
+      val parentTraceId = Trace.id
+      val name = "work"
+      Trace.letTracerAndId(tracer, parentTraceId) {
+        val childTraceId = Trace.traceLocal(name) {
+          ctrl.advance(1.second)
+          Trace.id
+        }
+
+        assert(tracer.toSeq.contains(Record(childTraceId, startTime, Annotation.Rpc(name))))
+        assert(
+          tracer.toSeq.contains(Record(childTraceId, startTime, Annotation.ServiceName("local"))))
+        assert(
+          tracer.toSeq.contains(
+            Record(childTraceId, startTime, Annotation.BinaryAnnotation("lc", name))))
+        assert(
+          tracer.toSeq.contains(Record(childTraceId, startTime, Annotation.Message("local/begin"))))
+        assert(
+          tracer.toSeq.contains(
+            Record(childTraceId, startTime.plus(1.second), Annotation.Message("local/end"))))
+        assert(parentTraceId != childTraceId)
+      }
+    }
+  }
+
+  test("trace local exceptional span") {
+    val startTime = Time.now
+    Time.withTimeAt(startTime) { ctrl =>
+      val tracer = new BufferingTracer()
+      val parentTraceId = Trace.id
+      val name = "work"
+      Trace.letTracerAndId(tracer, parentTraceId) {
+
+        try {
+          Trace.traceLocal(name) {
+            ctrl.advance(1.second)
+            throw TraceIdException(Trace.id)
+          }
+          fail("Expected exception to be thrown")
+        } catch {
+          case TraceIdException(childTraceId) =>
+            assert(tracer.toSeq.contains(Record(childTraceId, startTime, Annotation.Rpc(name))))
+            assert(
+              tracer.toSeq.contains(
+                Record(childTraceId, startTime, Annotation.ServiceName("local"))))
+            assert(
+              tracer.toSeq.contains(
+                Record(childTraceId, startTime, Annotation.BinaryAnnotation("lc", name))))
+            assert(
+              tracer.toSeq.contains(
+                Record(childTraceId, startTime, Annotation.Message("local/begin"))))
+            assert(
+              tracer.toSeq.contains(
+                Record(childTraceId, startTime.plus(1.second), Annotation.Message("local/end"))))
+            assert(parentTraceId != childTraceId)
+        }
+      }
+    }
+  }
+
+  test("trace async local span") {
+    val mockTimer = new MockTimer()
+    val startTime = Time.now
+    Time.withTimeAt(startTime) { ctrl =>
+      val tracer = new BufferingTracer()
+      val parentTraceId = Trace.nextId
+      val name = "work"
+      Trace.letTracerAndId(tracer, parentTraceId) {
+        val childTraceIdFuture = Trace.traceLocalFuture(name) {
+          Future.Done.delayed(1.second)(mockTimer).map(_ => Trace.id)
+        }
+
+        ctrl.advance(1.second)
+        mockTimer.tick()
+
+        val childTraceId = Await.result(childTraceIdFuture)
+
+        assert(tracer.toSeq.contains(Record(childTraceId, startTime, Annotation.Rpc(name))))
+        assert(
+          tracer.toSeq.contains(Record(childTraceId, startTime, Annotation.ServiceName("local"))))
+        assert(
+          tracer.toSeq.contains(
+            Record(childTraceId, startTime, Annotation.BinaryAnnotation("lc", name))))
+        assert(
+          tracer.toSeq.contains(Record(childTraceId, startTime, Annotation.Message("local/begin"))))
+        assert(
+          tracer.toSeq.contains(
+            Record(childTraceId, startTime.plus(1.second), Annotation.Message("local/end"))))
+        assert(parentTraceId != childTraceId)
+      }
+    }
+  }
+
+  test("trace async local exceptional span") {
+    val mockTimer = new MockTimer()
+    val startTime = Time.now
+    val name = "work"
+    Time.withTimeAt(startTime) { ctrl =>
+      val tracer = new BufferingTracer()
+      val parentTraceId = Trace.nextId
+      Trace.letTracerAndId(tracer, parentTraceId) {
+        val childTraceIdFuture = Trace.traceLocalFuture(name) {
+          Future.Done
+            .delayed(1.second)(mockTimer).flatMap(_ => Future.exception(TraceIdException(Trace.id)))
+        }
+
+        ctrl.advance(1.second)
+        mockTimer.tick()
+
+        try {
+          Await.result(childTraceIdFuture)
+          fail("Expected exception to be thrown")
+        } catch {
+          case TraceIdException(childTraceId) =>
+            assert(tracer.toSeq.contains(Record(childTraceId, startTime, Annotation.Rpc(name))))
+            assert(
+              tracer.toSeq.contains(
+                Record(childTraceId, startTime, Annotation.ServiceName("local"))))
+            assert(
+              tracer.toSeq.contains(
+                Record(childTraceId, startTime, Annotation.BinaryAnnotation("lc", name))))
+            assert(
+              tracer.toSeq.contains(
+                Record(childTraceId, startTime, Annotation.Message("local/begin"))))
+            assert(
+              tracer.toSeq.contains(
+                Record(childTraceId, startTime.plus(1.second), Annotation.Message("local/end"))))
+            assert(parentTraceId != childTraceId)
+        }
+      }
+    }
+  }
+
+  test("time a computation and trace it") {
+    val startTime = Time.now
+    Time.withTimeAt(startTime) { ctrl =>
+      val tracer = new BufferingTracer()
+      val traceId = Trace.nextId
+      Trace.letTracerAndId(tracer, traceId) {
+        Trace.time("duration") {
+          ctrl.advance(1.second)
+        }
+
+        assert(
+          tracer.toSeq.contains(
+            Record(traceId, startTime.plus(1.second), BinaryAnnotation("duration", 1.second))))
+      }
+    }
+  }
+
+  test("time an async computation and trace it") {
+    val mockTimer = new MockTimer()
+    val startTime = Time.now
+    Time.withTimeAt(startTime) { ctrl =>
+      val tracer = new BufferingTracer()
+      val traceId = Trace.nextId
+      val result = Trace.letTracerAndId(tracer, traceId) {
+        Trace.timeFuture("duration") {
+          Future.Done.delayed(1.second)(mockTimer)
+        }
+      }
+
+      ctrl.advance(1.second)
+      mockTimer.tick()
+
+      Await.ready(result)
+
+      assert(
+        tracer.toSeq.contains(
+          Record(traceId, startTime.plus(1.second), BinaryAnnotation("duration", 1.second))))
+    }
+  }
+}
+
+object TraceTest {
+  case class TraceIdException(id: TraceId) extends Exception
 }

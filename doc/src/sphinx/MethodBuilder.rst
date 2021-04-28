@@ -37,8 +37,8 @@ Turning the example into code, first in Scala:
 
 .. code-block:: scala
 
-  import com.twitter.conversions.percent._
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.PercentOps._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.{http, Http, Service}
   import com.twitter.finagle.service.{ReqRep, ResponseClass}
   import com.twitter.util.Return
@@ -125,20 +125,27 @@ used to determine which requests are successful. This is the basis for measuring
 the :ref:`logical <mb_logical_req>` success metrics of the method and for logging_
 unsuccessful requests.
 
+Since setting the response classifier overrides how retries are handled, setting
+``withRetryForClassifier`` may clobber the way that the ``idempotent``, described below,
+handles retries, rendering them non-idempotent.  If you want to reclassify failures as
+successes or successes as failures as well as mark the endpoint as idempotent, set
+``withRetryForClassifier`` before setting ``idempotent``.
+
 .. _mb_idempotency:
 
 Idempotency
 -----------
 
 ``MethodBuilder`` provides ``idempotent`` and ``nonIdemptotent`` methods for a client to signal
-whether it's safe to resend requests that have already been sent. 
+whether it's safe to resend requests that have already been sent.
 
 If a client is configured with ``idempotent``, a protocol-dependent
 :src:`ResponseClassifier <com/twitter/finagle/service/ResponseClassifier.scala>` is combined with
-any existing classifier to also reissue requests on failure (Thrift exceptions for ThriftMux
-clients, and 500s for HTTP clients). The parameter to ``idempotent``, ``maxExtraLoad``, is used to
-configure :ref:`backup requests <mb_backup_requests>` and may be useful in reducing tail latency.
-Backup requests can be disabled by setting ``maxExtraLoad`` to `0.0`.
+any existing classifier, in particular what's set by ``withRetryForClassifier`` to also reissue
+requests on failure (Thrift exceptions for ThriftMux clients, and 500s for HTTP clients). The
+parameter to ``idempotent``, ``maxExtraLoad``, is used to configure
+:ref:`backup requests <mb_backup_requests>` and may be useful in reducing tail latency. Backup
+requests can be disabled by setting ``maxExtraLoad`` to `0.0`.
 
 If a client is configured with ``nonIdempotent``, any existing configured
 :src:`ResponseClassifier <com/twitter/finagle/service/ResponseClassifier.scala>` is removed
@@ -190,7 +197,7 @@ and disable them for another, first in Scala:
 
 .. code-block:: scala
 
-  import com.twitter.conversions.percent._
+  import com.twitter.conversions.PercentOps._
   import com.twitter.finagle.{http, Http, Service}
 
   val builder = Http.client.methodBuilder("inet!localhost:8080")
@@ -233,7 +240,7 @@ but note there are subtleties regarding where it is placed and the retry budgets
 .. note::
 
    Backup requests were popularized by Google in Dean, J. and Barroso, L.A. (2013),
-   `The Tail at Scale <http://cacm.acm.org/magazines/2013/2/160173-the-tail-at-scale/fulltext>`_,
+   `The Tail at Scale <https://cacm.acm.org/magazines/2013/2/160173-the-tail-at-scale/fulltext>`_,
    Communications of the ACM, Vol. 56 No. 2, Pages 74-80.
    Non-paywalled slides `here <https://static.googleusercontent.com/media/research.google.com/en//people/jeff/Berkeley-Latency-Mar2012.pdf>`_.
 
@@ -269,7 +276,7 @@ For example:
 
 .. code-block:: scala
 
-  import com.twitter.conversions.percent._
+  import com.twitter.conversions.PercentOps._
   import com.twitter.finagle.Http
 
   val builder = Http.client
@@ -282,6 +289,7 @@ Will produce the following metrics:
 
 - `clnt/example_client/get_statuses/logical/requests`
 - `clnt/example_client/get_statuses/logical/success`
+- `clnt/example_client/get_statuses/logical/failures`
 - `clnt/example_client/get_statuses/logical/failures/exception_name`
 - `clnt/example_client/get_statuses/logical/request_latency_ms`
 - `clnt/example_client/get_statuses/retries`
@@ -299,7 +307,7 @@ for introspection of runtime configuration via TwitterServer's `/admin/registry.
 Logging
 -------
 
-Unsuccessful request, as determined by the :ref:`classifier <response_classification>`
+Unsuccessful requests, as determined by the :ref:`classifier <response_classification>`
 set by ``withRetryForClassifier``, are logged at ``com.twitter.logging.Level.DEBUG``
 level. Further details, including the request and response, are available at ``TRACE``
 level. There is a ``Logger`` per method, named with the format
@@ -318,7 +326,7 @@ customizations to be shared across endpoints:
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.{http, Http, Service}
   import com.twitter.finagle.service.{ReqRep, ResponseClass}
   import com.twitter.util.Return
@@ -431,7 +439,7 @@ Service-per-method, ``ServicePerEndpoint``.
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.{Service, ThriftMux}
   import com.twitter.finagle.example.graph._
   import com.twitter.finagle.service.{ReqRep, ResponseClass}
@@ -469,7 +477,7 @@ with a ``MethodPerEndpoint``.
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.{Filter, ThriftMux}
   import com.twitter.finagle.example.graph._
   import com.twitter.util.Future

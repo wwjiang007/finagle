@@ -1,14 +1,11 @@
 package com.twitter.finagle.http
 
-import java.net.URLDecoder
-import java.nio.charset.StandardCharsets
+import io.netty.handler.codec.http.QueryStringDecoder
 import java.util.{ArrayList, Collections, LinkedHashMap, List => JList, Map => JMap}
 import scala.annotation.tailrec
 
 /** Query parameter decoder heavily inspired by the Netty projects QueryStringDecoder */
 private object QueryParamDecoder {
-
-  private[this] val CharsetName: String = StandardCharsets.UTF_8.name
 
   def decode(uri: String): JMap[String, JList[String]] = {
     val qPos = uri.indexOf('?')
@@ -20,7 +17,7 @@ private object QueryParamDecoder {
     // LinkedHashMap is known to handle hash collisions particularly well, instead of worst case
     // O(n) behavior, it will achieve O(log(n)) for keys which are of type `Comparable`, which
     // includes `String`, so there is no need to limit the number of keys.
-    // http://openjdk.java.net/jeps/180
+    // https://openjdk.java.net/jeps/180
     val params = new LinkedHashMap[String, JList[String]]
 
     var name: String = null
@@ -35,7 +32,7 @@ private object QueryParamDecoder {
             name = decodeComponent(s.substring(mark, i))
           }
           mark = i + 1
-          // http://www.w3.org/TR/html401/appendix/notes.html#h-B.2.2
+          // https://www.w3.org/TR/html401/appendix/notes.html#h-B.2.2
         } else if (c == '&' || c == ';') {
           if (name == null && mark != i) { // We haven't seen a '=' so far but moved forward.
             // Must be a param of the form '&a&' so add it with
@@ -66,7 +63,11 @@ private object QueryParamDecoder {
     params
   }
 
-  private[this] def addParam(params: JMap[String, JList[String]], name: String, value: String): Unit = {
+  private[this] def addParam(
+    params: JMap[String, JList[String]],
+    name: String,
+    value: String
+  ): Unit = {
     val values = params.get(name) match {
       case null =>
         val list = new ArrayList[String](1) // Often there's only 1 value.
@@ -79,7 +80,6 @@ private object QueryParamDecoder {
     values.add(value)
   }
 
-  // TODO: this is slow, so lets investigate making a faster version
   private[this] def decodeComponent(s: String): String =
-    URLDecoder.decode(s, CharsetName)
+    QueryStringDecoder.decodeComponent(s)
 }

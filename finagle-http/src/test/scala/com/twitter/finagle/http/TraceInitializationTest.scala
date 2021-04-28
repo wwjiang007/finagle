@@ -5,15 +5,12 @@ import com.twitter.finagle.tracing._
 import com.twitter.finagle.Service
 import com.twitter.util.{Await, Closable, Future}
 import java.net.{InetAddress, InetSocketAddress}
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
 private object Svc extends Service[Request, Response] {
   def apply(req: Request) = Future.value(req.response)
 }
 
-@RunWith(classOf[JUnitRunner])
 class TraceInitializationTest extends FunSuite {
   def req = RequestBuilder().url("http://foo/this/is/a/uri/path").buildGet()
 
@@ -37,15 +34,19 @@ class TraceInitializationTest extends FunSuite {
     assertAnnotationsInOrder(
       tracer.toSeq,
       Seq(
-        Annotation.Rpc("GET"),
-        Annotation.BinaryAnnotation("http.uri", "/this/is/a/uri/path"),
         Annotation.ServiceName("theClient"),
         Annotation.ClientSend,
         Annotation.Rpc("GET"),
+        Annotation.BinaryAnnotation("http.method", "GET"),
         Annotation.BinaryAnnotation("http.uri", "/this/is/a/uri/path"),
         Annotation.ServiceName("theServer"),
         Annotation.ServerRecv,
+        Annotation.Rpc("GET"),
+        Annotation.BinaryAnnotation("http.method", "GET"),
+        Annotation.BinaryAnnotation("http.uri", "/this/is/a/uri/path"),
         Annotation.ServerSend,
+        Annotation.BinaryAnnotation("http.status_code", 200),
+        Annotation.BinaryAnnotation("http.status_code", 200),
         Annotation.ClientRecv
       )
     )

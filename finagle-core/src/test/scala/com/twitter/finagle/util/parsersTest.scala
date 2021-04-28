@@ -1,11 +1,8 @@
 package com.twitter.finagle.util
 
-import com.twitter.conversions.time._
-import org.junit.runner.RunWith
+import com.twitter.conversions.DurationOps._
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class parsersTest extends FunSuite {
   import parsers._
 

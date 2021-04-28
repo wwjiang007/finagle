@@ -4,14 +4,12 @@ import com.twitter.finagle.Filter.TypeAgnostic
 import com.twitter.finagle._
 import com.twitter.finagle.context.{Contexts, Deadline}
 import com.twitter.finagle.service.TimeoutFilterTest.TunableTimeoutHelper
-import com.twitter.util.TimeConversions._
+import com.twitter.conversions.DurationOps._
 import com.twitter.util._
 import com.twitter.util.tunable.Tunable
 import java.util.concurrent.atomic.AtomicReference
-import org.junit.runner.RunWith
 import org.scalatest.{FunSuite, Matchers}
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 import scala.language.reflectiveCalls
 
 private object TimeoutFilterTest {
@@ -37,9 +35,7 @@ private object TimeoutFilterTest {
     val timer = new MockTimer()
     val tunable = Tunable.emptyMutable[Duration]("id")
 
-    val svc = Service.mk { _: String =>
-      Future.never
-    }
+    val svc = Service.mk { _: String => Future.never }
     val svcFactory = ServiceFactory.const(svc)
     val stack = TimeoutFilter
       .clientModule[String, String]
@@ -50,7 +46,6 @@ private object TimeoutFilterTest {
   }
 }
 
-@RunWith(classOf[JUnitRunner])
 class TimeoutFilterTest extends FunSuite with Matchers with MockitoSugar {
 
   import TimeoutFilterTest.TimeoutFilterHelper
@@ -145,14 +140,10 @@ class TimeoutFilterTest extends FunSuite with Matchers with MockitoSugar {
     }
   }
 
-  private def verifyFilterAddedOrNot(
-    timoutModule: Stackable[ServiceFactory[Int, Int]]
-  ) = {
-    val svc = Service.mk { i: Int =>
-      Future.value(i)
-    }
+  private def verifyFilterAddedOrNot(timeoutModule: Stackable[ServiceFactory[Int, Int]]) = {
+    val svc = Service.mk { i: Int => Future.value(i) }
     val svcFactory = ServiceFactory.const(svc)
-    val stack = timoutModule.toStack(Stack.leaf(Stack.Role("test"), svcFactory))
+    val stack = timeoutModule.toStack(Stack.leaf(Stack.Role("test"), svcFactory))
 
     def assertNoTimeoutFilter(duration: Duration): Unit = {
       val params = Stack.Params.empty + TimeoutFilter.Param(duration)
@@ -456,7 +447,6 @@ class TimeoutFilterTest extends FunSuite with Matchers with MockitoSugar {
     val propagationEnabledFilter =
       new TimeoutFilter[String, Boolean](() => timeout, exceptionFn, timer, true)
     val propagationEnabledService = propagationEnabledFilter.andThen(service)
-
 
     assert(Await.result(propagationEnabledService("bar")) == true)
   }

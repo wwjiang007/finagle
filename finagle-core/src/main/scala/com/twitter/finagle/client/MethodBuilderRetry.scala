@@ -2,41 +2,45 @@ package com.twitter.finagle.client
 
 import com.twitter.finagle.{Filter, Service, param}
 import com.twitter.finagle.service.{RequeueFilter, _}
-import com.twitter.finagle.stats.{BlacklistStatsReceiver, StatsReceiver}
+import com.twitter.finagle.stats.{DenylistStatsReceiver, StatsReceiver}
 import com.twitter.logging.{Level, Logger}
 import com.twitter.util.{Future, Stopwatch, Throw, Try}
 
 /**
- * @see [[MethodBuilderScaladoc]]
+ * @see [[BaseMethodBuilder]]
  */
 private[finagle] class MethodBuilderRetry[Req, Rep] private[client] (mb: MethodBuilder[Req, Rep]) {
 
   import MethodBuilderRetry._
 
   /**
-   * @see [[MethodBuilderScaladoc.withRetryForClassifier]]
+   * @see [[BaseMethodBuilder.withRetryForClassifier]]
    */
-  def forClassifier(
-    classifier: ResponseClassifier
-  ): MethodBuilder[Req, Rep] =
-    mb.withConfig(mb.config.copy(retry = Config(classifier)))
+  def forClassifier(classifier: ResponseClassifier): MethodBuilder[Req, Rep] =
+    mb.withConfig(
+      mb.config.copy(retry = mb.config.retry.copy(underlyingClassifier = Some(classifier))))
 
   /**
-   * @see [[MethodBuilderScaladoc.withRetryDisabled]]
+   * @see [[BaseMethodBuilder.withMaxRetries]]
+   */
+  def maxRetries(value: Int): MethodBuilder[Req, Rep] =
+    mb.withConfig(mb.config.copy(retry = mb.config.retry.copy(maxRetries = value)))
+
+  /**
+   * @see [[BaseMethodBuilder.withRetryDisabled]]
    */
   def disabled: MethodBuilder[Req, Rep] =
     forClassifier(Disabled)
 
-  private[client] def filter(
-    scopedStats: StatsReceiver
-  ): Filter.TypeAgnostic = {
+  private[client] def filter(scopedStats: StatsReceiver): Filter.TypeAgnostic = {
     val classifier = mb.config.retry.responseClassifier
+    val maxRetries = mb.config.retry.maxRetries
     if (classifier eq Disabled)
       Filter.TypeAgnostic.Identity
     else {
       new Filter.TypeAgnostic {
         def toFilter[Req1, Rep1]: Filter[Req1, Rep1, Req1, Rep1] = {
-          val retryPolicy = policyForReqRep(shouldRetry[Req1, Rep1](classifier))
+          val retryPolicy = policyForReqRep(shouldRetry[Req1, Rep1](classifier), maxRetries)
           val withoutRequeues = filteredPolicy(retryPolicy)
 
           new RetryFilter[Req1, Rep1](
@@ -50,13 +54,16 @@ private[finagle] class MethodBuilderRetry[Req, Rep] private[client] (mb: MethodB
     }
   }
 
-  private[client] def logicalStatsFilter(stats: StatsReceiver): Filter.TypeAgnostic =
+  private[client] def logicalStatsFilter(stats: StatsReceiver): Filter.TypeAgnostic = {
+    val timeUnit = mb.params[StatsFilter.Param].unit
     StatsFilter.typeAgnostic(
-      new BlacklistStatsReceiver(stats.scope(LogicalScope), LogicalStatsBlacklistFn),
+      new DenylistStatsReceiver(stats.scope(LogicalScope), LogicalStatsDenylistFn),
       mb.config.retry.responseClassifier,
       mb.params[param.ExceptionStatsHandler].categorizer,
-      mb.params[StatsFilter.Param].unit
+      timeUnit,
+      mb.params[StatsFilter.Now].nowOrDefault(timeUnit)
     )
+  }
 
   private[client] def logFailuresFilter(
     clientName: String,
@@ -88,7 +95,7 @@ private[finagle] class MethodBuilderRetry[Req, Rep] private[client] (mb: MethodB
 }
 
 private[client] object MethodBuilderRetry {
-  val MaxRetries = 2
+  private[this] val DefaultMaxRetries = 2
 
   private val Disabled: ResponseClassifier =
     ResponseClassifier.named("Disabled")(PartialFunction.empty)
@@ -107,10 +114,11 @@ private[client] object MethodBuilderRetry {
     }
 
   private def policyForReqRep[Req, Rep](
-    shouldRetry: PartialFunction[(Req, Try[Rep]), Boolean]
+    shouldRetry: PartialFunction[(Req, Try[Rep]), Boolean],
+    maxRetries: Int
   ): RetryPolicy[(Req, Try[Rep])] =
     RetryPolicy.tries(
-      MethodBuilderRetry.MaxRetries + 1, // add 1 for the initial request
+      maxRetries + 1, // add 1 for the initial request
       shouldRetry
     )
 
@@ -131,11 +139,11 @@ private[client] object MethodBuilderRetry {
       }
 
   private[client] class LogFailuresFilter[Req, Rep](
-      logger: Logger,
-      label: String,
-      responseClassifier: ResponseClassifier,
-      nowMs: () => Long)
-    extends Filter[Req, Rep, Req, Rep] {
+    logger: Logger,
+    label: String,
+    responseClassifier: ResponseClassifier,
+    nowMs: () => Long)
+      extends Filter[Req, Rep, Req, Rep] {
 
     def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = {
       val start = nowMs()
@@ -170,14 +178,9 @@ private[client] object MethodBuilderRetry {
 
   // the `StatsReceiver` used is already scoped to `$clientName/$methodName/logical`.
   // this omits the pending gauge as well as sourcedfailures details.
-  private val LogicalStatsBlacklistFn: Seq[String] => Boolean = { segments =>
+  private val LogicalStatsDenylistFn: Seq[String] => Boolean = { segments =>
     val head = segments.head
     if (head == "pending" || head == "sourcedfailures") {
-      true
-    } else if (head == "failures" && segments.size == 1) {
-      // only filter out the failures rollup while keeping the exception
-      // details that are scoped via `ExceptionStatsHandler` to
-      // $clientName/$methodName/logical/failures/<exception_name>
       true
     } else {
       false
@@ -188,6 +191,13 @@ private[client] object MethodBuilderRetry {
    * @see [[MethodBuilderRetry.forClassifier]] for details on how the
    *     classifier is used.
    */
-  case class Config(responseClassifier: ResponseClassifier)
+  case class Config(
+    underlyingClassifier: Option[ResponseClassifier],
+    maxRetries: Int = DefaultMaxRetries) {
+    def responseClassifier: ResponseClassifier = underlyingClassifier match {
+      case Some(classifier) => classifier
+      case None => ResponseClassifier.Default
+    }
+  }
 
 }

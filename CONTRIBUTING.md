@@ -2,16 +2,34 @@
 
 We'd love to get patches from you!
 
+## Nightly Snapshots
+
+Snapshots are published nightly for the current version in development and are
+available in the [Sonatype](https://oss.sonatype.org/) open source snapshot
+repository: [https://oss.sonatype.org/content/repositories/snapshots/](https://oss.sonatype.org/content/repositories/snapshots/). 
+
 ## Building dependencies
 
-We are not currently publishing snapshots for Finagle's dependencies, which
-means that it may be necessary to publish the `develop` branches of these
-libraries locally in order to work on Finagle's `develop` branch. To do so
-you can use our build tool, [dodo](https://github.com/twitter/dodo).
+If you want to manually build and publish the `develop` branches of Finagle's 
+dependencies locally, you can use our build tool, [dodo](https://github.com/twitter/dodo).
 
 ``` bash
 curl -s https://raw.githubusercontent.com/twitter/dodo/develop/bin/build | bash -s -- --no-test finagle
 ```
+
+This will clone, build, and publish locally the current `-SNAPSHOT` version 
+from the `develop` branch of Finagle's other Twitter open source dependencies.
+
+It is your choice to use the published nightly snapshot versions or to build 
+the snapshots locally from their respective `develop` branches via the
+[dodo](https://github.com/twitter/dodo) build tool.
+
+## Building Finagle
+
+Finagle is built using [sbt][sbt]. When building please use the included
+[`./sbt`](https://github.com/twitter/finagle/blob/develop/sbt) script which
+provides a thin wrapper over [sbt][sbt] and correctly sets memory and other
+settings.
 
 If you have any questions or run into any problems, please create
 an issue here, chat with us in [gitter](https://gitter.im/twitter/finagle), or email
@@ -65,6 +83,11 @@ from Java. These compilation tests also provide Java users with testable example
 of the API usage. For an example of a Java compilation test see
 [AddrCompilationTest.java][9].
 
+Run tests against the updated project:
+``` bash
+./sbt 'project $project-name' test
+```
+
 Note that while you will see a [Travis CI][travis-ci] status message in your
 pull request, this may not always be accurate, and in any case all changes will
 be tested internally at Twitter before being merged. We're working to make
@@ -77,7 +100,7 @@ locally).
 When appropriate, use [ScalaCheck][scalacheck] to write property-based
 tests for your code. This will often produce more thorough and effective
 inputs for your tests. We use ScalaTest's
-[GeneratorDrivenPropertyChecks][gendrivenprop] as the entry point for
+[ScalaCheckDrivenPropertyChecks][gendrivenprop] as the entry point for
 writing these tests.
 
 ## Compatibility
@@ -112,7 +135,7 @@ in doubt, look around the codebase and see how it's done elsewhere.
 
 ## Issues
 
-When creating an issue please try to ahere to the following format:
+When creating an issue please try to adhere to the following format:
 
     module-name: One line summary of the issue (less than 72 characters)
 
@@ -221,18 +244,19 @@ requests that improve the existing Scaladocs!
 [1]: https://github.com/twitter/finagle/issues?direction=desc&labels=Starter&sort=created&state=open
 [2]: https://groups.google.com/d/forum/finaglers
 [3]: https://twitter.github.io/finagle/
-[4]: http://sphinx-doc.org/
+[4]: https://www.sphinx-doc.org/en/master/
 [5]: https://github.com/sbt/sbt-site
-[6]: http://sphinx-doc.org/install.html
+[6]: https://www.sphinx-doc.org/en/master/usage/installation.html
 [7]: http://docutils.sourceforge.net/rst.html
-[8]: http://docs.scala-lang.org/style/scaladoc.html
-[9]: https://github.com/twitter/finagle/blob/master/finagle-core/src/test/java/com/twitter/finagle/AddrCompilationTest.java
+[8]: https://docs.scala-lang.org/style/scaladoc.html
+[9]: https://github.com/twitter/finagle/blob/release/finagle-core/src/test/java/com/twitter/finagle/AddrCompilationTest.java
 [es]: https://twitter.github.io/effectivescala/
-[funsuite]: http://www.scalatest.org/getting_started_with_fun_suite
-[scalatest]: http://www.scalatest.org/
+[funsuite]: https://www.scalatest.org/getting_started_with_fun_suite
+[sbt]: https://www.scala-sbt.org/
+[scalatest]: https://www.scalatest.org/
 [scalacheck]: https://www.scalacheck.org/
-[ssg]: http://docs.scala-lang.org/style/scaladoc.html
+[ssg]: https://docs.scala-lang.org/style/scaladoc.html
 [travis-ci]: https://travis-ci.org/twitter/finagle
 [metrics]: https://twitter.github.io/finagle/guide/Metrics.html
 [changes]: https://github.com/twitter/finagle/blob/develop/CHANGELOG.rst
-[gendrivenprop]: http://www.scalatest.org/user_guide/generator_driven_property_checks
+[gendrivenprop]: https://www.scalatest.org/user_guide/generator_driven_property_checks

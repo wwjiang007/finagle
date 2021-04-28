@@ -1,6 +1,7 @@
 package com.twitter.finagle.loadbalancer
 
 import com.twitter.finagle._
+import com.twitter.finagle.addr.WeightedAddress
 import com.twitter.finagle.service.FailingFactory
 import com.twitter.util.{Future, Time}
 import java.util.concurrent.atomic.AtomicReference
@@ -18,6 +19,8 @@ trait EndpointFactory[Req, Rep] extends ServiceFactory[Req, Rep] {
    * Returns the address which this endpoint connects to.
    */
   def address: Address
+
+  private[loadbalancer] lazy val weight: Double = WeightedAddress.extract(address)._2
 
   /**
    * Signals to the endpoint that it should close and rebuild
@@ -77,8 +80,8 @@ private object LazyEndpointFactory {
  */
 private final class LazyEndpointFactory[Req, Rep](
   mk: () => ServiceFactory[Req, Rep],
-  val address: Address
-) extends EndpointFactory[Req, Rep] {
+  val address: Address)
+    extends EndpointFactory[Req, Rep] {
   import LazyEndpointFactory._
 
   private[this] val state = new AtomicReference[State[Req, Rep]](Init)
@@ -87,11 +90,19 @@ private final class LazyEndpointFactory[Req, Rep](
     state.get match {
       case Init =>
         if (state.compareAndSet(Init, Making)) {
-          val underlying = try mk()
-          catch {
-            case NonFatal(exc) =>
-              new FailingFactory[Req, Rep](exc)
-          }
+          val underlying =
+            try mk()
+            catch {
+              case NonFatal(exc) =>
+                new FailingFactory[Req, Rep](exc)
+
+              case fatal: Throwable =>
+                // We must not leave the lock in an inconsistent `Making` state, even
+                // for fatal exceptions, so we take a conservative approach of replacing
+                // the `Init` state and then rethrowing the exception.
+                state.set(Init)
+                throw fatal
+            }
           // This is the only place where we can transition from `Making`
           // to any other state so this is safe. All other spin loops wait
           // for the thread that has entered here to exit the `Making`

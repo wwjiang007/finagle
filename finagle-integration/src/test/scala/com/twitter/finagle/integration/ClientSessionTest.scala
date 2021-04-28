@@ -15,10 +15,10 @@ import com.twitter.finagle.transport.{QueueTransport, Transport}
 import com.twitter.finagle.util.DefaultTimer
 import com.twitter.io.{Buf, ByteReader}
 import com.twitter.util._
-import com.twitter.util.TimeConversions._
+import com.twitter.conversions.DurationOps._
 import org.mockito.Mockito.when
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 /**
  * We want client session statuses to reflect the status of their underlying transports/handles
@@ -62,7 +62,8 @@ class ClientSessionTest extends FunSuite with MockitoSugar {
   }
 
   testPushSessionStatus(
-    "mux-dispatcher", { handle: PushChannelHandle[ByteReader, Buf] =>
+    "mux-dispatcher",
+    { handle: PushChannelHandle[ByteReader, Buf] =>
       val session = new mux.pushsession.MuxClientSession(
         handle = handle,
         h_decoder = mock[MuxMessageDecoder],
@@ -73,15 +74,14 @@ class ClientSessionTest extends FunSuite with MockitoSugar {
         timer = mock[Timer]
       )
 
-
-      () =>
-        session.status
+      () => session.status
     }
   )
 
   testSessionStatus(
-    "http-transport", { tr: Transport[Any, Any] =>
-      val manager = mock[http.codec.ConnectionManager]
+    "http-transport",
+    { tr: Transport[Any, Any] =>
+      val manager = mock[http.codec.Http1ConnectionManager]
       val closeP = new Promise[Unit]
       when(manager.shouldClose).thenReturn(false)
       when(manager.onClose).thenReturn(closeP)
@@ -89,19 +89,18 @@ class ClientSessionTest extends FunSuite with MockitoSugar {
         new IdentityStreamTransport(Transport.cast[http.Request, http.Response](tr)),
         manager
       )
-      () =>
-        wrappedT.status
+      () => wrappedT.status
     }
   )
 
   testSessionStatus(
-    "http-dispatcher", { tr: Transport[Any, Any] =>
+    "http-dispatcher",
+    { tr: Transport[Any, Any] =>
       val dispatcher = new HttpClientDispatcher(
         new IdentityStreamTransport(Transport.cast[http.Request, http.Response](tr)),
         NullStatsReceiver
       )
-      () =>
-        dispatcher.status
+      () => dispatcher.status
     }
   )
 
@@ -120,20 +119,20 @@ class ClientSessionTest extends FunSuite with MockitoSugar {
   }
 
   testPushSessionStatus(
-    "memcached-session", { handle: PushChannelHandle[memcached.Response, memcached.Command] =>
+    "memcached-session",
+    { handle: PushChannelHandle[memcached.Response, memcached.Command] =>
       val cl: MyPushClient = new MyPushClient
       val svc = cl.toSvc(handle)
-      () =>
-        svc.status
+      () => svc.status
     }
   )
 
   testSessionStatus(
-    "mysql-dispatcher", { tr: Transport[mysql.transport.Packet, mysql.transport.Packet] =>
-      val handshake = mysql.Handshake(Some("username"), Some("password"))
-      val dispatcher = new mysql.ClientDispatcher(tr, handshake, false)
-      () =>
-        dispatcher.status
+    "mysql-dispatcher",
+    { tr: Transport[mysql.transport.Packet, mysql.transport.Packet] =>
+      val params = Stack.Params.empty
+      val dispatcher = new mysql.ClientDispatcher(tr, params)
+      () => dispatcher.status
     }
   )
 }

@@ -1,12 +1,11 @@
 target(
     name = "finagle-base-http",
     dependencies = [
-        "finagle/finagle-base-http/src/main/java",
-        "finagle/finagle-base-http/src/main/scala",
+        "finagle/finagle-base-http/src/main",
     ],
 )
 
-target(
+test_suite(
     name = "tests",
     dependencies = [
         "finagle/finagle-base-http/src/test/scala",

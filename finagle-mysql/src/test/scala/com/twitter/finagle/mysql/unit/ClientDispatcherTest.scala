@@ -1,49 +1,28 @@
 package com.twitter.finagle.mysql
 
 import com.twitter.concurrent.AsyncQueue
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.Stack
 import com.twitter.finagle.mysql.transport.{Packet, MysqlBuf}
 import com.twitter.finagle.transport.QueueTransport
-import com.twitter.util.Await
 import com.twitter.io.Buf
+import com.twitter.util.{Await, Awaitable}
 import org.scalatest.FunSuite
 
 class ClientDispatcherTest extends FunSuite {
-  val rawInit = Array[Byte](
-    10, 53, 46, 53, 46, 50, 52, 0, 31, 0, 0, 0, 70, 38, 43, 66, 74, 48, 79, 126, 0, -1, -9, 33, 2,
-    0, 15, -128, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 76, 66, 70, 118, 67, 40, 63, 68, 120, 80, 103,
-    54, 0
-  )
-  val initPacket = Packet(0, Buf.ByteArray.Owned(rawInit))
-  val init = HandshakeInit.decode(initPacket)
+  private[this] def await[T](t: Awaitable[T]): T = Await.result(t, 1.second)
 
-  val handshake = Handshake(Some("username"), Some("password"))
-  val initReply = handshake(init)
+  val params = Stack.Params.empty
 
   def newCtx = new {
     val clientq = new AsyncQueue[Packet]()
     val serverq = new AsyncQueue[Packet]()
     val trans = new QueueTransport[Packet, Packet](serverq, clientq)
-    val service = new ClientDispatcher(trans, handshake, supportUnsigned = false)
-    // authenticate
-    clientq.offer(initPacket)
-    val handshakeResponse = serverq.poll()
-    clientq.offer(okPacket)
+    val service = new ClientDispatcher(trans, params)
   }
 
   val okPacket =
     Packet(1, Buf.ByteArray.Owned(Array[Byte](0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00)))
-
-  test("handshaking") {
-    val ctx = newCtx
-    import ctx._
-    val packet = Await.result(handshakeResponse)
-    val br = MysqlBuf.reader(packet.body)
-    assert(br.readIntLE() == initReply().clientCap.mask)
-    assert(br.readIntLE() == initReply().maxPacketSize)
-    assert(br.readByte() == initReply().charset)
-    assert(br.take(23) === Array.fill(23)(0.toByte))
-    assert(br.readNullTerminatedString() == "username")
-  }
 
   test("serially dispatch requests") {
     val ctx = newCtx
@@ -63,8 +42,8 @@ class ClientDispatcherTest extends FunSuite {
     import ctx._
     val r = service(PingRequest)
     clientq.offer(okPacket)
-    assert(Await.result(r).isInstanceOf[OK])
-    val okResult = Await.result(r).asInstanceOf[OK]
+    assert(await(r).isInstanceOf[OK])
+    val okResult = await(r).asInstanceOf[OK]
     assert(okResult == OK.decode(okPacket))
   }
 
@@ -77,7 +56,7 @@ class ClientDispatcherTest extends FunSuite {
     bw.writeByte(0xff) // field count
     bw.writeShortLE(0x041b) //err no
     bw.writeBytes("#42S02".getBytes) // sqlstate
-    bw.writeBytes(message.getBytes(Charset.defaultCharset.displayName))
+    bw.writeBytes(message.getBytes(MysqlCharset.defaultCharset.displayName))
 
     val errpacket = Packet(1, bw.owned())
     val expectedError = Error.decode(errpacket)
@@ -85,7 +64,7 @@ class ClientDispatcherTest extends FunSuite {
     val r = service(QueryRequest("SELECT * FROM q"))
     clientq.offer(errpacket)
     intercept[ServerError] {
-      Await.result(r)
+      await(r)
     }
   }
 
@@ -126,7 +105,7 @@ class ClientDispatcherTest extends FunSuite {
 
     val bw = MysqlBuf.writer(new Array[Byte](sizeOfField))
 
-    def writeString(s: String) = bw.writeLengthCodedString(s, Charset.defaultCharset)
+    def writeString(s: String) = bw.writeLengthCodedString(s, MysqlCharset.defaultCharset)
 
     writeString(f.catalog)
     writeString(f.db)
@@ -155,7 +134,7 @@ class ClientDispatcherTest extends FunSuite {
     val bufferSize = numFields * valueSize
     val bw = MysqlBuf.writer(new Array[Byte](bufferSize))
     for (i <- 1 to numFields) {
-      bw.writeLengthCodedString("value" + i, Charset.defaultCharset)
+      bw.writeLengthCodedString("value" + i, MysqlCharset.defaultCharset)
     }
 
     Packet(0, bw.owned())
@@ -172,8 +151,8 @@ class ClientDispatcherTest extends FunSuite {
     clientq.offer(eof)
     rowPackets foreach { clientq.offer(_) }
     clientq.offer(eof)
-    assert(Await.result(query).isInstanceOf[ResultSet])
-    val rs = Await.result(query).asInstanceOf[ResultSet]
+    assert(await(query).isInstanceOf[ResultSet])
+    val rs = await(query).asInstanceOf[ResultSet]
     assert(rs.fields.size == numFields)
     assert(rs.rows.size == numRows)
   }
@@ -194,8 +173,8 @@ class ClientDispatcherTest extends FunSuite {
     import ctx._
     val query = service(PrepareRequest(""))
     clientq.offer(makePreparedHeader(0, 0))
-    assert(Await.result(query).isInstanceOf[PrepareOK])
-    val res = Await.result(query).asInstanceOf[PrepareOK]
+    assert(await(query).isInstanceOf[PrepareOK])
+    val res = await(query).asInstanceOf[PrepareOK]
     assert(res.numOfCols == 0)
     assert(res.numOfParams == 0)
   }
@@ -212,8 +191,8 @@ class ClientDispatcherTest extends FunSuite {
     val colPackets = cols map { toPacket(_) }
     colPackets foreach { clientq.offer(_) }
     clientq.offer(eof)
-    assert(Await.result(query).isInstanceOf[PrepareOK])
-    val res = Await.result(query).asInstanceOf[PrepareOK]
+    assert(await(query).isInstanceOf[PrepareOK])
+    val res = await(query).asInstanceOf[PrepareOK]
     assert(res.numOfCols == 1)
     assert(res.numOfParams == numParams)
     assert(res.columns == cols.toList)
@@ -225,12 +204,12 @@ class ClientDispatcherTest extends FunSuite {
     import ctx._
     val stmtId = 5
     val query = service(CloseRequest(5))
-    val sent = Await.result(serverq.poll())
+    val sent = await(serverq.poll())
     val br = MysqlBuf.reader(sent.body)
     assert(br.readByte() == Command.COM_STMT_CLOSE)
     assert(br.readIntLE() == stmtId)
     // response should be synthesized
-    val resp = Await.result(query)
+    val resp = await(query)
     assert(resp.isInstanceOf[OK])
   }
 
@@ -239,18 +218,9 @@ class ClientDispatcherTest extends FunSuite {
     import ctx._
     // offer an ill-formed packet
     clientq.offer(Packet(0, Buf.ByteArray.Owned(Array[Byte]())))
-    intercept[LostSyncException] { Await.result(service(PingRequest)) }
+    intercept[LostSyncException] { await(service(PingRequest)) }
     assert(!service.isAvailable)
     assert(trans.onClose.isDefined)
   }
 
-  test("Failure to auth closes the service") {
-    val clientq = new AsyncQueue[Packet]()
-    val trans = new QueueTransport[Packet, Packet](new AsyncQueue[Packet](), clientq)
-    val service = new ClientDispatcher(trans, handshake, supportUnsigned = false)
-    clientq.offer(Packet(0, Buf.ByteArray.Owned(Array[Byte]())))
-    intercept[LostSyncException] { Await.result(service(PingRequest)) }
-    assert(!service.isAvailable)
-    assert(trans.onClose.isDefined)
-  }
 }

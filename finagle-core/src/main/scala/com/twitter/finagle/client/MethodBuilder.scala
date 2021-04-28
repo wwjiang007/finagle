@@ -2,16 +2,21 @@ package com.twitter.finagle.client
 
 import com.twitter.finagle.Filter.TypeAgnostic
 import com.twitter.finagle.client.MethodBuilderTimeout.TunableDuration
-import com.twitter.finagle.param.ResponseClassifier
-import com.twitter.finagle.service.{Retries, TimeoutFilter}
-import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.service.{
+  Filterable,
+  ResponseClass,
+  ResponseClassifier,
+  Retries,
+  TimeoutFilter
+}
+import com.twitter.finagle.stats.{LazyStatsReceiver, StatsReceiver}
+import com.twitter.finagle.tracing.TraceInitializerFilter
 import com.twitter.finagle.util.{Showable, StackRegistry}
 import com.twitter.finagle.{Filter, Name, Service, ServiceFactory, Stack, param, _}
 import com.twitter.util.tunable.Tunable
-import com.twitter.util.{Future, Promise, Time}
-import java.util.concurrent.atomic.AtomicBoolean
+import com.twitter.util.{CloseOnce, Future, Time}
 
-private[finagle] object MethodBuilder {
+object MethodBuilder {
 
   /**
    * Note that metrics will be scoped (e.g. "clnt/your_client_label/method_name").
@@ -25,10 +30,7 @@ private[finagle] object MethodBuilder {
    *             See the [[https://twitter.github.io/finagle/guide/Names.html user guide]]
    *             for details on destination names.
    */
-  def from[Req, Rep](
-    dest: String,
-    stackClient: StackClient[Req, Rep]
-  ): MethodBuilder[Req, Rep] =
+  def from[Req, Rep](dest: String, stackClient: StackClient[Req, Rep]): MethodBuilder[Req, Rep] =
     from(Resolver.eval(dest), stackClient)
 
   /**
@@ -43,10 +45,7 @@ private[finagle] object MethodBuilder {
    *             See the [[https://twitter.github.io/finagle/guide/Names.html user guide]]
    *             for details on destination names.
    */
-  def from[Req, Rep](
-    dest: Name,
-    stackClient: StackClient[Req, Rep]
-  ): MethodBuilder[Req, Rep] = {
+  def from[Req, Rep](dest: Name, stackClient: StackClient[Req, Rep]): MethodBuilder[Req, Rep] = {
     val stack = modifiedStack(stackClient.stack)
     val service: Service[Req, Rep] = stackClient
       .withStack(stack)
@@ -64,31 +63,38 @@ private[finagle] object MethodBuilder {
    * Modifies the given [[Stack]] so that it is ready for use
    * in a [[MethodBuilder]] client.
    */
-  def modifiedStack[Req, Rep](
+  private[finagle] def modifiedStack[Req, Rep](
     stack: Stack[ServiceFactory[Req, Rep]]
   ): Stack[ServiceFactory[Req, Rep]] = {
     stack
-    // total timeouts are managed directly by MethodBuilder
+    // backup requests happen before the stack's filters so MethodBuilder
+    // has to place this before (outside of the stack).
+      .remove(TraceInitializerFilter.role)
+      // total timeouts are managed directly by MethodBuilder
       .remove(TimeoutFilter.totalTimeoutRole)
       // allow for dynamic per-request timeouts
       .replace(TimeoutFilter.role, DynamicTimeout.perRequestModule[Req, Rep])
   }
 
-  object Config {
+  private[finagle] object Config {
 
     /**
      * @param originalStack the `Stack` before [[modifiedStack]] was called.
      */
-    def create(
-      originalStack: Stack[_],
-      params: Stack.Params
-    ): Config = {
+    def create(originalStack: Stack[_], params: Stack.Params): Config = {
       Config(
-        MethodBuilderRetry.Config(params[param.ResponseClassifier].responseClassifier),
+        TraceInitializerFilter.typeAgnostic(params[param.Tracer].tracer, true),
+        MethodBuilderRetry.Config(
+          if (params.contains[param.ResponseClassifier]) {
+            Some(params[param.ResponseClassifier].responseClassifier)
+          } else None
+        ),
         MethodBuilderTimeout.Config(
           stackTotalTimeoutDefined = originalStack.contains(TimeoutFilter.totalTimeoutRole),
-          total = TunableDuration(id = "total", duration = params[TimeoutFilter.TotalTimeout].timeout),
-          perRequest = TunableDuration(id = "perRequest", duration = params[TimeoutFilter.Param].timeout)
+          total =
+            TunableDuration(id = "total", duration = params[TimeoutFilter.TotalTimeout].timeout),
+          perRequest =
+            TunableDuration(id = "perRequest", duration = params[TimeoutFilter.Param].timeout)
         )
       )
     }
@@ -98,7 +104,11 @@ private[finagle] object MethodBuilder {
    * @see [[MethodBuilder.Config.create]] to construct an initial instance.
    *       Using its `copy` method is appropriate after that.
    */
-  case class Config private (retry: MethodBuilderRetry.Config, timeout: MethodBuilderTimeout.Config)
+  private[finagle] case class Config private (
+    traceInitializer: Filter.TypeAgnostic,
+    retry: MethodBuilderRetry.Config,
+    timeout: MethodBuilderTimeout.Config,
+    filter: Filter.TypeAgnostic = Filter.typeAgnosticIdentity)
 
   /** Used by the `ClientRegistry` */
   private[client] val RegistryKey = "methods"
@@ -111,14 +121,16 @@ private[finagle] object MethodBuilder {
  *
  * @see [[https://twitter.github.io/finagle/guide/MethodBuilder.html user guide]]
  */
-private[finagle] final class MethodBuilder[Req, Rep](
+final class MethodBuilder[Req, Rep] private[finagle] (
   val refCounted: RefcountedClosable[Service[Req, Rep]],
   dest: Name,
   stack: Stack[_],
   stackParams: Stack.Params,
-  private[client] val config: MethodBuilder.Config
-) { self =>
+  private[client] val config: MethodBuilder.Config) { self =>
   import MethodBuilder._
+
+  override def toString: String =
+    s"MethodBuilder(dest=$dest, stack=$stack, params=$stackParams, config=$config)"
 
   //
   // Configuration
@@ -166,7 +178,7 @@ private[finagle] final class MethodBuilder[Req, Rep](
    *
    * @example A total timeout of 200 milliseconds:
    * {{{
-   * import com.twitter.conversions.time._
+   * import com.twitter.conversions.DurationOps._
    * import com.twitter.finagle.client.MethodBuilder
    *
    * val builder: MethodBuilder[Int, Int] = ???
@@ -175,7 +187,7 @@ private[finagle] final class MethodBuilder[Req, Rep](
    *
    * @example A per-request timeout of 50 milliseconds:
    * {{{
-   * import com.twitter.conversions.time._
+   * import com.twitter.conversions.DurationOps._
    * import com.twitter.finagle.client.MethodBuilder
    *
    * val builder: MethodBuilder[Int, Int] = ???
@@ -186,7 +198,6 @@ private[finagle] final class MethodBuilder[Req, Rep](
    */
   def withTimeout: MethodBuilderTimeout[Req, Rep] =
     new MethodBuilderTimeout[Req, Rep](self)
-
 
   /**
    * Configure that requests are to be treated as idempotent. Because requests can be safely
@@ -201,7 +212,7 @@ private[finagle] final class MethodBuilder[Req, Rep](
    *                       interrupts, this should be "false" to avoid connection churn.
    * @param classifier [[ResponseClassifier]] (combined (via [[ResponseClassifier.orElse]])
    *                   with any existing classifier in the stack params), used for determining
-   *                   whether or not requests have succeeded and should be retries.
+   *                   whether or not requests have succeeded and should be retried.
    *                   These determinations are also reflected in stats, and used by
    *                   [[FailureAccrualFactory]].
    *
@@ -238,7 +249,7 @@ private[finagle] final class MethodBuilder[Req, Rep](
    *                       interrupts, this should be "false" to avoid connection churn.
    * @param classifier [[ResponseClassifier]] (combined (via [[ResponseClassifier.orElse]])
    *                   with any existing classifier in the stack params), used for determining
-   *                   whether or not requests have succeeded and should be retries.
+   *                   whether or not requests have succeeded and should be retried.
    *                   These determinations are also reflected in stats, and used by
    *                   [[FailureAccrualFactory]].
    */
@@ -248,26 +259,69 @@ private[finagle] final class MethodBuilder[Req, Rep](
     classifier: service.ResponseClassifier
   ): MethodBuilder[Req, Rep] = {
     addBackupRequestFilterParamAndClassifier(
-      BackupRequestFilter.Configured(maxExtraLoad, sendInterrupts), classifier)
+      BackupRequestFilter.Configured(maxExtraLoad, sendInterrupts),
+      classifier
+    )
+  }
+
+  private[this] def idempotentify(
+    applicationClassifier: Option[ResponseClassifier],
+    protocolClassifier: ResponseClassifier
+  ): ResponseClassifier = {
+    val combined = applicationClassifier match {
+      case Some(classifier) => classifier.orElse(protocolClassifier)
+      case None => protocolClassifier
+    }
+    ResponseClassifier.named(s"Idempotent($combined)") {
+      case reqrep if combined.isDefinedAt(reqrep) =>
+        val result = combined(reqrep)
+        if (result == ResponseClass.NonRetryableFailure) ResponseClass.RetryableFailure
+        else result
+    }
   }
 
   private[this] def addBackupRequestFilterParamAndClassifier(
     brfParam: BackupRequestFilter.Param,
     classifier: service.ResponseClassifier
   ): MethodBuilder[Req, Rep] = {
-    val combinedClassifier =
-      if (!params.contains[ResponseClassifier]) classifier
-      else (params[ResponseClassifier].responseClassifier).orElse(classifier)
-    (new MethodBuilder[Req, Rep](
+    val stackClassifier =
+      if (!params.contains[param.ResponseClassifier]) None
+      else Some(params[param.ResponseClassifier].responseClassifier)
+    val idempotentedStackClassifier = idempotentify(stackClassifier, classifier)
+
+    val configClassifier = config.retry.underlyingClassifier
+    val idempotentedConfigClassifier = idempotentify(configClassifier, classifier)
+
+    new MethodBuilder[Req, Rep](
       refCounted,
       dest,
       stack,
       // If the RetryBudget is not configured, BackupRequestFilter and RetryFilter will each
       // get a new instance of the default budget. Since we want them to share the same
       // client retry budget, insert the budget into the params.
-      stackParams + brfParam + ResponseClassifier(combinedClassifier) + stackParams[Retries.Budget],
-      config))
-      .withRetry.forClassifier(combinedClassifier)
+      stackParams
+        + brfParam
+        + param.ResponseClassifier(idempotentedStackClassifier)
+        + stackParams[Retries.Budget],
+      config
+    ).withRetry.forClassifier(idempotentedConfigClassifier)
+  }
+
+  private[this] def nonidempotentify(
+    applicationClassifier: Option[ResponseClassifier]
+  ): ResponseClassifier = {
+    applicationClassifier match {
+      case Some(classifier) =>
+        ResponseClassifier.RetryOnWriteExceptions.orElse(
+          ResponseClassifier.named(s"NonIdempotent($classifier)") {
+            case reqrep if classifier.isDefinedAt(reqrep) =>
+              val result = classifier(reqrep)
+              if (result == ResponseClass.RetryableFailure) ResponseClass.NonRetryableFailure
+              else result
+          }
+        )
+      case None => ResponseClassifier.RetryOnWriteExceptions
+    }
   }
 
   /**
@@ -277,19 +331,47 @@ private[finagle] final class MethodBuilder[Req, Rep](
    * retries are removed.
    */
   def nonIdempotent: MethodBuilder[Req, Rep] = {
+    val configClassifier =
+      if (config.retry.responseClassifier == ResponseClassifier.Default) None
+      else Some(config.retry.responseClassifier)
+    val nonidempotentedConfigClassifier = nonidempotentify(configClassifier)
+
     new MethodBuilder[Req, Rep](
       refCounted,
       dest,
       stack,
       stackParams + BackupRequestFilter.Disabled,
-      config)
-    .withRetry.forClassifier(service.ResponseClassifier.Default)
+      config
+    ).withRetry.forClassifier(nonidempotentedConfigClassifier)
   }
+
+  /**
+   * Returns the client stack parameters.
+   */
+  def params: Stack.Params =
+    stackParams
+
+  /**
+   * Allow customizations for protocol-specific trace initialization.
+   */
+  def withTraceInitializer(initializer: Filter.TypeAgnostic): MethodBuilder[Req, Rep] =
+    withConfig(config.copy(traceInitializer = initializer))
+
+  /**
+   * Configure the customized filters, this is for generic configuration other
+   * than TraceInitializer, Retry, and Timeout. Example usage is for applying
+   * protocol-specific filters for MethodBuilder.
+   *
+   * Defaults is a pass-through [[TypeAgnostic]].
+   *
+   * @param filter A filter or filter chain to create a new MethodBuilder instance.
+   */
+  private[finagle] def filtered(filter: Filter.TypeAgnostic): MethodBuilder[Req, Rep] =
+    withConfig(config.copy(filter = filter))
 
   //
   // Build
   //
-
   private[this] def newService(methodName: Option[String]): Service[Req, Rep] =
     filters(methodName).andThen(wrappedService(methodName))
 
@@ -305,12 +387,33 @@ private[finagle] final class MethodBuilder[Req, Rep](
   def newService: Service[Req, Rep] =
     newService(None)
 
+  /**
+   * Create a [[ServicePerEndpoint]] from the current configuration.
+   */
+  def newServicePerEndpoint[ServicePerEndpoint <: Filterable[ServicePerEndpoint]](
+    builder: ServicePerEndpointBuilder[Req, Rep, ServicePerEndpoint]
+  ): ServicePerEndpoint = newServicePerEndpoint(builder, None)
+
+  /**
+   * Create a [[ServicePerEndpoint]] from the current configuration.
+   */
+  def newServicePerEndpoint[ServicePerEndpoint <: Filterable[ServicePerEndpoint]](
+    builder: ServicePerEndpointBuilder[Req, Rep, ServicePerEndpoint],
+    methodName: String
+  ): ServicePerEndpoint = newServicePerEndpoint(builder, Some(methodName))
+
+  private[this] def newServicePerEndpoint[ServicePerEndpoint <: Filterable[ServicePerEndpoint]](
+    builder: ServicePerEndpointBuilder[Req, Rep, ServicePerEndpoint],
+    methodName: Option[String]
+  ): ServicePerEndpoint = {
+    builder
+      .servicePerEndpoint(wrappedService(methodName))
+      .filtered(filters(methodName))
+  }
+
   //
   // Internals
   //
-
-  def params: Stack.Params =
-    stackParams
 
   /**
    * '''For implementers'''
@@ -327,16 +430,15 @@ private[finagle] final class MethodBuilder[Req, Rep](
       case label => label
     }
 
-  private[this] def statsReceiver(methodName: Option[String]): StatsReceiver = {
+  private[finagle] def statsReceiver(methodName: Option[String]): StatsReceiver = {
     val clientScoped = stackParams[param.Stats].statsReceiver.scope(clientName)
     methodName match {
-      case Some(methodName) => clientScoped.scope(methodName)
+      case Some(name) => new LazyStatsReceiver(clientScoped.scope(name))
       case None => clientScoped
     }
   }
 
-
-  def filters(methodName: Option[String]): Filter.TypeAgnostic = {
+  private[this] def filters(methodName: Option[String]): Filter.TypeAgnostic = {
     // Ordering of filters:
     // Requests start at the top and traverse down.
     // Responses flow back from the bottom up.
@@ -345,6 +447,8 @@ private[finagle] final class MethodBuilder[Req, Rep](
     // total timeouts and before per-request timeouts so that each backup uses the per-request
     // timeout.
     //
+    // - Trace Initialization
+    // - Customized filter
     // - Logical Stats
     // - Failure logging
     // - Annotate method name for a `Failure`
@@ -358,12 +462,13 @@ private[finagle] final class MethodBuilder[Req, Rep](
     val timeouts = withTimeout
 
     val failureSource = methodName match {
-      case Some(methodName) => addFailureSource(methodName)
+      case Some(name) => addFailureSource(name)
       case None => TypeAgnostic.Identity
     }
 
-    retries
-      .logicalStatsFilter(stats)
+    config.traceInitializer
+      .andThen(config.filter)
+      .andThen(retries.logicalStatsFilter(stats))
       .andThen(retries.logFailuresFilter(clientName, methodName))
       .andThen(failureSource)
       .andThen(timeouts.totalFilter)
@@ -417,34 +522,30 @@ private[finagle] final class MethodBuilder[Req, Rep](
     }
   }
 
-  def wrappedService(name: Option[String]): Service[Req, Rep] = {
+  private[this] def wrappedService(name: Option[String]): Service[Req, Rep] = {
     addToRegistry(name)
     refCounted.open()
 
     val underlying = BackupRequestFilter.filterService(
-      stackParams + param.Stats(statsReceiver(name)), refCounted.get)
+      stackParams + param.Stats(statsReceiver(name)),
+      refCounted.get
+    )
 
-    new ServiceProxy[Req, Rep](underlying) {
-      private[this] val isClosed = new AtomicBoolean(false)
-      private[this] val closedP = new Promise[Unit]()
-
+    new ServiceProxy[Req, Rep](underlying) with CloseOnce {
       override def apply(request: Req): Future[Rep] =
-        if (isClosed.get) Future.exception(new ServiceClosedException())
+        if (isClosed) Future.exception(new ServiceClosedException())
         else super.apply(request)
 
       override def status: Status =
-        if (isClosed.get) Status.Closed
+        if (isClosed) Status.Closed
         else underlying.status
 
-      override def close(deadline: Time): Future[Unit] = {
-        if (isClosed.compareAndSet(false, true)) {
-          // remove our method builder's entries from the registry
-          ClientRegistry.unregisterPrefixes(registryEntry(), registryKeyPrefix(name))
-          // call refCounted.close to decrease the ref count. `underlying.close` is only
-          // called when the closable underlying `refCounted` is closed.
-          closedP.become(refCounted.close(deadline).transform(_ => underlying.close(deadline)))
-        }
-        closedP
+      override protected def closeOnce(deadline: Time): Future[Unit] = {
+        // remove our method builder's entries from the registry
+        ClientRegistry.unregisterPrefixes(registryEntry(), registryKeyPrefix(name))
+        // call refCounted.close to decrease the ref count. `underlying.close` is only
+        // called when the closable underlying `refCounted` is closed.
+        refCounted.close(deadline).transform(_ => underlying.close(deadline))
       }
     }
   }

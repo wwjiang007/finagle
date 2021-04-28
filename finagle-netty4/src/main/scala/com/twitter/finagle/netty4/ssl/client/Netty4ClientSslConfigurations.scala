@@ -1,7 +1,7 @@
 package com.twitter.finagle.netty4.ssl.client
 
 import com.twitter.finagle.Address
-import com.twitter.finagle.netty4.ssl.Netty4SslConfigurations
+import com.twitter.finagle.netty4.ssl.{FinalizedSslContext, Netty4SslConfigurations}
 import com.twitter.finagle.ssl.{ApplicationProtocols, Engine, KeyCredentials}
 import com.twitter.finagle.ssl.client.{SslClientConfiguration, SslClientEngineFactory}
 import com.twitter.util.Return
@@ -34,7 +34,10 @@ private[finagle] object Netty4ClientSslConfigurations {
     // don't use NPN because https://github.com/netty/netty/issues/7346 breaks
     // web crawlers
     Netty4SslConfigurations.configureApplicationProtocols(
-      builder, applicationProtocols, Protocol.ALPN)
+      builder,
+      applicationProtocols,
+      Protocol.ALPN
+    )
   }
 
   /**
@@ -45,7 +48,8 @@ private[finagle] object Netty4ClientSslConfigurations {
    *
    * @note Will not validate the validity for certificates when configured
    *       with [[KeyCredentials.KeyManagerFactory]] in contrast to when
-   *       configured with [[KeyCredentials.CertAndKey]] or [[KeyCredentials.CertKeyAndChain]].
+   *       configured with [[KeyCredentials.CertAndKey]], [[KeyCredentials.CertsAndKey]],
+   *       or [[KeyCredentials.CertKeyAndChain]].
    */
   private def startClientWithKey(keyCredentials: KeyCredentials): SslContextBuilder = {
     val builder: SslContextBuilder = SslContextBuilder.forClient()
@@ -57,6 +61,11 @@ private[finagle] object Netty4ClientSslConfigurations {
           key <- new PrivateKeyFile(keyFile).readPrivateKey()
           cert <- new X509CertificateFile(certFile).readX509Certificate()
         } yield builder.keyManager(key, cert)
+      case KeyCredentials.CertsAndKey(certsFile, keyFile) =>
+        for {
+          key <- new PrivateKeyFile(keyFile).readPrivateKey()
+          certs <- new X509CertificateFile(certsFile).readX509Certificates()
+        } yield builder.keyManager(key, certs: _*)
       case KeyCredentials.CertKeyAndChain(certFile, keyFile, chainFile) =>
         for {
           key <- new PrivateKeyFile(keyFile).readPrivateKey()
@@ -78,10 +87,12 @@ private[finagle] object Netty4ClientSslConfigurations {
     val builder = startClientWithKey(config.keyCredentials)
     val withProvider = Netty4SslConfigurations.configureProvider(builder, forceJdk)
     val withTrust = Netty4SslConfigurations.configureTrust(withProvider, config.trustCredentials)
-    val withAppProtocols = configureClientApplicationProtocols(
-      withTrust,
-      config.applicationProtocols)
-    withAppProtocols.build()
+    val withAppProtocols =
+      configureClientApplicationProtocols(withTrust, config.applicationProtocols)
+
+    // We only want to use the `FinalizedSslContext` if we're using the non-JDK implementation.
+    if (!forceJdk) new FinalizedSslContext(withAppProtocols.build())
+    else withAppProtocols.build()
   }
 
   /**

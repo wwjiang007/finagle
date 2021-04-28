@@ -4,12 +4,12 @@ import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.logging.{BareFormatter, Level, Logger, StringHandler}
 import org.scalacheck.Arbitrary.arbitrary
 import org.scalacheck.Gen
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 import org.scalatest.{FunSuite, Matchers}
 import scala.collection.immutable
 import scala.util.Random
 
-class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Matchers {
+class ToggleMapTest extends FunSuite with ScalaCheckDrivenPropertyChecks with Matchers {
 
   private val IntGen = arbitrary[Int]
 
@@ -22,8 +22,8 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
     // these numbers were picked by observation and are used to
     // make sure they stay consistent across code changes.
     val initial = 0f
-    val state1 = 1.19006272E9f
-    val state2 = 3.58052019E9f
+    val state1 = 1.19006272e9f
+    val state2 = 3.58052019e9f
 
     // run it twice to make sure the checksum remains consistent
     // without changes
@@ -78,21 +78,19 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
 
     // start out empty
     val toggle = m(id)
-    forAll(IntGen) { i =>
-      assert(!toggle.isDefinedAt(i))
-    }
+    assert(toggle.isUndefined)
 
     // update that toggle
     m.put(id, 1.0)
     forAll(IntGen) { i =>
-      assert(toggle.isDefinedAt(i))
+      assert(toggle.isDefined)
       assert(toggle(i))
     }
 
     // disable it.
     m.put(id, 0.0)
     forAll(IntGen) { i =>
-      assert(toggle.isDefinedAt(i))
+      assert(toggle.isDefined)
       assert(!toggle(i))
     }
 
@@ -100,7 +98,7 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
     m.put(id, 1.0)
     assert(toggle(12333))
     m.remove(id)
-    assert(!toggle.isDefinedAt(12333))
+    assert(toggle.isUndefined)
   }
 
   test("ToggleMap.mutable logs") {
@@ -144,11 +142,11 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
     val off = map("com.toggle.off")
     val doesntExist = map("com.toggle.ummm")
     forAll(IntGen) { i =>
-      assert(on.isDefinedAt(i))
+      assert(on.isDefined)
       assert(on(i))
-      assert(off.isDefinedAt(i))
+      assert(off.isDefined)
       assert(!off(i))
-      assert(!doesntExist.isDefinedAt(i))
+      assert(doesntExist.isUndefined)
     }
 
     assert(map.iterator.size == 2)
@@ -158,14 +156,10 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
 
   test("ToggleMap.fractional") {
     val on = ToggleMap.fractional("com.toggle.on", 1.0)
-    forAll(IntGen) { i =>
-      assert(on(i))
-    }
+    forAll(IntGen) { i => assert(on(i)) }
 
     val off = ToggleMap.fractional("com.toggle.off", 0.0)
-    forAll(IntGen) { i =>
-      assert(!off(i))
-    }
+    forAll(IntGen) { i => assert(!off(i)) }
 
     // given a big enough list of inputs, we should
     // get approximately the right `true` percentage as a result
@@ -201,7 +195,7 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
     def numApply: Int = nApply
 
     val underlying: ToggleMap = ToggleMap.newMutable()
-    override def apply(id: String): Toggle[Int] = {
+    override def apply(id: String): Toggle = {
       nApply += 1
       super.apply(id)
     }
@@ -226,9 +220,7 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
 
       forAll(ToggleGenerator.Id) { s =>
         val toggle = ToggleMap.flags(s)
-        forAll(IntGen) { i =>
-          assert(!toggle.isDefinedAt(i))
-        }
+        assert(toggle.isUndefined)
       }
     }
   }
@@ -254,12 +246,12 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
 
       val on = ToggleMap.flags("com.toggle.on")
       forAll(IntGen) { i =>
-        assert(on.isDefinedAt(i))
+        assert(on.isDefined)
         assert(on(i))
       }
       val off = ToggleMap.flags("com.toggle.off")
       forAll(IntGen) { i =>
-        assert(off.isDefinedAt(i))
+        assert(off.isDefined)
         assert(!off(i))
       }
 
@@ -267,11 +259,11 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
       // to change if the underlying algorithm changes. we want
       // some mechanism for seeing that the values can be variable.
       val someToggle = ToggleMap.flags("com.toggle.some")
-      assert(someToggle.isDefinedAt(999))
+      assert(someToggle.isDefined)
       assert(someToggle(999))
-      assert(someToggle.isDefinedAt(Int.MinValue))
+      assert(someToggle.isDefined)
       assert(!someToggle(Int.MinValue))
-      assert(someToggle.isDefinedAt(Int.MaxValue))
+      assert(someToggle.isDefined)
       assert(someToggle(Int.MaxValue))
     }
   }
@@ -304,16 +296,14 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
     // make sure we start out cleared and using the flag returns false
     assert(!containsFlagId("com.toggle.on", ToggleMap.flags.iterator))
     val toggle = ToggleMap.flags("com.toggle.on")
-    forAll(IntGen) { i =>
-      assert(!toggle.isDefinedAt(i))
-    }
+    assert(toggle.isUndefined)
 
     // now modify the flags and set it to 100%
     flag.overrides.let("com.toggle.on", 1.0) {
       assert(containsFlagId("com.toggle.on", ToggleMap.flags.iterator))
       forAll(IntGen) { i =>
         assert(toggle(i))
-        assert(toggle.isDefinedAt(i))
+        assert(toggle.isDefined)
       }
 
       // then nested within that, turn it off to 0%.
@@ -321,16 +311,14 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
         assert(containsFlagId("com.toggle.on", ToggleMap.flags.iterator))
         forAll(IntGen) { i =>
           assert(!toggle(i))
-          assert(toggle.isDefinedAt(i))
+          assert(toggle.isDefined)
         }
       }
 
       // then remove it via letClear
       flag.overrides.letClear("com.toggle.on") {
         assert(!containsFlagId("com.toggle.on", ToggleMap.flags.iterator))
-        forAll(IntGen) { i =>
-          assert(!toggle.isDefinedAt(i))
-        }
+        toggle.isUndefined
       }
     }
     assert(!containsFlagId("com.toggle.on", ToggleMap.flags.iterator))
@@ -353,24 +341,14 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
 
     val mds01 = tm01.iterator.toSeq
     assert(mds01.size == 2)
-    assert(mds01.exists { md =>
-      md.id == "com.toggle.t0" && md.fraction == 0.0
-    })
-    assert(mds01.exists { md =>
-      md.id == "com.toggle.t1" && md.fraction == 1.0
-    })
+    assert(mds01.exists { md => md.id == "com.toggle.t0" && md.fraction == 0.0 })
+    assert(mds01.exists { md => md.id == "com.toggle.t1" && md.fraction == 1.0 })
 
     val mds012 = tm012.iterator.toSeq
     assert(mds012.size == 3)
-    assert(mds012.exists { md =>
-      md.id == "com.toggle.t0" && md.fraction == 0.0
-    })
-    assert(mds012.exists { md =>
-      md.id == "com.toggle.t1" && md.fraction == 1.0
-    })
-    assert(mds012.exists { md =>
-      md.id == "com.toggle.t2" && md.fraction == 0.3
-    })
+    assert(mds012.exists { md => md.id == "com.toggle.t0" && md.fraction == 0.0 })
+    assert(mds012.exists { md => md.id == "com.toggle.t1" && md.fraction == 1.0 })
+    assert(mds012.exists { md => md.id == "com.toggle.t2" && md.fraction == 0.3 })
   }
 
   test("ToggleMap.orElse.iterator uses Toggles from earlier ToggleMaps") {
@@ -383,9 +361,7 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
     val tm01 = NullToggleMap.orElse(tm0).orElse(tm1)
     val mds = tm01.iterator.toSeq
     assert(mds.size == 1)
-    assert(mds.exists { md =>
-      md.id == "com.toggle.t0" && md.fraction == 0.0
-    }, mds)
+    assert(mds.exists { md => md.id == "com.toggle.t0" && md.fraction == 0.0 }, mds)
   }
 
   test("ToggleMap.orElse.apply") {
@@ -395,22 +371,20 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
     val toggle = tm01("com.toggle.t")
 
     // the toggle doesn't exist in either underlying map
-    forAll(IntGen) { i =>
-      assert(!toggle.isDefinedAt(i))
-    }
+    toggle.isUndefined
 
     // the toggle doesn't yet exist in tm0
     // so we should use the value from tm1 (true)
     tm1.put("com.toggle.t", 1.0)
     forAll(IntGen) { i =>
-      assert(toggle.isDefinedAt(i))
+      assert(toggle.isDefined)
       assert(toggle(i))
     }
 
     // now, update it to 0% in tm0 which should it should use instead
     tm1.put("com.toggle.t", 0.0)
     forAll(IntGen) { i =>
-      assert(toggle.isDefinedAt(i))
+      assert(toggle.isDefined)
       assert(!toggle(i))
     }
   }
@@ -434,7 +408,7 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
   test("ToggleMap.On") {
     val toggle = ToggleMap.On("com.on.toggle")
     forAll(IntGen) { i =>
-      assert(toggle.isDefinedAt(i))
+      assert(toggle.isDefined)
       assert(toggle(i))
     }
     assert(Iterator.empty.sameElements(ToggleMap.On.iterator))
@@ -443,7 +417,7 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
   test("ToggleMap.Off") {
     val toggle = ToggleMap.Off("com.off.toggle")
     forAll(IntGen) { i =>
-      assert(toggle.isDefinedAt(i))
+      assert(toggle.isDefined)
       assert(!toggle(i))
     }
     assert(Iterator.empty.sameElements(ToggleMap.Off.iterator))
@@ -456,7 +430,7 @@ class ToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks with Mat
 
     val t0 = map("com.toggle.t0")
     val t1 = map("com.toggle.t1")
-    
+
     // These inputs were found from observation
     assert(t0(602) && !t1(602))
     assert(!t0(1129) && t1(1129))

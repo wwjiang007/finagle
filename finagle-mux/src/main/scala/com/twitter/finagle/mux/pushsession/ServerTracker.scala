@@ -29,13 +29,11 @@ private class ServerTracker(
   h_messageWriter: MessageWriter,
   lessor: Lessor,
   statsReceiver: StatsReceiver,
-  remoteAddress: SocketAddress
-) {
+  remoteAddress: SocketAddress) {
 
   // We use the netty type because it results in less allocations, but this could
   // just as well be a java Map if we wanted.
   private[this] val h_dispatches = new IntObjectHashMap[Dispatch]
-  private[this] val orphanedTdiscardCounter = statsReceiver.counter("orphaned_tdiscard")
 
   private[this] val drainedP = Promise[Unit]()
   // Note, the vars below are only read within the context of
@@ -95,7 +93,10 @@ private class ServerTracker(
         if (h_messageWriter.removeForTag(tag) == MessageWriter.DiscardResult.NotFound) {
           // We either never had a dispatch and the client is misbehaving or
           // or we already sent the response so the tag is freed in servers eyes.
-          orphanedTdiscardCounter.incr()
+
+          // This stat is intentionally created on-demand as this event is infrequent enough to
+          // outweigh the benefit of a persistent counter.
+          statsReceiver.counter("orphaned_tdiscard").incr()
         } else {
           // We had something queued for write so send an `Rdiscarded` to let
           // the peer know that we've aborted the dispatch.
@@ -105,9 +106,16 @@ private class ServerTracker(
       case dispatch =>
         // We raise on the dispatch and immediately send back a Rdiscarded
         why match {
-          case BackupRequestFilter.SupersededRequestFailureToString =>
-            dispatch.response.raise(new ClientDiscardedRequestException(why,
-              FailureFlags.Interrupted | FailureFlags.Ignorable))
+          // We match on both the `BackupRequestFilter` failure string, and the
+          // exception string. The first one handles a single hop, while the second
+          // one handles multi-level propagation.
+          case BackupRequestFilter.SupersededRequestFailureToString |
+              ServerTracker.SupersededBackupRequestExceptionString =>
+            dispatch.response.raise(newSupersededBackupRequestException())
+          // This condition handles where an in-between hop has not been updated to this
+          // version of code and is still adding an additional wrapping.
+          case reason if reason.endsWith(ServerTracker.SupersededBackupRequestExceptionString) =>
+            dispatch.response.raise(newSupersededBackupRequestException())
           case _ =>
             dispatch.response.raise(new ClientDiscardedRequestException(why))
         }
@@ -164,21 +172,22 @@ private class ServerTracker(
 
   private[this] def handleDispatch(m: Message): Unit = {
     if (h_dispatches.containsKey(m.tag)) handleDuplicateTagDetected(m.tag)
-    else Local.let(handleGetLocals()) {
-      lessor.observeArrival()
-      val responseF = ServerProcessor(m, service)
-      val elapsed = Stopwatch.start()
-      val dispatch = Dispatch(m.tag, responseF, elapsed)
-      h_dispatches.put(m.tag, dispatch)
+    else
+      Local.let(handleGetLocals()) {
+        lessor.observeArrival()
+        val responseF = ServerProcessor(m, service)
+        val elapsed = Stopwatch.start()
+        val dispatch = Dispatch(m.tag, responseF, elapsed)
+        h_dispatches.put(m.tag, dispatch)
 
-      // Concurrency is controlled by the serial executor so we must
-      // bounce the result through it.
-      responseF.respond { result =>
-        serialExecutor.execute(new Runnable {
-          def run(): Unit = handleRenderResponse(dispatch, result)
-        })
+        // Concurrency is controlled by the serial executor so we must
+        // bounce the result through it.
+        responseF.respond { result =>
+          serialExecutor.execute(new Runnable {
+            def run(): Unit = handleRenderResponse(dispatch, result)
+          })
+        }
       }
-    }
   }
 
   private[this] def handleRenderResponse(dispatch: Dispatch, response: Try[Message]): Unit = {
@@ -222,6 +231,9 @@ private class ServerTracker(
     // Note: we don't send two Rerr's for the dispatches that had the duplicate tag
     val msg = s"Received duplicate tag ${tag} from client."
     log.warning(msg)
+
+    // This stat is intentionally created on-demand as this event is infrequent enough to
+    // outweigh the benefit of a persistent counter.
     statsReceiver.counter("duplicate_tag").incr()
 
     val pending = handleTakeAllDispatches()
@@ -253,11 +265,18 @@ private object ServerTracker {
 
   private val log = Logger.get()
 
-  private case class Dispatch(
-    tag: Int,
-    response: Future[Message],
-    timer: Stopwatch.Elapsed
-  )
+  private def newSupersededBackupRequestException(): Exception =
+    new ClientDiscardedRequestException(
+      BackupRequestFilter.SupersededRequestFailureToString,
+      FailureFlags.Interrupted | FailureFlags.Ignorable
+    )
+
+  // This ends up being the BackupRequestFilter.SupersededRequestFailureToString
+  // with "com.twitter.finagle.mux.ClientDiscardedRequestException: " prepended.
+  private val SupersededBackupRequestExceptionString: String =
+    newSupersededBackupRequestException().toString
+
+  private case class Dispatch(tag: Int, response: Future[Message], timer: Stopwatch.Elapsed)
 
   // Representation of the draining state of the session
   sealed abstract class DrainState(override val toString: String)

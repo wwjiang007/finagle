@@ -8,7 +8,7 @@ import com.twitter.io.Buf
 import com.twitter.logging.{Level, Logger}
 import com.twitter.util.Future
 import java.util.concurrent.atomic.AtomicReference
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 /**
  * A cache for the members and vectors of a given cluster (/twitter/service/role/env/job).
@@ -54,8 +54,7 @@ import scala.collection.JavaConverters._
 private[serverset2] abstract class ZkNodeDataCache[Entity](
   clusterPath: String,
   entityType: String,
-  statsReceiver: StatsReceiver
-) {
+  statsReceiver: StatsReceiver) {
   private[this] val logger = Logger(getClass)
 
   /** zkSession needs to be set via setSession before the cache is used */

@@ -1,6 +1,6 @@
 package com.twitter.finagle.service
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.util.{Duration, Stopwatch, TokenBucket}
 
 /**
@@ -79,8 +79,8 @@ object RetryBudget {
   private class TokenRetryBudget(
     tokenBucket: TokenBucket,
     depositAmount: Int,
-    withdrawalAmount: Int
-  ) extends RetryBudget {
+    withdrawalAmount: Int)
+      extends RetryBudget {
     def deposit(): Unit =
       tokenBucket.put(depositAmount)
 

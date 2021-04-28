@@ -1,6 +1,7 @@
 package com.twitter.finagle.serverset2.client
 
 import com.twitter.io.Buf
+import scala.collection.Seq
 
 private[serverset2] object Perms {
   val Read: Int = 1 << 0
@@ -27,8 +28,8 @@ private[serverset2] sealed trait Node {
 private[serverset2] object Node {
   case class ACL(
     acl: Seq[com.twitter.finagle.serverset2.client.Data.ACL],
-    stat: com.twitter.finagle.serverset2.client.Data.Stat
-  ) extends Node
+    stat: com.twitter.finagle.serverset2.client.Data.Stat)
+      extends Node
 
   case class Children(children: Seq[String], stat: com.twitter.finagle.serverset2.client.Data.Stat)
       extends Node
@@ -71,6 +72,7 @@ private[serverset2] object OpResult {
 private[serverset2] sealed abstract class SessionState(val name: String)
 
 private[serverset2] object SessionState {
+  object Closed extends SessionState("session_closed")
   object Unknown extends SessionState("session_unknown")
   object AuthFailed extends SessionState("session_auth_failed")
   object Disconnected extends SessionState("session_disconnected")
@@ -85,6 +87,7 @@ private[serverset2] sealed trait WatchState
 
 private[serverset2] object WatchState {
   object Pending extends WatchState
+  case class FailedToInitialize(exc: Throwable) extends WatchState
   case class Determined(event: NodeEvent) extends WatchState
   case class SessionState(state: com.twitter.finagle.serverset2.client.SessionState)
       extends WatchState

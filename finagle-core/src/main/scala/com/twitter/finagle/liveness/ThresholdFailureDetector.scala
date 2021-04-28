@@ -1,6 +1,6 @@
 package com.twitter.finagle.liveness
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Status
 import com.twitter.finagle.stats.{
   MultiCategorizingExceptionStatsHandler,
@@ -34,10 +34,10 @@ private class ThresholdFailureDetector(
   ping: () => Future[Unit],
   minPeriod: Duration = 5.seconds,
   closeTimeout: Duration = 4.seconds,
-  nanoTime: () => Long = System.nanoTime,
+  nanoTime: () => Long = System.nanoTime _,
   statsReceiver: StatsReceiver = NullStatsReceiver,
-  implicit val timer: Timer = DefaultTimer
-) extends FailureDetector {
+  implicit val timer: Timer = DefaultTimer)
+    extends FailureDetector {
   private[this] val failureHandler = new MultiCategorizingExceptionStatsHandler()
   private[this] val pingLatencyStat = statsReceiver.stat(Verbosity.Debug, "ping_latency_us")
   private[this] val closeCounter = statsReceiver.counter("close")

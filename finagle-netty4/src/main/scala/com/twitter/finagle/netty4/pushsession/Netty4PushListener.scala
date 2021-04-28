@@ -13,8 +13,8 @@ import java.net.SocketAddress
 class Netty4PushListener[In, Out](
   pipelineInit: ChannelPipeline => Unit,
   params: Stack.Params,
-  setupMarshalling: ChannelInitializer[Channel] => ChannelHandler
-) extends PushListener[In, Out] {
+  setupMarshalling: ChannelInitializer[Channel] => ChannelHandler)
+    extends PushListener[In, Out] {
 
   final protected type SessionFactory = (PushChannelHandle[In, Out]) => Future[PushSession[In, Out]]
 
@@ -32,7 +32,11 @@ class Netty4PushListener[In, Out](
   protected def initializePushChannelHandle(ch: Channel, sessionFactory: SessionFactory): Unit = {
     val statsReceiver = params[param.Stats].statsReceiver
     Netty4PushChannelHandle.install[In, Out, PushSession[In, Out]](
-      ch, pipelineInit, sessionFactory, statsReceiver)
+      ch,
+      pipelineInit,
+      sessionFactory,
+      statsReceiver
+    )
   }
 
   private[this] class ChannelHandleInitializer(sessionFactory: SessionFactory)

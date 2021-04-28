@@ -18,7 +18,9 @@ trait PushListener[In, Out] {
    * Bind and listen on a socket address using the provided `sessionBuilder`
    * to build the server session.
    */
-  def listen(addr: SocketAddress)(
+  def listen(
+    addr: SocketAddress
+  )(
     sessionBuilder: PushChannelHandle[In, Out] => Future[PushSession[In, Out]]
   ): ListeningServer
 }

@@ -1,21 +1,30 @@
 package com.twitter.finagle.server
 
-import com.twitter.finagle._
 import com.twitter.finagle.Stack.Params
+import com.twitter.finagle._
+import com.twitter.finagle.ssl.session.SslSessionInfo
 import com.twitter.finagle.transport.{Transport, TransportContext}
 import com.twitter.util.{Await, Closable, Future, Time}
 import java.net.{InetAddress, InetSocketAddress, SocketAddress}
 import java.security.cert.{Certificate, X509Certificate}
+import org.mockito.Mockito
+import org.mockito.stubbing.OngoingStubbing
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
+import scala.language.reflectiveCalls
 
 class StdStackServerTest extends FunSuite with MockitoSugar {
+
+  // Don't let the Scala compiler get confused about which `thenReturn`
+  // method we want to use.
+  private[this] def when[T](o: T) =
+    Mockito.when(o).asInstanceOf[{ def thenReturn[RT](s: RT): OngoingStubbing[RT] }]
 
   val mockCert = mock[X509Certificate]
   private case class Server(
     stack: Stack[ServiceFactory[Unit, Unit]] = StackServer.newStack,
-    params: Params = StackServer.defaultParams
-  ) extends StdStackServer[Unit, Unit, Server] {
+    params: Params = StackServer.defaultParams)
+      extends StdStackServer[Unit, Unit, Server] {
 
     protected type In = Unit
     protected type Out = Unit
@@ -28,10 +37,13 @@ class StdStackServerTest extends FunSuite with MockitoSugar {
         )(
           serveTransport: (Transport[Unit, Unit] { type Context <: Server.this.Context }) => Unit
         ): ListeningServer = {
-          import org.mockito.Mockito.{when}
           val trans = mock[Transport[Unit, Unit]]
-          when(trans.remoteAddress).thenReturn(mock[SocketAddress])
-          when(trans.peerCertificate).thenReturn(Some(mockCert))
+          val context = mock[TransportContext]
+          val sslSessionInfo = mock[SslSessionInfo]
+          when(sslSessionInfo.peerCertificates).thenReturn(Seq(mockCert))
+          when(context.sslSessionInfo).thenReturn(sslSessionInfo)
+          when(trans.context).thenReturn(context)
+          when(trans.context.remoteAddress).thenReturn(mock[SocketAddress])
           when(trans.onClose).thenReturn(Future.never)
           serveTransport(trans)
           NullServer

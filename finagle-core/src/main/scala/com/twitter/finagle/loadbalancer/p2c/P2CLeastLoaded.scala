@@ -1,12 +1,6 @@
 package com.twitter.finagle.loadbalancer.p2c
 
-import com.twitter.finagle.loadbalancer.{
-  Balancer,
-  EndpointFactory,
-  FailingEndpointFactory,
-  LeastLoaded,
-  Updating
-}
+import com.twitter.finagle.loadbalancer.{Balancer, EndpointFactory, LeastLoaded, Updating}
 import com.twitter.finagle.{NoBrokersAvailableException, ServiceFactoryProxy}
 import com.twitter.finagle.stats.{Counter, StatsReceiver}
 import com.twitter.finagle.util.Rng
@@ -37,8 +31,8 @@ private[loadbalancer] final class P2CLeastLoaded[Req, Rep](
   protected val maxEffort: Int,
   protected val rng: Rng,
   protected val statsReceiver: StatsReceiver,
-  protected val emptyException: NoBrokersAvailableException
-) extends Balancer[Req, Rep]
+  protected val emptyException: NoBrokersAvailableException)
+    extends Balancer[Req, Rep]
     with P2C[Req, Rep]
     with LeastLoaded[Req, Rep]
     with Updating[Req, Rep] {
@@ -49,5 +43,4 @@ private[loadbalancer] final class P2CLeastLoaded[Req, Rep](
       with LeastLoadedNode
 
   protected def newNode(factory: EndpointFactory[Req, Rep]): Node = Node(factory)
-  protected def failingNode(cause: Throwable): Node = Node(new FailingEndpointFactory(cause))
 }

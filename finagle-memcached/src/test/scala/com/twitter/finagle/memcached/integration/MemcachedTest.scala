@@ -1,6 +1,6 @@
 package com.twitter.finagle.memcached.integration
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.memcached.integration.external.TestMemcachedServer
 import com.twitter.finagle.memcached.protocol.ClientError
@@ -45,9 +45,7 @@ abstract class MemcachedTest
 
     if (serversOpt.forall(_.isDefined)) {
       servers = serversOpt.flatten
-      val dest = Name.bound(servers.map { s =>
-        Address(s.address)
-      }: _*)
+      val dest = Name.bound(servers.map { s => Address(s.address) }: _*)
       client = createClient(dest, clientName)
     }
   }
@@ -218,9 +216,7 @@ abstract class MemcachedTest
       val stats = awaitResult(connectedClient.stats())
       assert(stats != null)
       assert(stats.nonEmpty)
-      stats.foreach { stat =>
-        assert(stat.startsWith("STAT"))
-      }
+      stats.foreach { stat => assert(stat.startsWith("STAT")) }
       service.close()
     }
   }
@@ -276,9 +272,7 @@ abstract class MemcachedTest
     // set values
     awaitResult(
       Future.collect(
-        (0 to max).map { i =>
-          client.set(s"foo$i", Buf.Utf8(s"bar$i"))
-        }
+        (0 to max).map { i => client.set(s"foo$i", Buf.Utf8(s"bar$i")) }
       )
     )
 
@@ -310,7 +304,7 @@ abstract class MemcachedTest
         assert(clientSet.size == 1)
       case _ =>
       // the new client doesn't have a way to get to the equivalent functionality in
-      // KetamaPartitioningService.partitionByKey
+      // ConsistentHashPartitioningService.partitionByKey
     }
 
     // previously set values have cache misses
@@ -434,12 +428,8 @@ abstract class MemcachedTest
   def writeKeys(client: Client, numKeys: Int, keyLength: Int): Seq[String] = {
     // creating multiple random strings so that we get a uniform distribution of keys the
     // ketama ring and thus the Memcached shards
-    val keys = 1 to numKeys map { _ =>
-      randomString(keyLength)
-    }
-    val writes = keys map { key =>
-      client.set(key, Buf.Utf8(s"$key$ValueSuffix"))
-    }
+    val keys = 1 to numKeys map { _ => randomString(keyLength) }
+    val writes = keys map { key => client.set(key, Buf.Utf8(s"$key$ValueSuffix")) }
     awaitResult(Future.join(writes))
     keys
   }
@@ -463,9 +453,7 @@ abstract class MemcachedTest
 
     val newClient = client
     val oldClient = {
-      val dest = Name.bound(servers.map { s =>
-        Address(s.address)
-      }: _*)
+      val dest = Name.bound(servers.map { s => Address(s.address) }: _*)
       Memcached.client.newRichClient(dest, clientName)
     }
 
@@ -479,7 +467,6 @@ abstract class MemcachedTest
     assertRead(oldClient, keys2)
     assertRead(newClient, keys2)
   }
-
 
   test("partial success") {
     val keys = writeKeys(client, 1000, 20)
@@ -505,8 +492,9 @@ abstract class MemcachedTest
 
       // assert the failures are set to the exception received from the failing partition
       assert(getResult.failures.nonEmpty)
-      getResult.failures.foreach { case (_, e) =>
-        assert(e.isInstanceOf[Failure])
+      getResult.failures.foreach {
+        case (_, e) =>
+          assert(e.isInstanceOf[Failure])
       }
       // there should be no misses as all keys are known
       assert(getResult.misses.isEmpty)
@@ -516,9 +504,10 @@ abstract class MemcachedTest
       // the failed partition. The accuracy of the responses are tested in other tests anyways.
       assert(getResult.values.nonEmpty)
       assert(getResult.values.size < keys.size)
-      getResult.values.foreach { case (keyStr, valueBuf) =>
-        val Buf.Utf8(valStr) = valueBuf
-        assert(valStr == s"$keyStr$ValueSuffix")
+      getResult.values.foreach {
+        case (keyStr, valueBuf) =>
+          val Buf.Utf8(valStr) = valueBuf
+          assert(valStr == s"$keyStr$ValueSuffix")
       }
     }
   }

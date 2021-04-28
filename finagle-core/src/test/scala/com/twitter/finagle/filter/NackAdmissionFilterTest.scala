@@ -1,11 +1,12 @@
 package com.twitter.finagle.filter
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.{Failure, FailureFlags, Service, ServiceFactory, Stack, param}
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.service.FailedService
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
-import com.twitter.finagle.toggle.flag
-import com.twitter.finagle.util.{DefaultLogger, Ema, Rng}
+import com.twitter.finagle.tracing.Annotation.BinaryAnnotation
+import com.twitter.finagle.tracing.{BufferingTracer, Record, Trace}
+import com.twitter.finagle.util.{DefaultLogger, Ema, LossyEma, Rng}
+import com.twitter.finagle.{Failure, FailureFlags, Service, ServiceFactory, Stack, param}
 import com.twitter.util._
 import java.util.logging.Logger
 import org.scalatest.FunSuite
@@ -19,22 +20,17 @@ class NackAdmissionFilterTest extends FunSuite {
   class CustomRng(_doubleVal: Double) extends Rng {
     require(_doubleVal >= 0, "_doubleVal must lie in the interval [0, 1]")
     require(_doubleVal <= 1, "_doubleVal must lie in the interval [0, 1]")
-    var doubleVal = _doubleVal
-    def nextDouble() = doubleVal
-    def nextInt() = 1
-    def nextInt(n: Int) = 1
-    def nextLong(n: Long) = 1
-  }
-
-  class FakeTimer extends Ema.Monotime {
-    override def nanos(): Long = Time.now.inNanoseconds
+    var doubleVal: Double = _doubleVal
+    def nextDouble(): Double = doubleVal
+    def nextInt(): Int = 1
+    def nextInt(n: Int): Int = 1
+    def nextLong(n: Long): Long = 1
   }
 
   class Ctx(
     random: Rng = Rng(0x5eeded),
     _window: Duration = DefaultWindow,
-    _nackRateThreshold: Double = DefaultNackRateThreshold
-  ) {
+    _nackRateThreshold: Double = DefaultNackRateThreshold) {
     val log: Logger = DefaultLogger
     val timer: MockTimer = new MockTimer
     val statsReceiver: InMemoryStatsReceiver = new InMemoryStatsReceiver()
@@ -57,14 +53,12 @@ class NackAdmissionFilterTest extends FunSuite {
     // accept rate threshold.
     val extraProbability: Double = 0.01
 
-    val monoTimer = new FakeTimer()
-
     val filter: NackAdmissionFilter[Int, Int] = new NackAdmissionFilter[Int, Int](
       _window,
       _nackRateThreshold,
       random,
       statsReceiver,
-      monoTimer
+      Stopwatch.timeNanos
     )
 
     def successfulResponse(): Unit = {
@@ -84,9 +78,9 @@ class NackAdmissionFilterTest extends FunSuite {
 
     /**
      * Simulates not sending a request and therefore not receiving a
-     * response. This does not change [[filter]]'s [[acceptProbability]],
+     * response. This does not change [[filter]]'s acceptProbability,
      * but it does check that the filter drops the request and creates a
-     * [[NackAdmissionFilter.overloadFailure]]. If it passes, then we
+     * NackAdmissionFilter.overloadFailure. If it passes, then we
      * know that the nack rate is below the failure threshold.
      */
     def testDropsRequest(): Unit = {
@@ -96,7 +90,7 @@ class NackAdmissionFilterTest extends FunSuite {
     /**
      * Simulates sending a request and receiving a "nack" response, as if the
      * cluster is overloaded. This decreases [[filter]]'s
-     * [[acceptProbability]] and checks that the filter does not drop the
+     * acceptProbability and checks that the filter does not drop the
      * request. If it passes, then we know that the nack rate is above the
      * failure threshold.
      */
@@ -106,7 +100,7 @@ class NackAdmissionFilterTest extends FunSuite {
 
     /**
      * Simulates sending a request and receiving a "nack" response. We
-     * can use this to decrease [[filter]]'s [[acceptProbability]] without
+     * can use this to decrease [[filter]]'s acceptProbability without
      * testing for a particular failure message.
      */
     def nackWithoutTest(): Unit = {
@@ -115,7 +109,7 @@ class NackAdmissionFilterTest extends FunSuite {
 
     /**
      * Simulates sending a request and receiving a successful response. We can
-     * use this to increase [[filter]]'s [[acceptProbability]] while testing
+     * use this to increase [[filter]]'s acceptProbability while testing
      * that the response is a success.
      */
     def testGetSuccessfulResponse(): Unit = {
@@ -125,16 +119,11 @@ class NackAdmissionFilterTest extends FunSuite {
 
   def testEnabled(desc: String)(f: TimeControl => Unit): Unit = {
     test(desc) {
-      flag.overrides.let("com.twitter.finagle.core.UseClientNackAdmissionFilter", 1.0) {
-        Time.withCurrentTimeFrozen { ctl =>
-          f(ctl)
-        }
-      }
+      Time.withCurrentTimeFrozen { ctl => f(ctl) }
     }
   }
 
-  testEnabled("Can be disabled by configuration param") { ctl =>
-
+  testEnabled("Can be disabled by configuration param") { _ =>
     val nackSvc = ServiceFactory.const[Int, Int](new FailedService(Failure.rejected("goaway")))
     val stats = new InMemoryStatsReceiver
 
@@ -157,7 +146,7 @@ class NackAdmissionFilterTest extends FunSuite {
 
     ctl.advance(10.milliseconds)
     // Decrease Ema to be below 1
-    for (_ <- 1 to 2*rpsThreshold) {
+    for (_ <- 1 to 2 * rpsThreshold) {
       testGetNack()
       // Need to update timestamp as well
       ctl.advance(10.milliseconds)
@@ -167,7 +156,7 @@ class NackAdmissionFilterTest extends FunSuite {
     ctl.advance(10.milliseconds)
 
     // Increment Ema
-      testGetSuccessfulResponse()
+    testGetSuccessfulResponse()
     assert(filter.emaValue > firstEmaValue)
   }
 
@@ -175,7 +164,7 @@ class NackAdmissionFilterTest extends FunSuite {
     val ctx = new Ctx
     import ctx._
     ctl.advance(10.milliseconds)
-    for (_ <- 1 to 2*rpsThreshold) {
+    for (_ <- 1 to 2 * rpsThreshold) {
       testGetNack()
       ctl.advance(10.milliseconds)
     }
@@ -199,7 +188,7 @@ class NackAdmissionFilterTest extends FunSuite {
     }
 
     val successRate = filter.emaValue
-    val multiplier = 1D / DefaultAcceptRateThreshold
+    val multiplier = 1d / DefaultAcceptRateThreshold
 
     assert(0 < successRate && successRate < 1)
     assert(1 <= multiplier * successRate)
@@ -221,37 +210,35 @@ class NackAdmissionFilterTest extends FunSuite {
     }
 
     val successRate = filter.emaValue
-    val multiplier = 1D / DefaultAcceptRateThreshold
+    val multiplier = 1d / DefaultAcceptRateThreshold
 
     assert(0 < successRate && successRate < 1)
     assert(1 > multiplier * successRate)
     testDropsRequest()
   }
 
-  testEnabled("Does not drop requests when toggled off.") { ctl =>
+  testEnabled("annotates dropped requests") { ctl =>
     val lowRng: CustomRng = new CustomRng(0)
     val ctx = new Ctx(lowRng)
     import ctx._
+    val tracer = new BufferingTracer()
+    Trace.letTracer(tracer) {
 
-    // Make the server nack requests so that the EMA drops below the accept
-    // rate threshold
-    while (filter.emaValue > DefaultAcceptRateThreshold) {
-      ctl.advance(10.milliseconds)
+      while (filter.emaValue > DefaultAcceptRateThreshold) {
+        ctl.advance(10.milliseconds)
+        nackWithoutTest()
+      }
+
       nackWithoutTest()
-    }
-
-    val successRate = filter.emaValue
-    val multiplier = 1D / DefaultAcceptRateThreshold
-
-    assert(0 < successRate && successRate < 1)
-    assert(1 > multiplier * successRate)
-
-    // Make sure it does drop a request before it's toggled
-    testDropsRequest()
-
-    // Now toggle off and make sure it goes through.
-    flag.overrides.let("com.twitter.finagle.core.UseClientNackAdmissionFilter", 0.0) {
-      testGetSuccessfulResponse()
+      val expected = Seq(
+        (
+          "clnt/NackAdmissionFilter_rejected",
+          "probabilistically dropped because " +
+            "nackRate 0.5000930677240232 over window 3.seconds exceeds nackRateThreshold 0.5"))
+      val actual = tracer.iterator.toList collect {
+        case Record(_, _, BinaryAnnotation(k, v), _) => k -> v
+      }
+      assert(expected == actual)
     }
   }
 
@@ -271,7 +258,7 @@ class NackAdmissionFilterTest extends FunSuite {
     }
 
     val successRate = filter.emaValue
-    val multiplier = 1D / DefaultAcceptRateThreshold
+    val multiplier = 1d / DefaultAcceptRateThreshold
 
     assert(0 < successRate && successRate < 1)
     assert(1 > multiplier * successRate)
@@ -296,14 +283,14 @@ class NackAdmissionFilterTest extends FunSuite {
 
   testEnabled("Respects MaxDropProbability, and recovers.") { ctl =>
     val ctx = new Ctx(Rng.threadLocal)
-    import ctx._
     import NackAdmissionFilter.MaxDropProbability
+    import ctx._
 
     val NumRequests = 1000
 
     // Nack until EMA is so low that it would not be likely for any requests to
     // get through without the MaxDropProbability.
-    while (filter.emaValue > 10E-10) {
+    while (filter.emaValue > 10e-10) {
       ctl.advance(1.second)
       nackWithoutTest()
     }
@@ -490,7 +477,7 @@ class NackAdmissionFilterTest extends FunSuite {
 
   testEnabled("can be triggered by failure-flag encoded nacks") { ctl =>
     class Reject extends FailureFlags[Reject] {
-      val flags = FailureFlags.Rejected
+      val flags: Long = FailureFlags.Rejected
 
       protected def copyWithFlags(flags: Long): Reject = ???
     }
@@ -500,7 +487,7 @@ class NackAdmissionFilterTest extends FunSuite {
       DefaultNackRateThreshold,
       Rng(0x5eeded),
       NullStatsReceiver,
-      new FakeTimer
+      Stopwatch.timeNanos
     )
 
     val filtered = nack.andThen(Service.mk[Int, Int](_ => Future.exception(new Reject)))
@@ -514,6 +501,31 @@ class NackAdmissionFilterTest extends FunSuite {
     res.poll.get.throwable match {
       case f: FailureFlags[_] => assert(f.isFlagged(FailureFlags.NonRetryable))
       case other => fail(s"expected a nack, got $other")
+    }
+  }
+
+  test("LossyEma behaves the same as Ema") {
+    Time.withTimeAt(Time.Zero) { tc =>
+      val window = 2.minutes.inNanoseconds
+      val now = Stopwatch.timeNanos
+      val lossy = new LossyEma(window, now, 1.0)
+      val ema = new Ema(window)
+      ema.update(now(), 1.0)
+
+      // loop, advancing the clock 10 ms per cycle to "poorly" imitate 100 rps.
+      // doing it for 100 minutes.
+      val delta = 10.milliseconds
+      val rng = Rng(101010101L)
+      val successRate = 0.9995
+      0.until(100).foreach { min =>
+        0.until(100).foreach { req =>
+          tc.advance(delta)
+          val input = if (rng.nextDouble() < successRate) 1.0 else 0.0
+          lossy.update(input)
+          ema.update(now(), input)
+          assert(lossy.last == ema.last, s"minute=$min request=$req")
+        }
+      }
     }
   }
 }

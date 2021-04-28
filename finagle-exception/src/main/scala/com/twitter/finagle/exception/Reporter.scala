@@ -1,7 +1,7 @@
 package com.twitter.finagle.exception
 
 import com.twitter.app.GlobalFlag
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Thrift
 import com.twitter.finagle.builder.ClientBuilder
 import com.twitter.finagle.exception.thriftscala.{
@@ -101,8 +101,8 @@ sealed case class Reporter(
   serviceName: String,
   statsReceiver: StatsReceiver = NullStatsReceiver,
   private val sourceAddress: Option[String] = Some(InetAddress.getLoopbackAddress.getHostName),
-  private val clientAddress: Option[String] = None
-) extends Monitor {
+  private val clientAddress: Option[String] = None)
+    extends Monitor {
 
   private[this] val okCounter = statsReceiver.counter("report_exception_ok")
   private[this] val tryLaterCounter = statsReceiver.counter("report_exception_ok")
@@ -135,12 +135,8 @@ sealed case class Reporter(
   def createEntry(e: Throwable): LogEntry = {
     var se = new ServiceException(serviceName, e, Time.now, Trace.id.traceId.toLong)
 
-    sourceAddress.foreach { sa =>
-      se = se.withSource(sa)
-    }
-    clientAddress.foreach { ca =>
-      se = se.withClient(ca)
-    }
+    sourceAddress.foreach { sa => se = se.withSource(sa) }
+    clientAddress.foreach { ca => se = se.withClient(ca) }
 
     LogEntry(Reporter.scribeCategory, GZIPStringEncoder.encodeString(se.toJson))
   }

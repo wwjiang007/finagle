@@ -1,10 +1,8 @@
 package com.twitter.finagle
 
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.{AssertionsForJUnit, JUnitRunner}
+import org.scalatestplus.junit.AssertionsForJUnit
 
-@RunWith(classOf[JUnitRunner])
 class NameTreeParsersTest extends FunSuite with AssertionsForJUnit {
   test("parsePath") {
     assert(NameTreeParsers.parsePath("/") == Path.empty)
@@ -21,10 +19,14 @@ class NameTreeParsersTest extends FunSuite with AssertionsForJUnit {
 
   test("error messages") {
     assert(
-      intercept[IllegalArgumentException] { NameTreeParsers.parsePath("/foo^bar") }.getMessage contains "'/foo[^]bar'"
+      intercept[IllegalArgumentException] {
+        NameTreeParsers.parsePath("/foo^bar")
+      }.getMessage contains "'/foo[^]bar'"
     )
     assert(
-      intercept[IllegalArgumentException] { NameTreeParsers.parsePath("/foo/bar/") }.getMessage contains "'/foo/bar/[]'"
+      intercept[IllegalArgumentException] {
+        NameTreeParsers.parsePath("/foo/bar/")
+      }.getMessage contains "'/foo/bar/[]'"
     )
   }
 
@@ -65,12 +67,12 @@ class NameTreeParsersTest extends FunSuite with AssertionsForJUnit {
       NameTreeParsers.parseNameTree("1 * /foo & 2 * /bar | .5 * /bar & .5 * /baz") ==
         NameTree.Alt(
           NameTree.Union(
-            NameTree.Weighted(1D, NameTree.Leaf(Path.Utf8("foo"))),
-            NameTree.Weighted(2D, NameTree.Leaf(Path.Utf8("bar")))
+            NameTree.Weighted(1d, NameTree.Leaf(Path.Utf8("foo"))),
+            NameTree.Weighted(2d, NameTree.Leaf(Path.Utf8("bar")))
           ),
           NameTree.Union(
-            NameTree.Weighted(0.5D, NameTree.Leaf(Path.Utf8("bar"))),
-            NameTree.Weighted(0.5D, NameTree.Leaf(Path.Utf8("baz")))
+            NameTree.Weighted(0.5d, NameTree.Leaf(Path.Utf8("bar"))),
+            NameTree.Weighted(0.5d, NameTree.Leaf(Path.Utf8("baz")))
           )
         )
     )

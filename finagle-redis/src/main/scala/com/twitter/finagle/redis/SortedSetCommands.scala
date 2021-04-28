@@ -15,12 +15,14 @@ private[redis] trait SortedSetCommands { self: BaseClient =>
       case MBulkReply(messages) => withScoresHelper(withScores)(messages)
       case EmptyMBulkReply => withScoresHelper(withScores)(Nil)
     }
-    parse andThen Future.value
+    parse.andThen(Future.value(_))
   }
 
   private[this] def withScoresHelper(
     withScores: JBoolean
-  )(messages: List[Reply]): Either[ZRangeResults, Seq[Buf]] = {
+  )(
+    messages: List[Reply]
+  ): Either[ZRangeResults, Seq[Buf]] = {
     val chanBufs = ReplyFormat.toBuf(messages)
     if (withScores)
       Left(ZRangeResults(returnPairs(chanBufs)))
@@ -45,9 +47,7 @@ private[redis] trait SortedSetCommands { self: BaseClient =>
    * @return The number of elements added to sorted set.
    */
   def zAddMulti(key: Buf, members: Seq[(JDouble, Buf)]): Future[JLong] = {
-    doRequest(ZAdd(key, members.map { m =>
-      ZMember(m._1, m._2)
-    })) {
+    doRequest(ZAdd(key, members.map { m => ZMember(m._1, m._2) })) {
       case IntegerReply(n) => Future.value(n)
     }
   }
@@ -207,14 +207,27 @@ private[redis] trait SortedSetCommands { self: BaseClient =>
   /**
    * Returns keys in given set `key`, starting at `cursor`.
    */
-  def zScan(
-    key: Buf,
-    cursor: JLong,
-    count: Option[JLong],
-    pattern: Option[Buf]
-  ): Future[Seq[Buf]] =
+  def zScan(key: Buf, cursor: JLong, count: Option[JLong], pattern: Option[Buf]): Future[Seq[Buf]] =
     doRequest(ZScan(key, cursor, count, pattern)) {
       case MBulkReply(messages) => Future.value(ReplyFormat.toBuf(messages))
       case EmptyMBulkReply => Future.Nil
+    }
+
+  /**
+   * Removes and returns up to `count` members with the lowest scores
+   * in the sorted set stored at `key`.
+   */
+  def zPopMin(key: Buf, count: Option[JLong]): Future[Either[ZRangeResults, Seq[Buf]]] =
+    doRequest(ZPopMin(key, count)) {
+      parseMBulkReply(JBoolean.TRUE)
+    }
+
+  /**
+   * Removes and returns up to `count` members with the highest scores
+   * in the sorted set stored at `key`.
+   */
+  def zPopMax(key: Buf, count: Option[JLong]): Future[Either[ZRangeResults, Seq[Buf]]] =
+    doRequest(ZPopMax(key, count)) {
+      parseMBulkReply(JBoolean.TRUE)
     }
 }

@@ -6,19 +6,19 @@ import com.twitter.io.Buf
 /**
  * Defines a row where the data is presumed to be encoded with the mysql
  * text-based protocol.
- * [[http://dev.mysql.com/doc/internals/en/com-query-response.html#packet-ProtocolText::ResultsetRow]]
+ * [[https://dev.mysql.com/doc/internals/en/com-query-response.html#packet-ProtocolText::ResultsetRow]]
  */
 private class StringEncodedRow(
   rawRow: Buf,
   val fields: IndexedSeq[Field],
   indexMap: Map[String, Int],
-  ignoreUnsigned: Boolean
-) extends Row {
+  ignoreUnsigned: Boolean)
+    extends Row {
 
   /**
    * Convert the string representation of each value
    * into an appropriate Value object.
-   * [[http://dev.mysql.com/doc/internals/en/com-query-response.html#packet-ProtocolText::ResultsetRow]]
+   * [[https://dev.mysql.com/doc/internals/en/com-query-response.html#packet-ProtocolText::ResultsetRow]]
    */
   lazy val values: IndexedSeq[Value] = {
     val reader = MysqlBuf.reader(rawRow)
@@ -29,7 +29,7 @@ private class StringEncodedRow(
         NullValue
       else if (bytes.length == 0)
         EmptyValue
-      else if (!Charset.isCompatible(charset))
+      else if (!MysqlCharset.isCompatible(charset))
         RawValue(field.fieldType, field.charset, isBinary = false, bytes)
       else {
         field.fieldType match {
@@ -59,7 +59,7 @@ private class StringEncodedRow(
           case Type.Year =>
             ShortValue(bytesToLong(bytes).toShort)
           case Type.VarChar | Type.String | Type.VarString | Type.TinyBlob | Type.Blob |
-               Type.MediumBlob if !Charset.isBinary(charset) =>
+              Type.MediumBlob if !MysqlCharset.isBinary(charset) =>
             // Nonbinary strings as stored in the CHAR, VARCHAR, and TEXT data types
             StringValue(bytesToString(bytes, charset))
           case Type.LongBlob =>
@@ -104,6 +104,6 @@ private class StringEncodedRow(
   }
 
   private[this] def bytesToString(bytes: Array[Byte], charset: Short): String =
-    new String(bytes, Charset(charset))
+    new String(bytes, MysqlCharset(charset))
 
 }

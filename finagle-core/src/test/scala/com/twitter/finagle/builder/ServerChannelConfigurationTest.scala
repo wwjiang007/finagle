@@ -1,6 +1,6 @@
 package com.twitter.finagle.builder
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.ChannelClosedException
 import com.twitter.finagle.Service
 import com.twitter.finagle.client.utils.StringClient
@@ -11,9 +11,7 @@ import org.scalatest.FunSuite
 
 class ServerChannelConfigurationTest extends FunSuite {
 
-  val identityService = Service.mk[String, String] { req =>
-    Future.value(req)
-  }
+  val identityService = Service.mk[String, String] { req => Future.value(req) }
 
   test("close connection after max life time duration") {
     val lifeTime = 100.millis

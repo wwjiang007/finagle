@@ -31,9 +31,10 @@ class ThriftMuxResponseClassifierTest extends FunSuite {
     else Return(asString)
   }
 
-  private def getRep(in: String): Try[_] = if (in.startsWith("fail")){
-    Throw(new InvalidQueryException(in.length))
-  }  else Return(in)
+  private def getRep(in: String): Try[_] =
+    if (in.startsWith("fail")) {
+      Throw(new InvalidQueryException(in.length))
+    } else Return(in)
 
   test("usingDeserializeCtx basics for ClientDeserializeCtx") {
     def testApply(in: String, expectedClass: ResponseClass): Unit = {
@@ -95,9 +96,7 @@ class ThriftMuxResponseClassifierTest extends FunSuite {
 
   test("usingDeserializeCtx ignores exceptions during deserialization") {
     val toThrow = new RuntimeException("welp")
-    val throwingDeser = { bytes: Array[Byte] =>
-      throw toThrow
-    }
+    val throwingDeser = { bytes: Array[Byte] => throw toThrow }
 
     val input = "throw"
     val ctx = new ClientDeserializeCtx(TestService.Query.Args(input), throwingDeser)

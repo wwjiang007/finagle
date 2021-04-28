@@ -1,6 +1,6 @@
 package com.twitter.finagle
 
-import com.twitter.finagle.naming.NameInterpreter
+import com.twitter.finagle.naming.{NameInterpreter, NamerExceededMaxDepthException, namerMaxDepth}
 import com.twitter.util._
 import scala.util.control.NonFatal
 
@@ -72,8 +72,8 @@ object Namer {
 
     private[this] object InetPath {
 
-      private[this] def resolve(host: String, port: Int): Var[Addr] =
-        Resolver.eval(s"inet!$host:$port") match {
+      private[this] def resolve(scheme: String, host: String, port: Int): Var[Addr] =
+        Resolver.eval(s"$scheme!$host:$port") match {
           case Name.Bound(va) => va
           case n: Name.Path =>
             Var.value(
@@ -82,11 +82,16 @@ object Namer {
         }
 
       def unapply(path: Path): Option[(Var[Addr], Path)] = path match {
-        case Path.Utf8("$", "inet", host, IntegerString(port), residual @ _*) =>
-          Some((resolve(host, port), Path.Utf8(residual: _*)))
-        case Path.Utf8("$", "inet", IntegerString(port), residual @ _*) =>
+        case Path.Utf8(
+              "$",
+              scheme @ ("inet" | "fixedinet"),
+              host,
+              IntegerString(port),
+              residual @ _*) =>
+          Some((resolve(scheme, host, port), Path.Utf8(residual: _*)))
+        case Path.Utf8("$", scheme @ ("inet" | "fixedinet"), IntegerString(port), residual @ _*) =>
           // no host provided means localhost
-          Some((resolve("", port), Path.Utf8(residual: _*)))
+          Some((resolve(scheme, "", port), Path.Utf8(residual: _*)))
         case _ => None
       }
     }
@@ -163,8 +168,6 @@ object Namer {
       Try(s.toDouble).toOption
   }
 
-  private val MaxDepth = 100
-
   /**
    * Bind the given tree by recursively following paths and looking them
    * up with the provided `lookup` function. A recursion depth of up to
@@ -174,9 +177,7 @@ object Namer {
     lookup: Path => Activity[NameTree[Name]],
     tree: NameTree[Path]
   ): Activity[NameTree[Name.Bound]] =
-    bind(lookup, 0, None)(tree map { path =>
-      Name.Path(path)
-    })
+    bind(lookup, 0, None)(tree map { path => Name.Path(path) })
 
   private[this] def bindUnion(
     lookup: Path => Activity[NameTree[Name]],
@@ -213,11 +214,17 @@ object Namer {
   }
 
   // values of the returned activity are simplified and contain no Alt nodes
-  private def bind(lookup: Path => Activity[NameTree[Name]], depth: Int, weight: Option[Double])(
+  private def bind(
+    lookup: Path => Activity[NameTree[Name]],
+    depth: Int,
+    weight: Option[Double]
+  )(
     tree: NameTree[Name]
   ): Activity[NameTree[Name.Bound]] =
-    if (depth > MaxDepth)
-      Activity.exception(new IllegalArgumentException("Max recursion level reached."))
+    if (depth > namerMaxDepth())
+      Activity.exception(
+        new NamerExceededMaxDepthException(
+          s"Max recursion level: ${namerMaxDepth()} reached in Namer lookup"))
     else
       tree match {
         case Leaf(Name.Path(path)) => lookup(path).flatMap(bind(lookup, depth + 1, weight))
@@ -281,7 +288,7 @@ trait ServiceNamer[Req, Rep] extends Namer {
       Activity.value(NameTree.Neg)
     case Some(svc) =>
       val factory = ServiceFactory(() => Future.value(svc))
-      val addr = Addr.Bound(exp.Address(factory))
+      val addr = Addr.Bound(Address(factory))
       val name = Name.Bound(Var.value(addr), factory, path)
       Activity.value(NameTree.Leaf(name))
   }

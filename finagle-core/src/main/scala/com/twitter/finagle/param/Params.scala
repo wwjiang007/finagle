@@ -4,6 +4,8 @@ import com.twitter.finagle.service.StatsFilter
 import com.twitter.finagle.util.DefaultTimer
 import com.twitter.finagle.{Stack, stats, tracing, util}
 import com.twitter.util.{JavaTimer, NullMonitor}
+import scala.annotation.varargs
+import scala.language.reflectiveCalls
 
 /**
  * A class eligible for configuring a label used to identify finagle
@@ -17,6 +19,58 @@ object Label {
   private[finagle] val Default: String = ""
 
   implicit val param: Stack.Param[Label] = Stack.Param(Label(Default))
+}
+
+/**
+ * Tags are a more powerful Label.
+ *
+ * Tags associate Finagle clients and servers with a set of keywords. Labels
+ * are simply Tags with a single keyword.
+ *
+ * Tags provide a general purpose configuration mechanism for functionality
+ * that is not yet known. This is powerful, but also easily misused. As such,
+ * be conservative in using them.
+ *
+ * Frameworks that create services for each endpoint should tag them with
+ * endpoint metadata, e.g.,
+ *
+ * {{{
+ * val showPost = Http.server.withLabels("GET", "/posts/show")
+ * val createPost = Http.server.withLabels("POST", "PUT", "/posts/create")
+ * }}}
+ *
+ * Note: Tags can't be used in place of Label (at least not quite yet). Label
+ * will appear in metrics, but Tags do not.
+ */
+private[twitter] sealed abstract class Tags {
+  import Tags._
+
+  def mk(): (Tags, Stack.Param[Tags]) =
+    (this, Tags.param)
+
+  /**
+   * True, if Tags contains any of keyword.
+   */
+  @varargs
+  def matchAny(keyword: String*): Boolean = this match {
+    case tags @ KeySet(_) => tags.keys.intersect(keyword.toSet).nonEmpty
+  }
+
+  /**
+   * True, if Tags contains all these keywords.
+   */
+  @varargs
+  def matchAll(keywords: String*): Boolean = this match {
+    case tags @ KeySet(_) => keywords.toSet.subsetOf(tags.keys)
+  }
+}
+private[twitter] object Tags {
+  implicit val param = Stack.Param(Tags())
+
+  private case class KeySet(keys: Set[String]) extends Tags
+
+  @varargs
+  def apply(keys: String*): Tags = KeySet(keys.toSet)
 }
 
 /**
@@ -71,29 +125,33 @@ case class HighResTimer(timer: com.twitter.util.Timer) {
 object HighResTimer {
 
   /**
+   * The underlying default Timer used for configuration
+   * Default `stop` behaviour is ignored in order to not be accidentally stopped
+   */
+  private[this] val underlying = new JavaTimer(true, Some("HighResTimer")) {
+    override def stop(): Unit = ()
+    def stopTimer(): Unit = super.stop()
+  }
+
+  /**
    * The default Timer used for configuration.
    *
    * It is a shared resource and as such, `stop` is ignored.
    */
-  val Default: com.twitter.util.Timer =
-    new JavaTimer(true, Some("HighResTimer")) {
-      override def stop(): Unit = ()
-    }
+  val Default: com.twitter.util.Timer = underlying
+
+  /**
+   * Stop default HighResTimer
+   */
+  def stop(): Unit = {
+    com.twitter.logging.Logger
+      .get().warning("Stopping the default Finagle HighResTimer. When timer is stopped, " +
+        "the behaviors of Finagle client and server are undefined.")
+    underlying.stopTimer()
+  }
 
   implicit val param: Stack.Param[HighResTimer] =
     Stack.Param(HighResTimer(Default))
-}
-
-/**
- * A class eligible for configuring a [[java.util.logging.Logger]]
- * used throughout finagle clients and servers.
- */
-case class Logger(log: java.util.logging.Logger) {
-  def mk(): (Logger, Stack.Param[Logger]) =
-    (this, Logger.param)
-}
-object Logger {
-  implicit val param: Stack.Param[Logger] = Stack.Param(Logger(util.DefaultLogger))
 }
 
 /**

@@ -1,6 +1,6 @@
 package com.twitter.finagle.server
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.util.{Await, Future, FuturePool, MockTimer, Time, TimeControl}
 import java.util.concurrent.{CountDownLatch, TimeUnit}
@@ -69,9 +69,7 @@ class ThreadUsageTest extends FunSuite with BeforeAndAfter {
           if (!latch.await(5, TimeUnit.SECONDS)) {
             Future.exception(new Exception("never latched"))
           } else {
-            0.until(count).foreach { _ =>
-              usage.increment()
-            }
+            0.until(count).foreach { _ => usage.increment() }
             Future.Done
           }
         }

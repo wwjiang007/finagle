@@ -1,18 +1,24 @@
 package com.twitter.finagle
 
 import com.twitter.finagle.client.{DefaultPool, StackClient, StdStackClient, Transporter}
-import com.twitter.finagle.decoder.LengthFieldFramer
 import com.twitter.finagle.mysql._
+import com.twitter.finagle.mysql.param._
 import com.twitter.finagle.mysql.transport.Packet
-import com.twitter.finagle.netty4.Netty4Transporter
-import com.twitter.finagle.param.{ExceptionStatsHandler => _, Monitor => _, ResponseClassifier => _, Tracer => _, _}
+import com.twitter.finagle.param.{
+  Monitor => ParamMonitor,
+  ExceptionStatsHandler => _,
+  ResponseClassifier => _,
+  Tracer => _,
+  _
+}
 import com.twitter.finagle.service.{ResponseClassifier, RetryBudget}
+import com.twitter.finagle.ssl.OpportunisticTls
 import com.twitter.finagle.stats.{ExceptionStatsHandler, NullStatsReceiver, StatsReceiver}
-import com.twitter.finagle.tracing._
+import com.twitter.finagle.tracing.Tracer
 import com.twitter.finagle.transport.{Transport, TransportContext}
-import com.twitter.io.Buf
-import com.twitter.util.{Duration, Future, Monitor}
+import com.twitter.util.{Duration, FuturePool, Monitor}
 import java.net.SocketAddress
+import java.util.concurrent.ExecutorService
 
 /**
  * Supplements a [[com.twitter.finagle.Client]] with convenient
@@ -32,10 +38,7 @@ trait MysqlRichClient { self: com.twitter.finagle.Client[Request, Result] =>
    * destination described by `dest` with the assigned
    * `label`. The `label` is used to scope client stats.
    */
-  def newRichClient(
-    dest: Name,
-    label: String
-  ): mysql.Client with mysql.Transactions =
+  def newRichClient(dest: Name, label: String): mysql.Client with mysql.Transactions =
     mysql.Client(newClient(dest, label), richClientStatsReceiver, supportUnsigned)
 
   /**
@@ -50,42 +53,6 @@ trait MysqlRichClient { self: com.twitter.finagle.Client[Request, Result] =>
     mysql.Client(newClient(dest), richClientStatsReceiver, supportUnsigned)
 }
 
-object MySqlClientTracingFilter {
-  object Stackable extends Stack.Module1[param.Label, ServiceFactory[Request, Result]] {
-    val role: Stack.Role = ClientTracingFilter.role
-    val description: String = "Add MySql client specific annotations to the trace"
-    def make(
-      _label: param.Label,
-      next: ServiceFactory[Request, Result]
-    ): ServiceFactory[Request, Result] = {
-      // TODO(jeff): should be able to get this directly from ClientTracingFilter
-      val annotations = new AnnotatingTracingFilter[Request, Result](
-        _label.label,
-        Annotation.ClientSend,
-        Annotation.ClientRecv
-      )
-      annotations.andThen(TracingFilter).andThen(next)
-    }
-  }
-
-  object TracingFilter extends SimpleFilter[Request, Result] {
-    def apply(request: Request, service: Service[Request, Result]): Future[Result] = {
-      val trace = Trace()
-      if (trace.isActivelyTracing) {
-        request match {
-          case QueryRequest(sqlStatement) => trace.recordBinary("mysql.query", sqlStatement)
-          case PrepareRequest(sqlStatement) => trace.recordBinary("mysql.prepare", sqlStatement)
-          // TODO: save the prepared statement and put it in the executed request trace
-          case ExecuteRequest(id, _, _, _) => trace.recordBinary("mysql.execute", id)
-          case _ => trace.record("mysql." + request.getClass.getSimpleName.replace("$", ""))
-        }
-      }
-
-      service(request)
-    }
-  }
-}
-
 /**
  * @example {{{
  * val client = Mysql.client
@@ -96,85 +63,9 @@ object MySqlClientTracingFilter {
  */
 object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichClient {
 
-  protected val supportUnsigned: Boolean = param.UnsignedColumns.param.default.supported
-
-  object param {
-
-    /**
-     * A class eligible for configuring the maximum number of prepare
-     * statements.  After creating `num` prepare statements, we'll start purging
-     * old ones.
-     */
-    case class MaxConcurrentPrepareStatements(num: Int) {
-      assert(num <= Int.MaxValue, s"$num is not <= Int.MaxValue bytes")
-      assert(num > 0, s"$num must be positive")
-
-      def mk(): (MaxConcurrentPrepareStatements, Stack.Param[MaxConcurrentPrepareStatements]) =
-        (this, MaxConcurrentPrepareStatements.param)
-    }
-
-    object MaxConcurrentPrepareStatements {
-      implicit val param: Stack.Param[MaxConcurrentPrepareStatements] =
-        Stack.Param(MaxConcurrentPrepareStatements(20))
-    }
-
-    /**
-     * Configure whether to support unsigned integer fields when returning elements of a [[Row]].
-     * If not supported, unsigned fields will be decoded as if they were signed, potentially
-     * resulting in corruption in the case of overflowing the signed representation. Because
-     * Java doesn't support unsigned integer types widening may be necessary to support the
-     * unsigned variants. For example, an unsigned Int is represented as a Long.
-     *
-     * `Value` representations of unsigned columns which are widened when enabled:
-     * `ByteValue` -> `ShortValue``
-     * `ShortValue` -> IntValue`
-     * `LongValue` -> `LongLongValue`
-     * `LongLongValue` -> `BigIntValue`
-     */
-    case class UnsignedColumns(supported: Boolean)
-    object UnsignedColumns {
-      implicit val param: Stack.Param[UnsignedColumns] = Stack.Param(UnsignedColumns(false))
-    }
-  }
+  protected val supportUnsigned: Boolean = UnsignedColumns.param.default.supported
 
   object Client {
-
-    private object PoisonConnection {
-      val Role: Stack.Role = Stack.Role("PoisonConnection")
-
-      def module: Stackable[ServiceFactory[Request, Result]] =
-        new Stack.Module0[ServiceFactory[Request, Result]] {
-          def role: Stack.Role = Role
-
-          def description: String = "Allows the connection to be poisoned and recycled"
-
-          def make(next: ServiceFactory[Request, Result]): ServiceFactory[Request, Result] =
-            new PoisonConnection(next)
-        }
-    }
-
-    /**
-     * This is a workaround for connection pooling that allows us to close a connection.
-     */
-    private class PoisonConnection(underlying: ServiceFactory[Request, Result])
-      extends ServiceFactoryProxy(underlying) {
-
-      override def apply(conn: ClientConnection): Future[Service[Request, Result]] = {
-        super.apply(conn).map { svc =>
-          new ServiceProxy[Request, Result](svc) {
-            override def apply(request: Request): Future[Result] = {
-              if (request eq PoisonConnectionRequest) {
-                underlying.close().before {
-                  Future.value(PoisonedConnectionResult)
-                }
-              } else {
-                super.apply(request)
-              }
-            }
-          }
-        }
-      }
-    }
 
     private val params: Stack.Params = StackClient.defaultParams +
       ProtocolLibrary("mysql") +
@@ -184,13 +75,14 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
         bufferSize = 0,
         idleTime = Duration.Top,
         maxWaiters = Int.MaxValue
-      )
+      ) +
+      ParamMonitor(ServerErrorMonitor(Seq()))
 
     private val stack: Stack[ServiceFactory[Request, Result]] = StackClient.newStack
-      .replace(ClientTracingFilter.role, MySqlClientTracingFilter.Stackable)
-      // Note: there is a stack overflow in insertAfter using CanStackFrom, thus the module.
-      .insertAfter(DefaultPool.Role, PoisonConnection.module)
       .prepend(RollbackFactory.module)
+      .replace(StackClient.Role.protoTracing, MysqlTracingFilter.module)
+      .insertAfter(DefaultPool.Role, PoisonConnection.module)
+      .insertAfter(StackClient.Role.prepConn, ConnectionInitSql.module)
   }
 
   /**
@@ -222,53 +114,36 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
    */
   case class Client(
     stack: Stack[ServiceFactory[Request, Result]] = Client.stack,
-    params: Stack.Params = Client.params
-  ) extends StdStackClient[Request, Result, Client]
+    params: Stack.Params = Client.params)
+      extends StdStackClient[Request, Result, Client]
       with WithSessionPool[Client]
       with WithDefaultLoadBalancer[Client]
       with MysqlRichClient {
 
-    protected val supportUnsigned: Boolean = params[param.UnsignedColumns].supported
+    protected val supportUnsigned: Boolean = params[UnsignedColumns].supported
 
     protected def copy1(
       stack: Stack[ServiceFactory[Request, Result]] = this.stack,
       params: Stack.Params = this.params
     ): Client = copy(stack, params)
 
-    protected type In = Buf
-    protected type Out = Buf
+    protected type In = Packet
+    protected type Out = Packet
     protected type Context = TransportContext
 
-    protected def newTransporter(addr: SocketAddress): Transporter[In, Out, Context] = {
-      val framerFactory = () => {
-        new LengthFieldFramer(
-          lengthFieldBegin = 0,
-          lengthFieldLength = 3,
-          lengthAdjust = Packet.HeaderSize, // Packet size field doesn't include the header size.
-          maxFrameLength = Packet.HeaderSize + Packet.MaxBodySize,
-          bigEndian = false
-        )
-      }
-      Netty4Transporter.framedBuf(Some(framerFactory), addr, params)
-    }
+    protected def newTransporter(addr: SocketAddress): Transporter[In, Out, Context] =
+      new MysqlTransporter(addr, params)
 
-    protected def newDispatcher(transport: Transport[Buf, Buf] {
-      type Context <: Client.this.Context
-    }): Service[Request, Result] = {
-      val param.MaxConcurrentPrepareStatements(num) = params[param.MaxConcurrentPrepareStatements]
-      mysql.ClientDispatcher(
-        transport.map(_.toBuf, Packet.fromBuf),
-        Handshake(params),
-        num,
-        supportUnsigned
-      )
-    }
+    protected def newDispatcher(
+      transport: Transport[In, Out] { type Context <: Client.this.Context }
+    ): Service[Request, Result] =
+      mysql.ClientDispatcher(transport, params)
 
     /**
      * The maximum number of concurrent prepare statements.
      */
     def withMaxConcurrentPrepareStatements(num: Int): Client =
-      configured(param.MaxConcurrentPrepareStatements(num))
+      configured(MaxConcurrentPrepareStatements(num))
 
     /**
      * The credentials to use when authenticating a new session.
@@ -276,29 +151,53 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
      * @param p if `null`, no password is used.
      */
     def withCredentials(u: String, p: String): Client =
-      configured(Handshake.Credentials(Option(u), Option(p)))
+      configured(Credentials(Option(u), Option(p)))
+
+    /**
+     * Configures the client whether to speak TLS or not.
+     *
+     * By default, don't use opportunistic TLS, and instead always speak TLS
+     * if TLS has been configured.
+     *
+     * The valid levels are Off, which indicates this will never speak TLS,
+     * Desired, which indicates it may speak TLS, but may also not speak TLS,
+     * and Required, which indicates it must speak TLS.
+     *
+     * Clients configured with level `Required` cannot speak to MySQL servers where
+     * TLS is switched off.
+     */
+    def withOpportunisticTls(level: OpportunisticTls.Level): Client =
+      configured(OppTls(Some(level)))
+
+    /**
+     * Disables opportunistic TLS.
+     *
+     * If the client is still TLS configured, it will speak with the server over TLS. To instead
+     * configure this to be `Off`, use `withOpportunisticTls(OpportunisticTls.Off)`.
+     */
+    def withNoOpportunisticTls: Client = configured(OppTls(None))
 
     /**
      * Database to use when this client establishes a new session.
      */
     def withDatabase(db: String): Client =
-      configured(Handshake.Database(Option(db)))
+      configured(Database(Option(db)))
 
     /**
      * The default character set used when establishing a new session.
      */
     def withCharset(charset: Short): Client =
-      configured(Handshake.Charset(charset))
+      configured(Charset(charset))
 
     /**
-      * Don't set the CLIENT_FOUND_ROWS flag when establishing a new
-      * session. This will make "INSERT ... ON DUPLICATE KEY UPDATE"
-      * statements return the "correct" update count.
-      *
-      * See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_row-count
-      */
+     * Don't set the CLIENT_FOUND_ROWS flag when establishing a new
+     * session. This will make "INSERT ... ON DUPLICATE KEY UPDATE"
+     * statements return the "correct" update count.
+     *
+     * See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_row-count
+     */
     def withAffectedRows(): Client =
-      configured(Handshake.FoundRows(false))
+      configured(FoundRows(false))
 
     /**
      * Installs a module on the client which issues a ROLLBACK statement when a service is put
@@ -338,6 +237,12 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
     def withNoRollback: Client =
       withStack(stack.remove(RollbackFactory.Role))
 
+    /**
+     * The connection init request to use when establishing a new session.
+     */
+    def withConnectionInitRequest(request: Request): Client =
+      configured(ConnectionInitRequest(Some(request)))
+
     // Java-friendly forwarders
     // See https://issues.scala-lang.org/browse/SI-8905
     override val withSessionPool: SessionPoolingParams[Client] =
@@ -365,11 +270,19 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
     override def withResponseClassifier(responseClassifier: ResponseClassifier): Client =
       super.withResponseClassifier(responseClassifier)
     override def withRetryBudget(budget: RetryBudget): Client = super.withRetryBudget(budget)
-    override def withRetryBackoff(backoff: Stream[Duration]): Client =
+    override def withRetryBackoff(backoff: Backoff): Client =
       super.withRetryBackoff(backoff)
 
     override def withStack(stack: Stack[ServiceFactory[Request, Result]]): Client =
       super.withStack(stack)
+    override def withStack(
+      fn: Stack[ServiceFactory[Request, Result]] => Stack[ServiceFactory[Request, Result]]
+    ): Client =
+      super.withStack(fn)
+    override def withExecutionOffloaded(executor: ExecutorService): Client =
+      super.withExecutionOffloaded(executor)
+    override def withExecutionOffloaded(pool: FuturePool): Client =
+      super.withExecutionOffloaded(pool)
     override def configured[P](psp: (P, Stack.Param[P])): Client = super.configured(psp)
     override def filtered(filter: Filter[Request, Result, Request, Result]): Client =
       super.filtered(filter)

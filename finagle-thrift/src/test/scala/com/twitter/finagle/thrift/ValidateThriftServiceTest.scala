@@ -1,6 +1,6 @@
 package com.twitter.finagle.thrift
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{Status, Service, WriteException}
 import com.twitter.util.{Await, Future, Promise, Return, Throw}
 import org.apache.thrift.TApplicationException
@@ -8,7 +8,7 @@ import org.apache.thrift.protocol.{TBinaryProtocol, TMessage, TMessageType}
 import org.mockito.Matchers
 import org.mockito.Mockito.{verify, when, times}
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 class ValidateThriftServiceTest extends FunSuite with MockitoSugar {
 

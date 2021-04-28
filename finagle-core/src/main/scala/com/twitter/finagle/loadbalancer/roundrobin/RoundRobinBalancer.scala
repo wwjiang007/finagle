@@ -15,8 +15,8 @@ private[loadbalancer] final class RoundRobinBalancer[Req, Rep](
   protected val endpoints: Activity[IndexedSeq[EndpointFactory[Req, Rep]]],
   protected val statsReceiver: StatsReceiver,
   protected val emptyException: NoBrokersAvailableException,
-  protected val maxEffort: Int = 5
-) extends ServiceFactory[Req, Rep]
+  protected val maxEffort: Int = 5)
+    extends ServiceFactory[Req, Rep]
     with Balancer[Req, Rep]
     with Updating[Req, Rep] {
 
@@ -80,7 +80,7 @@ private[loadbalancer] final class RoundRobinBalancer[Req, Rep](
 
     def pick(): Node = {
       if (vector.isEmpty)
-        return failingNode(emptyException)
+        return failingNode
 
       val node = selections(chooseNext(selections.size))
       if (node.status != Status.Open)
@@ -102,5 +102,4 @@ private[loadbalancer] final class RoundRobinBalancer[Req, Rep](
   protected def initDistributor(): Distributor = new Distributor(Vector.empty)
 
   protected def newNode(factory: EndpointFactory[Req, Rep]): Node = new Node(factory)
-  protected def failingNode(cause: Throwable): Node = new Node(new FailingEndpointFactory(cause))
 }

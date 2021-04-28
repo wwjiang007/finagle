@@ -1,21 +1,22 @@
 package com.twitter.finagle.integration
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.mysql.OK
 import com.twitter.finagle.mysql.integration.IntegrationClient
 import com.twitter.finagle.thriftmux.thriftscala.TestService
-import com.twitter.finagle.util.HashedWheelTimer
+import com.twitter.finagle.util.DefaultTimer
 import com.twitter.finagle.{Address, Name, RequestTimeoutException, ThriftMux, param}
 import com.twitter.util.{Await, Future, Promise}
 import java.net.{InetAddress, InetSocketAddress}
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
 import org.scalatest.{BeforeAndAfter, FunSuite}
 
-class ThriftMuxServerMysqlClientTest extends FunSuite
-  with IntegrationClient
-  with Eventually
-  with IntegrationPatience
-  with BeforeAndAfter {
+class ThriftMuxServerMysqlClientTest
+    extends FunSuite
+    with IntegrationClient
+    with Eventually
+    with IntegrationPatience
+    with BeforeAndAfter {
 
   private def await[T](f: Future[T]): T = Await.result(f, 5.seconds)
 
@@ -46,7 +47,7 @@ class ThriftMuxServerMysqlClientTest extends FunSuite
 
   test("interruption during transaction") {
     for (mysqlClient <- client) {
-      val timer = HashedWheelTimer.Default
+      val timer = DefaultTimer
 
       val mysqlLatch = new Promise[Unit]()
 
@@ -55,17 +56,17 @@ class ThriftMuxServerMysqlClientTest extends FunSuite
         def query(x: String): Future[String] = {
           mysqlClient.transaction { mc =>
             mc.query("INSERT INTO txn_test (id) VALUES (1)").flatMap { _ =>
-              // wait for the client's timeout
-              // (can't use MockTimer/TimeControl as this happens on a diff "thread")
-              mysqlLatch
-            }.flatMap { _ =>
-              // run another query that should fail, given the prior timeout.
-              mc.query("SELECT id FROM txn_test").flatMap { _ =>
-                Future.value(x.toString)
+                // wait for the client's timeout
+                // (can't use MockTimer/TimeControl as this happens on a diff "thread")
+                mysqlLatch
+              }.flatMap { _ =>
+                // run another query that should fail, given the prior timeout.
+                mc.query("SELECT id FROM txn_test").flatMap { _ => Future.value(x.toString) }
               }
-            }
           }
         }
+        def question(y: String): Future[String] = ???
+        def inquiry(z: String): Future[String] = ???
       }
 
       // start a thriftmux server and client to talk to it.
@@ -101,9 +102,7 @@ class ThriftMuxServerMysqlClientTest extends FunSuite
       // the number of rows in the table. which should be 0, as the
       // insert should get rolled back.
       val ids: Seq[Int] = await(
-        mysqlClient.select("SELECT id FROM txn_test") { row =>
-          row.intOrZero("id")
-        }
+        mysqlClient.select("SELECT id FROM txn_test") { row => row.intOrZero("id") }
       )
       assert(Seq.empty == ids)
     }

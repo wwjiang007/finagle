@@ -1,15 +1,14 @@
 package com.twitter.finagle.mysql.integration
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.mysql.{Client, OK, ServerError}
-import com.twitter.util.{Await, Future}
+import com.twitter.util.{Await, Awaitable, Future}
 import java.sql.SQLException
 import org.scalatest.{BeforeAndAfter, FunSuite}
 
 private object PreparedStatementTest {
 
-  private def await[T](f: Future[T]): T =
-    Await.result(f, 5.seconds)
+  private def await[T](t: Awaitable[T]): T = Await.result(t, 5.seconds)
 
   private val createTable =
     """
@@ -31,9 +30,7 @@ private object PreparedStatementTest {
 
 }
 
-class PreparedStatementTest extends FunSuite
-  with IntegrationClient
-  with BeforeAndAfter {
+class PreparedStatementTest extends FunSuite with IntegrationClient with BeforeAndAfter {
   import PreparedStatementTest._
 
   private[this] val c: Client = client.orNull
@@ -72,9 +69,7 @@ class PreparedStatementTest extends FunSuite
   private[this] def selectBigDecimal(id: Long): BigDecimal = {
     val selectSql = "SELECT big_decimal FROM prepared_stmt WHERE id = ?"
     val stmt = c.prepare(selectSql)
-    val bds = await(stmt.select(id) { row =>
-      row.bigDecimalOrNull("big_decimal")
-    })
+    val bds = await(stmt.select(id) { row => row.bigDecimalOrNull("big_decimal") })
     assert(bds.size == 1)
     assert(bds.head == readBigDecimal(id))
 
@@ -106,6 +101,13 @@ class PreparedStatementTest extends FunSuite
   }
 
   test("insert BigDecimal with too much precision") {
+    // Depending on how the server is configured, this test may fail.
+    // With the following configurations (which happen to be MySQL's defaults) this test will pass:
+    // +-----------------------------------------------------------------------------------------------------------------------+
+    // | @@sql_mode                                                                                                            |
+    // +-----------------------------------------------------------------------------------------------------------------------+
+    // | ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION |
+    // +-----------------------------------------------------------------------------------------------------------------------+
     intercept[ServerError] {
       // this number has more total digits than allowed, 5
       insertBigDecimal(Some(BigDecimal("100000")))

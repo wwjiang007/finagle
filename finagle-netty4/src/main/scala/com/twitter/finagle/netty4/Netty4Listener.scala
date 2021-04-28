@@ -27,11 +27,33 @@ object Netty4Listener {
       Stack.Param(BackPressure(enabled = true))
   }
 
+  /**
+   * A [[com.twitter.finagle.Stack.Param]] used to configure the ability to limit the number
+   * of connections to a listener.
+   *
+   * @note that this is implemented by eagerly hanging up once the limit has been reached
+   *       and this can have detrimental effects for non-TLS protocols that don't handshake
+   *       since the client may immediately send a request before the server has hung up.
+   */
+  case class MaxConnections(maxConnections: Long) {
+    require(
+      maxConnections > 0,
+      s"MaxConnections must be a positive value. Observed: $maxConnections")
+    def mk(): (MaxConnections, Stack.Param[MaxConnections]) = (this, MaxConnections.param)
+  }
+
+  object MaxConnections {
+    implicit val param: Stack.Param[MaxConnections] = Stack.Param(MaxConnections(Long.MaxValue))
+  }
+
   def apply[In, Out](
     pipelineInit: ChannelPipeline => Unit,
     params: Stack.Params,
     setupMarshalling: ChannelInitializer[Channel] => ChannelHandler
-  )(implicit mIn: Manifest[In], mOut: Manifest[Out]): Netty4Listener[In, Out, TransportContext] =
+  )(
+    implicit mIn: Manifest[In],
+    mOut: Manifest[Out]
+  ): Netty4Listener[In, Out, TransportContext] =
     Netty4Listener[In, Out, TransportContext](
       pipelineInit,
       params,
@@ -42,7 +64,10 @@ object Netty4Listener {
   def apply[In, Out](
     pipelineInit: ChannelPipeline => Unit,
     params: Stack.Params
-  )(implicit mIn: Manifest[In], mOut: Manifest[Out]): Netty4Listener[In, Out, TransportContext] =
+  )(
+    implicit mIn: Manifest[In],
+    mOut: Manifest[Out]
+  ): Netty4Listener[In, Out, TransportContext] =
     Netty4Listener[In, Out, TransportContext](
       pipelineInit,
       params,
@@ -67,7 +92,9 @@ case class Netty4Listener[In, Out, Ctx <: TransportContext](
   transportFactory: Channel => Transport[Any, Any] {
     type Context <: Ctx
   }
-)(implicit mIn: Manifest[In], mOut: Manifest[Out])
+)(
+  implicit mIn: Manifest[In],
+  mOut: Manifest[Out])
     extends Listener[In, Out, Ctx] {
 
   private[this] val listeningServerBuilder =
@@ -85,7 +112,9 @@ case class Netty4Listener[In, Out, Ctx <: TransportContext](
    */
   def listen(
     addr: SocketAddress
-  )(serveTransport: Transport[In, Out] { type Context <: Ctx } => Unit): ListeningServer = {
+  )(
+    serveTransport: Transport[In, Out] { type Context <: Ctx } => Unit
+  ): ListeningServer = {
     val mkTrans = transportFactory
       .andThen(Transport.cast[In, Out])
       .asInstanceOf[Channel => Transport[In, Out] { type Context <: Ctx }]

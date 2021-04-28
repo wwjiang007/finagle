@@ -1,6 +1,6 @@
 package com.twitter.finagle.redis.integration
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.redis.RedisClientTest
 import com.twitter.finagle.redis.tags.{RedisTest, ClientTest}
 import com.twitter.io.Buf
@@ -162,7 +162,7 @@ final class KeyClientIntegrationSuite extends RedisClientTest {
 
       val persistResult = await(client.persist(bufFoo))
       assert(persistResult == 1)
-      val pttlResult  = await(client.pTtl(bufFoo))
+      val pttlResult = await(client.pTtl(bufFoo))
       assert(pttlResult != None && pttlResult.get == -1) // indicates key exists, but no ttl set.
 
       val persistResultNoKey = await(client.persist(bufBar))

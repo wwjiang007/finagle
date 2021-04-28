@@ -1,41 +1,51 @@
 package com.twitter.finagle.netty4.transport
 
 import com.twitter.concurrent.AsyncQueue
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.transport.Transport
-import com.twitter.util.{Await, Future, Return, Throw}
+import com.twitter.util.{Await, Future, Return, Time, Throw}
 import io.netty.channel.{ChannelException => _, _}
 import io.netty.channel.embedded.EmbeddedChannel
-import io.netty.handler.ssl.SslHandler
 import org.scalatest.{FunSuite, OneInstancePerTest}
 import org.scalatest.concurrent.Eventually._
-import org.scalatest.mockito.MockitoSugar
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.mockito.MockitoSugar
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 import org.mockito.Mockito._
-import java.security.cert.Certificate
-import javax.net.ssl.{SSLEngine, SSLSession}
 
 class ChannelTransportTest
     extends FunSuite
-    with GeneratorDrivenPropertyChecks
+    with ScalaCheckDrivenPropertyChecks
     with OneInstancePerTest
     with MockitoSugar {
 
   val timeout = 10.seconds
 
-  val (transport, channel) = {
-    val ch = new EmbeddedChannel()
-    val tr = Transport.cast[String, String](new ChannelTransport(ch))
-    (tr, ch)
-  }
+  val channel = new EmbeddedChannel()
+  val channelTransport = new ChannelTransport(channel)
+  val transport = Transport.cast[String, String](channelTransport)
 
   def assertSeenWhatsWritten[A](written: Boolean, a: A, seen: Future[A]): Unit =
     assert(!written || (written && Await.result(seen, timeout) == a))
 
   def assertFailedRead[A](seen: Future[A], e: Exception): Unit = {
     val thrown = intercept[Exception](Await.result(seen, timeout))
-    assert(thrown == ChannelException(e, transport.remoteAddress))
+    assert(thrown == ChannelException(e, transport.context.remoteAddress))
+    assert(transport.status == Status.Closed)
+  }
+
+  test("ChannelTransport status is open when not failed and channel is not closed") {
+    assert(channel.isOpen)
+    assert(transport.status == Status.Open)
+  }
+
+  test("ChannelTransport status is closed when failed") {
+    channelTransport.failed.compareAndSet(false, true)
+    assert(transport.status == Status.Closed)
+  }
+
+  test("ChannelTransport status is closed when channel is closed") {
+    channel.close()
     assert(transport.status == Status.Closed)
   }
 
@@ -83,7 +93,9 @@ class ChannelTransportTest
     })
 
     forAll { s: String =>
-      assert(transport.write(s).poll == Some(Throw(ChannelException(e, transport.remoteAddress))))
+      assert(
+        transport.write(s).poll == Some(
+          Throw(ChannelException(e, transport.context.remoteAddress))))
     }
   }
 
@@ -110,7 +122,9 @@ class ChannelTransportTest
     assert(!transport.onClose.isDefined)
     channel.pipeline.fireExceptionCaught(e)
 
-    assert(Await.result(transport.onClose, timeout) == ChannelException(e, transport.remoteAddress))
+    assert(
+      Await
+        .result(transport.onClose, timeout) == ChannelException(e, transport.context.remoteAddress))
     assert(transport.status == Status.Closed)
   }
 
@@ -139,18 +153,6 @@ class ChannelTransportTest
       throw t
     }
     assert(transport.status == Status.Closed)
-  }
-
-  test("peerCertificate") {
-    val engine = mock[SSLEngine]
-    val session = mock[SSLSession]
-    val cert = mock[Certificate]
-    when(engine.getSession).thenReturn(session)
-    when(session.getPeerCertificates).thenReturn(Array(cert))
-    val ch = new EmbeddedChannel(new SslHandler(engine))
-    val tr = Transport.cast[String, String](new ChannelTransport(ch))
-
-    assert(tr.peerCertificate == Some(cert))
   }
 
   test("ChannelTransport drains the offer queue before reading from the channel") {
@@ -287,11 +289,17 @@ class ChannelTransportTest
     assert(ct.status == Status.Closed)
   }
 
-  test("firing inactive doesn't trigger a close") {
-    val em = new EmbeddedChannel
-    val ct = new ChannelTransport(em, new AsyncQueue[Any](maxPendingOffers = 1))
-    em.pipeline.fireChannelInactive()
-
-    assert(em.isOpen)
+  test("calling close multiple times only closes the channel once") {
+    val ch = new EmbeddedChannel()
+    val transport = new ChannelTransport(ch)
+    assert(!transport.closed.isDefined)
+    transport.close(Time.now)
+    assert(!ch.isOpen)
+    assert(transport.closed.isDefined)
+    transport.close(Time.now)
+    transport.close(Time.now)
+    assert(transport.closed.isDefined)
+    // Nothing bad happened
+    succeed
   }
 }

@@ -1,13 +1,13 @@
 package com.twitter.finagle.memcached.unit
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.memcached._
 import com.twitter.hashing.KeyHasher
 import com.twitter.util.{Await, Future}
 import org.mockito.Matchers.any
 import org.mockito.Mockito.{verify, when}
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 class PHPMemCacheClientTest extends FunSuite with MockitoSugar {
 

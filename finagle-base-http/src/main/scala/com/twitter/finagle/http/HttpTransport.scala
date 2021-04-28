@@ -1,7 +1,7 @@
 package com.twitter.finagle.http
 
 import com.twitter.finagle.{Status => CoreStatus}
-import com.twitter.finagle.http.codec.ConnectionManager
+import com.twitter.finagle.http.codec.Http1ConnectionManager
 import com.twitter.finagle.http.exp.{Multi, StreamTransport, StreamTransportProxy}
 import com.twitter.util.{Future, Promise, Return, Try}
 import scala.util.control.NonFatal
@@ -14,12 +14,12 @@ import scala.util.control.NonFatal
  */
 private[finagle] class HttpTransport[A <: Message, B <: Message](
   self: StreamTransport[A, B],
-  manager: ConnectionManager
-) extends StreamTransportProxy[A, B](self)
+  manager: Http1ConnectionManager)
+    extends StreamTransportProxy[A, B](self)
     with (Try[Multi[B]] => Unit) {
 
   def this(self: StreamTransport[A, B]) =
-    this(self, new ConnectionManager)
+    this(self, new Http1ConnectionManager)
 
   // Servers don't use `status` to determine when they should
   // close a transport, so we close the transport when the connection
@@ -36,6 +36,9 @@ private[finagle] class HttpTransport[A <: Message, B <: Message](
 
   def write(m: A): Future[Unit] =
     try {
+      // We have to use an intermediate `Promise` instead of the `Future` from
+      // the write call because `.observeMessage` may mutate the message, and
+      // thus we could write the wrong message in a race.
       val p = new Promise[Unit]
       manager.observeMessage(m, p)
       val f = self.write(m)
@@ -45,5 +48,5 @@ private[finagle] class HttpTransport[A <: Message, B <: Message](
       case NonFatal(e) => Future.exception(e)
     }
 
-  override def status: CoreStatus = if (manager.shouldClose()) CoreStatus.Closed else self.status
+  override def status: CoreStatus = if (manager.shouldClose) CoreStatus.Closed else self.status
 }

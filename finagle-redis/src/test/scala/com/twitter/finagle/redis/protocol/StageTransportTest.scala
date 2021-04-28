@@ -1,17 +1,14 @@
 package com.twitter.finagle.redis.protocol
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.concurrent.AsyncQueue
 import com.twitter.finagle.redis.RedisResponseTest
 import com.twitter.finagle.transport.QueueTransport
 import com.twitter.io.Buf
 import com.twitter.util.Await
-import org.junit.runner.RunWith
 import org.scalacheck.Gen
 import org.scalatest.OneInstancePerTest
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class StageTransportTest extends RedisResponseTest with OneInstancePerTest {
 
   val in = new AsyncQueue[Buf]

@@ -6,7 +6,7 @@ import com.twitter.finagle.naming.BindingFactory
 import com.twitter.finagle.param.{Label, ProtocolLibrary}
 import com.twitter.finagle.stats.FinagleStatsReceiver
 import com.twitter.finagle.util.StackRegistry.Entry
-import com.twitter.finagle.util.{Showable, StackRegistry}
+import com.twitter.finagle.util.{DefaultLogger, Showable, StackRegistry}
 import com.twitter.util.registry.GlobalRegistry
 import com.twitter.util.{Closable, Future, Time}
 import java.util.logging.Level
@@ -33,7 +33,7 @@ private[twitter] object ClientRegistry extends StackRegistry {
       case StackRegistry.Entry(_, _, params) =>
         val param.Label(name) = params[param.Label]
         val LoadBalancerFactory.Dest(va) = params[LoadBalancerFactory.Dest]
-        val param.Logger(log) = params[param.Logger]
+        val log = DefaultLogger
 
         val resolved = va.changes.filter(_ != Addr.Pending).toFuture()
         resolved.map { resolution =>
@@ -130,8 +130,7 @@ private[finagle] object RegistryEntryLifecycle {
           case Name.Path(path) => Namer.resolve(baseDtab(), path)
         }
         // prevent closing this Var producer during the lifetime of this client.
-        val observation = va.changes.respond { _ =>
-          }
+        val observation = va.changes.respond { _ => }
 
         val shown = Showable.show(dest)
         val registeredParams = params + LoadBalancerFactory.Dest(va)
@@ -140,7 +139,8 @@ private[finagle] object RegistryEntryLifecycle {
         CanStackFrom
           .fromFun[ServiceFactory[Req, Rep]]
           .toStackable(
-            role, { factory: ServiceFactory[Req, Rep] =>
+            role,
+            { factory: ServiceFactory[Req, Rep] =>
               new ServiceFactoryProxy[Req, Rep](factory) {
                 override def close(deadline: Time): Future[Unit] = {
                   ClientRegistry.unregister(shown, next, params)

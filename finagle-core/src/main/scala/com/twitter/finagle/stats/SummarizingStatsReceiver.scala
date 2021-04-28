@@ -27,21 +27,31 @@ class SummarizingStatsReceiver extends StatsReceiverWithCumulativeGauges {
   private[this] var _gauges = Map[Seq[String], () => Float]()
   def gauges: Map[Seq[String], () => Float] = synchronized { _gauges }
 
-  def counter(verbosity: Verbosity, name: String*): Counter = new Counter {
-    counters.putIfAbsent(name, new AtomicLong(0))
-    def incr(delta: Long): Unit = counters.get(name).getAndAdd(delta)
+  def counter(schema: CounterSchema): Counter = new Counter {
+    counters.putIfAbsent(schema.metricBuilder.name, new AtomicLong(0))
+    def incr(delta: Long): Unit = counters.get(schema.metricBuilder.name).getAndAdd(delta)
+    def metadata: Metadata = schema.metricBuilder
   }
 
-  def stat(verbosity: Verbosity, name: String*): Stat = new Stat {
+  def stat(schema: HistogramSchema): Stat = new Stat {
     def add(value: Float): Unit = SummarizingStatsReceiver.this.synchronized {
-      stats.get(name) += value
+      stats.get(schema.metricBuilder.name) += value
     }
+    def metadata: Metadata = schema.metricBuilder
   }
 
-  // Ignoring gauges for now, but we may consider sampling them.
-  protected[this] def registerGauge(verbosity: Verbosity, name: Seq[String], f: => Float): Unit =
+  override def addGauge(schema: GaugeSchema)(f: => Float): Gauge =
     synchronized {
-      _gauges += (name -> (() => f))
+      _gauges += (schema.metricBuilder.name -> (() => f))
+      new Gauge {
+        def remove(): Unit = ()
+        def metadata: Metadata = schema.metricBuilder
+      }
+    }
+
+  protected[this] def registerGauge(schema: GaugeSchema, f: => Float): Unit =
+    synchronized {
+      _gauges += (schema.metricBuilder.name -> (() => f))
     }
 
   protected[this] def deregisterGauge(name: Seq[String]): Unit = synchronized {
@@ -70,8 +80,9 @@ class SummarizingStatsReceiver extends StatsReceiverWithCumulativeGauges {
     }
 
     val counterLines =
-      counterValues.map { case (k, v) =>
-        (variableName(k), v.get.toString)
+      counterValues.map {
+        case (k, v) =>
+          (variableName(k), v.get.toString)
       }.toSeq
     val statLines = statValues.map {
       case (k, xs) =>
@@ -83,11 +94,11 @@ class SummarizingStatsReceiver extends StatsReceiverWithCumulativeGauges {
             n,
             xs(0),
             xs(n / 2),
-            xs(idx(.9D)),
-            xs(idx(.95D)),
-            xs(idx(.99D)),
-            xs(idx(.999D)),
-            xs(idx(.9999D)),
+            xs(idx(.9d)),
+            xs(idx(.95d)),
+            xs(idx(.99d)),
+            xs(idx(.999d)),
+            xs(idx(.9999d)),
             xs(n - 1)
           )
         )
@@ -101,7 +112,7 @@ class SummarizingStatsReceiver extends StatsReceiverWithCumulativeGauges {
           val start = math.ceil(end - ((1.0 - ptile) * n)).toInt
           for (i <- start to end) yield xs(i)
         }
-        (variableName(k), "p999=%s, p9999=%s".format(slice(.999D), slice(.9999D)))
+        (variableName(k), "p999=%s, p9999=%s".format(slice(.999d), slice(.9999d)))
     }.toSeq
 
     val sortedCounters = counterLines.sortBy { case (k, _) => k }
@@ -109,9 +120,7 @@ class SummarizingStatsReceiver extends StatsReceiverWithCumulativeGauges {
     val sortedStats = statLines.sortBy { case (k, _) => k }
     lazy val sortedTails = tailValues.sortBy { case (k, _) => k }
 
-    val fmt = Function.tupled { (k: String, v: String) =>
-      "%-30s %s".format(k, v)
-    }
+    val fmt = Function.tupled { (k: String, v: String) => "%-30s %s".format(k, v) }
     val fmtCounters = sortedCounters.map(fmt)
     val fmtGauges = gaugeValues.map(fmt)
     val fmtStats = sortedStats.map(fmt)

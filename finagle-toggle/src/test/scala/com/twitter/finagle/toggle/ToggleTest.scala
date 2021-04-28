@@ -1,10 +1,8 @@
 package com.twitter.finagle.toggle
 
-import org.junit.runner.RunWith
 import org.scalacheck.Gen
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 
 object ToggleGenerator {
 
@@ -17,36 +15,36 @@ object ToggleGenerator {
 
 }
 
-@RunWith(classOf[JUnitRunner])
-class ToggleTest extends FunSuite with GeneratorDrivenPropertyChecks {
+class ToggleTest extends FunSuite with ScalaCheckDrivenPropertyChecks {
 
   private val IntGen =
     Gen.chooseNum(Int.MinValue, Int.MaxValue)
 
-  private val on = Toggle.on[Int]("com.twitter.on")
-  private val off = Toggle.off[Int]("com.twitter.off")
+  private val on = Toggle.on("com.twitter.on")
+  private val off = Toggle.off("com.twitter.off")
 
   def newToggle[T](
     id: String,
-    pf: PartialFunction[T, Boolean],
-    fraction: Double
-  ): Toggle.Fractional[T] = new Toggle.Fractional[T](id) {
+    pf: PartialFunction[Int, Boolean],
+    fraction: Double,
+    defined: Boolean
+  ): Toggle.Fractional = new Toggle.Fractional(id) {
     override def toString: String = s"Toggle($id)"
-    def isDefinedAt(x: T): Boolean = pf.isDefinedAt(x)
-    def apply(v1: T): Boolean = pf(v1)
+    def isDefined: Boolean = defined
+    def apply(v1: Int): Boolean = pf(v1)
     def currentFraction: Double = fraction
   }
 
   test("True") {
     forAll(IntGen) { i =>
-      assert(on.isDefinedAt(i))
+      assert(on.isDefined)
       assert(on(i))
     }
   }
 
   test("False") {
     forAll(IntGen) { i =>
-      assert(off.isDefinedAt(i))
+      assert(off.isDefined)
       assert(!off(i))
     }
   }
@@ -54,7 +52,7 @@ class ToggleTest extends FunSuite with GeneratorDrivenPropertyChecks {
   test("Undefined") {
     val toggle = Toggle.Undefined
     forAll(IntGen) { i =>
-      assert(!toggle.isDefinedAt(i))
+      assert(toggle.isUndefined)
       intercept[UnsupportedOperationException] {
         assert(toggle(i))
       }
@@ -66,7 +64,7 @@ class ToggleTest extends FunSuite with GeneratorDrivenPropertyChecks {
     val trueOrTrue = on.orElse(on)
     Seq(trueOrFalse, trueOrTrue).foreach { tog =>
       forAll(IntGen) { i =>
-        assert(tog.isDefinedAt(i))
+        assert(tog.isDefined)
         assert(tog(i))
       }
     }
@@ -75,7 +73,7 @@ class ToggleTest extends FunSuite with GeneratorDrivenPropertyChecks {
     val falseOrTrue = off.orElse(on)
     Seq(falseOrFalse, falseOrTrue).foreach { tog =>
       forAll(IntGen) { i =>
-        assert(falseOrFalse.isDefinedAt(i))
+        assert(falseOrFalse.isDefined)
         assert(!falseOrFalse(i))
       }
     }
@@ -85,19 +83,17 @@ class ToggleTest extends FunSuite with GeneratorDrivenPropertyChecks {
     val undef1 = Toggle.Undefined
     val undef2 = Toggle.Undefined
     val undef12 = undef1.orElse(undef2)
-    forAll(IntGen) { i =>
-      assert(!undef12.isDefinedAt(i))
-    }
+    assert(undef12.isUndefined)
 
     val t = undef12.orElse(on)
     forAll(IntGen) { i =>
-      assert(t.isDefinedAt(i))
+      assert(t.isDefined)
       assert(t(i))
     }
 
     val f = undef12.orElse(off)
     forAll(IntGen) { i =>
-      assert(f.isDefinedAt(i))
+      assert(f.isDefined)
       assert(!f(i))
     }
   }
@@ -132,9 +128,7 @@ class ToggleTest extends FunSuite with GeneratorDrivenPropertyChecks {
     Toggle.Metadata("com.toggle..", 0.0, None, "test")
     Toggle.Metadata("com.toggle.-", 0.0, None, "test")
 
-    forAll(ToggleGenerator.Id) { id =>
-      Toggle.validateId(id)
-    }
+    forAll(ToggleGenerator.Id) { id => Toggle.validateId(id) }
   }
 
   test("Toggle.Metadata constructor checks fraction") {
@@ -167,23 +161,24 @@ class ToggleTest extends FunSuite with GeneratorDrivenPropertyChecks {
     }
   }
 
-  test("Toggle.Fractional.min isDefinedAt is result of isDefinedAt for toggle with lower fraction") {
-    val definedAtZero = Toggle.on[Int]("com.foo")
-    val undefinedAtZero = newToggle[Int]("com.foo", { case x if x > 0 => true }, 1.0)
+  test(
+    "Toggle.Fractional.min isDefinedAt is result of isDefinedAt for toggle with lower fraction") {
+    val definedAtZero = Toggle.on("com.foo")
+    val undefinedAtZero = newToggle("com.foo", { case x if x > 0 => true }, 1.0, false)
 
     val toggle1 = Toggle.Fractional.min(definedAtZero, definedAtZero)
-    assert(toggle1.isDefinedAt(0))
+    assert(toggle1.isDefined)
 
     val toggle2 = Toggle.Fractional.min(undefinedAtZero, definedAtZero)
-    assert(!toggle2.isDefinedAt(0))
+    assert(toggle2.isUndefined)
 
     val toggle3 = Toggle.Fractional.min(definedAtZero, undefinedAtZero)
-    assert(toggle3.isDefinedAt(0))
+    assert(toggle3.isDefined)
   }
 
   test("Toggle.Fractional.min currentFraction is min of both toggles' currentFractions") {
-    val a = newToggle[Int]("com.foo", { case _ => true }, 0.5)
-    val b = newToggle[Int]("com.foo", { case _ => true }, 0.8)
+    val a = newToggle("com.foo", { case _ => true }, 0.5, defined = true)
+    val b = newToggle("com.foo", { case _ => true }, 0.8, defined = true)
 
     val toggle1 = Toggle.Fractional.min(a, b)
     assert(toggle1.currentFraction == 0.5)
@@ -193,8 +188,8 @@ class ToggleTest extends FunSuite with GeneratorDrivenPropertyChecks {
   }
 
   test("Toggle.Fractional.min apply uses currentFraction") {
-    val a = newToggle[Int]("com.foo", { case _ => false }, 0.0)
-    val b = newToggle[Int]("com.foo", { case _ => true }, 1.0)
+    val a = newToggle("com.foo", { case _ => false }, 0.0, defined = true)
+    val b = newToggle("com.foo", { case _ => true }, 1.0, defined = true)
 
     val toggle1 = Toggle.Fractional.min(a, b)
     assert(toggle1(5) == false)

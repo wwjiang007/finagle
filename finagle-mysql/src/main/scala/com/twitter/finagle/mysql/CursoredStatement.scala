@@ -93,6 +93,7 @@ object CursoredStatement {
    * exposed for testing.
    */
   final class AsJava private[mysql] (underlying: CursoredStatement) {
+
     /**
      * Executes the cursored statement with the given `params` and lazily maps `f`
      * over the rows as they are streamed from the database.
@@ -144,8 +145,8 @@ private class StdCursorResult[T](
   rowsPerFetch: Int,
   params: Seq[Parameter],
   f: (Row) => T,
-  supportUnsigned: Boolean
-) extends CursorResult[T] { self =>
+  supportUnsigned: Boolean)
+    extends CursorResult[T] { self =>
   import StdCursorResult._
 
   // We store the stream state outside of an AsyncStream instance to avoid storing the
@@ -210,7 +211,7 @@ private class StdCursorResult[T](
         }
       }
     }
-    go
+    go _
   }
 
   override def stream: AsyncStream[T] = self.synchronized {

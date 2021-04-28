@@ -1,9 +1,14 @@
 package com.twitter.finagle.netty4.channel
 
-import com.twitter.finagle.netty4.ssl.server.Netty4ServerSslChannelInitializer
+import com.twitter.finagle.netty4.ssl.server.{
+  Netty4ServerSslChannelInitializer,
+  Netty4TlsSnoopingHandler
+}
 import com.twitter.finagle.param._
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.Stack
+import com.twitter.finagle.ssl.SnoopingLevelInterpreter
+import com.twitter.finagle.util.DefaultLogger
 import io.netty.channel._
 import java.util.logging.Level
 
@@ -23,23 +28,24 @@ private[netty4] class Netty4RawServerChannelInitializer(params: Stack.Params)
 
   import Netty4RawServerChannelInitializer._
 
-  private[this] val Logger(logger) = params[Logger]
   private[this] val Label(label) = params[Label]
   private[this] val Stats(stats) = params[Stats]
 
   private[this] val sharedChannelStats =
-    if (!stats.isNull)
-      Some(new ChannelStatsHandler.SharedChannelStats(stats))
-    else
-      None
+    if (!stats.isNull) {
+      val sharedChannelStatsFn = params[SharedChannelStats.Param].fn
+      Some(sharedChannelStatsFn(params))
+    } else None
 
   private[this] val channelSnooper =
     if (params[Transport.Verbose].enabled)
-      Some(ChannelSnooper.byteSnooper(label)(logger.log(Level.INFO, _, _)))
+      Some(ChannelSnooper.byteSnooper(label)(DefaultLogger.log(Level.INFO, _, _)))
     else
       None
 
-  override def initChannel(ch: Channel): Unit = {
+  private[this] val enableTlsSnooping = SnoopingLevelInterpreter.shouldEnableSnooping(params)
+
+  def initChannel(ch: Channel): Unit = {
     // first => last
     // - a request flies from first to last
     // - a response flies from last to first
@@ -56,7 +62,14 @@ private[netty4] class Netty4RawServerChannelInitializer(params: Stack.Params)
       pipeline.addFirst(ChannelStatsHandlerKey, channelStatsHandler)
     }
 
-    // Add SSL/TLS Channel Initializer to the pipeline.
-    pipeline.addFirst("tlsInit", new Netty4ServerSslChannelInitializer(params))
+    // Add SSL/TLS Channel Initializer to the pipeline. If we're using snooping
+    // then add that and it will handle installing the TLS handlers, if appropriate.
+    if (enableTlsSnooping) {
+      pipeline.addFirst(Netty4TlsSnoopingHandler.HandlerName, new Netty4TlsSnoopingHandler(params))
+    } else {
+      pipeline.addFirst(
+        Netty4ServerSslChannelInitializer.HandlerName,
+        new Netty4ServerSslChannelInitializer(params))
+    }
   }
 }

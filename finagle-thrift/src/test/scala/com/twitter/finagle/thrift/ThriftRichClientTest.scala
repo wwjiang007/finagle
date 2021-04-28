@@ -9,7 +9,7 @@ import org.mockito.ArgumentCaptor
 import org.mockito.Mockito._
 import org.mockito.Matchers._
 import org.scalatest.{FunSuite, OneInstancePerTest}
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 class ThriftRichClientTest extends FunSuite with MockitoSugar with OneInstancePerTest {
   object ThriftRichClientMock
@@ -25,16 +25,10 @@ class ThriftRichClientTest extends FunSuite with MockitoSugar with OneInstancePe
 
     protected def params: Stack.Params = Stack.Params.empty
 
-    def newService(
-      dest: Name,
-      label: String
-    ): Service[ThriftClientRequest, Array[Byte]] =
+    def newService(dest: Name, label: String): Service[ThriftClientRequest, Array[Byte]] =
       mock[Service[ThriftClientRequest, Array[Byte]]]
 
-    def newClient(
-      dest: Name,
-      label: String
-    ): ServiceFactory[ThriftClientRequest, Array[Byte]] =
+    def newClient(dest: Name, label: String): ServiceFactory[ThriftClientRequest, Array[Byte]] =
       mock[ServiceFactory[ThriftClientRequest, Array[Byte]]]
   }
 
@@ -43,27 +37,30 @@ class ThriftRichClientTest extends FunSuite with MockitoSugar with OneInstancePe
   }
   private val svcIface = new SvcIface
 
-  test("ThriftRichClientTest servicePerEndpoint takes dest String and stats scoping label arguments") {
+  test(
+    "ThriftRichClientTest servicePerEndpoint takes dest String and stats scoping label arguments"
+  ) {
     val captor = ArgumentCaptor.forClass(classOf[RichClientParam])
     val mockBuilder = mock[ServicePerEndpointBuilder[SvcIface]]
     doReturn(svcIface).when(mockBuilder).servicePerEndpoint(any(), captor.capture())
     val client = spy(ThriftRichClientMock)
-    client.servicePerEndpoint("/s/tweetypie/tweetypie", "tweetypie_client")(builder = mockBuilder)
+    client.servicePerEndpoint("dest_string", "client")(builder = mockBuilder)
 
-    assert(captor.getValue.clientStats.toString == "NullStatsReceiver/clnt/tweetypie_client")
-    verify(client).newService("/s/tweetypie/tweetypie", "tweetypie_client")
+    assert(captor.getValue.clientStats.toString == "NullStatsReceiver/clnt/client")
+    verify(client).newService("dest_string", "client")
   }
 
-  test("ThriftRichClientTest servicePerEndpoint takes dest Name and stats scoping label arguments") {
+  test(
+    "ThriftRichClientTest servicePerEndpoint takes dest Name and stats scoping label arguments") {
     val captor = ArgumentCaptor.forClass(classOf[RichClientParam])
     val mockBuilder = mock[ServicePerEndpointBuilder[SvcIface]]
     doReturn(svcIface).when(mockBuilder).servicePerEndpoint(any(), captor.capture())
 
     val name = Name.empty
     val client = spy(ThriftRichClientMock)
-    client.servicePerEndpoint(name, "tweetypie_client")(builder = mockBuilder)
+    client.servicePerEndpoint(name, "client")(builder = mockBuilder)
 
-    assert(captor.getValue.clientStats.toString == "NullStatsReceiver/clnt/tweetypie_client")
-    verify(client).newService(name, "tweetypie_client")
+    assert(captor.getValue.clientStats.toString == "NullStatsReceiver/clnt/client")
+    verify(client).newService(name, "client")
   }
 }

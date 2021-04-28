@@ -1,12 +1,13 @@
 package com.twitter.finagle.http
 
 import com.twitter.finagle.netty4.http.Netty4FormPostEncoder
-import com.twitter.util.Base64StringEncoder
 import com.twitter.io.Buf
-import java.net.{URI => JURI, URL}
+import com.twitter.util.Base64StringEncoder
+import java.net.{URL, URI => JURI}
 import java.nio.charset.StandardCharsets
 import scala.annotation.implicitNotFound
 import scala.collection.JavaConverters._
+import scala.collection.immutable.SortedMap
 
 /**
  * Provides a class for building [[Request]]s.
@@ -16,7 +17,7 @@ import scala.collection.JavaConverters._
  * val getRequest = RequestBuilder()
  *   .setHeader(Fields.USER_AGENT, "MyBot")
  *   .setHeader(Fields.CONNECTION, HttpHeaders.Values.KEEP_ALIVE)
- *   .url(new URL("http://www.example.com"))
+ *   .url(new URL("https://www.example.com"))
  *   .buildGet()
  * }}}
  *
@@ -36,7 +37,7 @@ import scala.collection.JavaConverters._
  *     RequestBuilder.create()
  *       .setHeader(Fields.USER_AGENT, "MyBot")
  *       .setHeader(Fields.CONNECTION, HttpHeaders.Values.KEEP_ALIVE)
- *       .url(new URL("http://www.example.com")))
+ *       .url(new URL("https://www.example.com")))
  * }}}
  *
  * Overall RequestBuilder's pretty barebones. It does provide certain protocol level support
@@ -48,7 +49,7 @@ import scala.collection.JavaConverters._
  */
 object RequestBuilder {
 
-  private val SchemeWhitelist = Seq("http", "https")
+  private val SchemeAllowlist = Seq("http", "https")
 
   /** Evidence type that signifies that a property has been satisfied */
   sealed trait Valid
@@ -57,7 +58,7 @@ object RequestBuilder {
     "Http RequestBuilder is not correctly configured: HasUrl (exp: Yes): ${HasUrl}, HasForm (exp: Nothing) ${HasForm}."
   )
   trait RequestEvidence[HasUrl, HasForm]
-  private object RequestEvidence {
+  object RequestEvidence {
     implicit object FullyConfigured extends RequestEvidence[Valid, Nothing]
   }
 
@@ -65,9 +66,8 @@ object RequestBuilder {
     "Http RequestBuilder is not correctly configured for form post: HasUrl (exp: Yes): ${HasUrl}, HasForm (exp: Yes): ${HasForm}."
   )
   trait PostRequestEvidence[HasUrl, HasForm]
-  private object PostRequestEvidence {
-    implicit object FullyConfigured
-      extends PostRequestEvidence[Valid, Valid]
+  object PostRequestEvidence {
+    implicit object FullyConfigured extends PostRequestEvidence[Valid, Valid]
   }
 
   type Complete = RequestBuilder[Valid, Nothing]
@@ -123,9 +123,7 @@ object RequestBuilder {
     builder.buildFormPost(multipart)(PostRequestEvidence.FullyConfigured)
 }
 
-class RequestBuilder[HasUrl, HasForm] private[http] (
-  config: RequestConfig
-) {
+class RequestBuilder[HasUrl, HasForm] private[http] (config: RequestConfig) {
   import RequestBuilder._
 
   type This = RequestBuilder[HasUrl, HasForm]
@@ -142,7 +140,7 @@ class RequestBuilder[HasUrl, HasForm] private[http] (
    * the Authorization header using the authority portion of the URL.
    */
   def url(u: URL): RequestBuilder[Valid, HasForm] = {
-    require(SchemeWhitelist.contains(u.getProtocol), s"url must be http(s), was ${u.getProtocol}")
+    require(SchemeAllowlist.contains(u.getProtocol), s"url must be http(s), was ${u.getProtocol}")
     val uri = u.toURI
     val host = hostString(uri, u)
     val hostValue =
@@ -188,9 +186,7 @@ class RequestBuilder[HasUrl, HasForm] private[http] (
    */
   def add(elems: Seq[FormElement]): RequestBuilder[HasUrl, Valid] = {
     val first = this.add(elems.head)
-    elems.tail.foldLeft(first) { (b, elem) =>
-      b.add(elem)
-    }
+    elems.tail.foldLeft(first) { (b, elem) => b.add(elem) }
   }
 
   /**
@@ -259,7 +255,7 @@ class RequestBuilder[HasUrl, HasForm] private[http] (
    * Proxy-Authorization header using the provided {{ProxyCredentials}}.
    */
   def proxied(credentials: Option[ProxyCredentials]): This = {
-    val headers: Map[String, Seq[String]] = credentials map { creds =>
+    val headers: SortedMap[String, Seq[String]] = credentials map { creds =>
       config.headers.updated(Fields.ProxyAuthorization, Seq(creds.basicAuthorization))
     } getOrElse config.headers
 
@@ -269,11 +265,14 @@ class RequestBuilder[HasUrl, HasForm] private[http] (
   /**
    * Construct an HTTP request with a specified method.
    */
-  def build(method: Method, content: Option[Buf])(
+  def build(
+    method: Method,
+    content: Option[Buf]
+  )(
     implicit HTTP_REQUEST_BUILDER_IS_NOT_FULLY_SPECIFIED: RequestBuilder.RequestEvidence[
       HasUrl,
       HasForm
-      ]
+    ]
   ): Request = {
     content match {
       case Some(ct) => withContent(method, ct)
@@ -284,57 +283,66 @@ class RequestBuilder[HasUrl, HasForm] private[http] (
   /**
    * Construct an HTTP GET request.
    */
-  def buildGet()(
+  def buildGet(
+  )(
     implicit HTTP_REQUEST_BUILDER_IS_NOT_FULLY_SPECIFIED: RequestBuilder.RequestEvidence[
       HasUrl,
       HasForm
-      ]
+    ]
   ): Request = withoutContent(Method.Get)
 
   /**
    * Construct an HTTP HEAD request.
    */
-  def buildHead()(
+  def buildHead(
+  )(
     implicit HTTP_REQUEST_BUILDER_IS_NOT_FULLY_SPECIFIED: RequestBuilder.RequestEvidence[
       HasUrl,
       HasForm
-      ]
+    ]
   ): Request = withoutContent(Method.Head)
 
   /**
    * Construct an HTTP DELETE request.
    */
-  def buildDelete()(
+  def buildDelete(
+  )(
     implicit HTTP_REQUEST_BUILDER_IS_NOT_FULLY_SPECIFIED: RequestBuilder.RequestEvidence[
       HasUrl,
       HasForm
-      ]
+    ]
   ): Request = withoutContent(Method.Delete)
 
   /**
    * Construct an HTTP POST request.
    */
-  def buildPost(content: Buf)(
+  def buildPost(
+    content: Buf
+  )(
     implicit HTTP_REQUEST_BUILDER_IS_NOT_FULLY_SPECIFIED: RequestBuilder.RequestEvidence[
       HasUrl,
       HasForm
-      ]
+    ]
   ): Request = withContent(Method.Post, content)
 
   /**
    * Construct an HTTP PUT request.
    */
-  def buildPut(content: Buf)(
+  def buildPut(
+    content: Buf
+  )(
     implicit HTTP_REQUEST_BUILDER_IS_NOT_FULLY_SPECIFIED: RequestBuilder.RequestEvidence[
       HasUrl,
       HasForm
-      ]
+    ]
   ): Request = withContent(Method.Put, content)
 
   /**
    * Construct a form post request.
    */
-  def buildFormPost(multipart: Boolean = false)(
+  def buildFormPost(
+    multipart: Boolean = false
+  )(
     implicit HTTP_REQUEST_BUILDER_IS_NOT_FULLY_SPECIFIED: RequestBuilder.PostRequestEvidence[
       HasUrl,
       HasForm
@@ -357,18 +365,19 @@ class RequestBuilder[HasUrl, HasForm] private[http] (
    */
   private[this] def hostString(uri: JURI, url: URL): String = {
     (if (uri.getHost == null) {
-      // fallback to URL
-      url.getHost
-    } else {
-      uri.getHost
-    }).toLowerCase
+       // fallback to URL
+       url.getHost
+     } else {
+       uri.getHost
+     }).toLowerCase
   }
 
   private[http] def withoutContent(method: Method): Request = {
     val req = Request(config.version, method, RequestConfig.resource(config))
 
-    config.headers.foreach { case (field, values) =>
-      values.foreach { v => req.headerMap.add(field, v) }
+    config.headers.foreach {
+      case (field, values) =>
+        values.foreach { v => req.headerMap.add(field, v) }
     }
 
     req
@@ -378,7 +387,7 @@ class RequestBuilder[HasUrl, HasForm] private[http] (
     require(content != null)
     val req = withoutContent(method)
     req.content = content
-    req.headerMap.set(Fields.ContentLength, content.length.toString)
+    req.headerMap.setUnsafe(Fields.ContentLength, content.length.toString)
     req
   }
 }

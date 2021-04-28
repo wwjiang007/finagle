@@ -1,6 +1,6 @@
 java_library(
-    sources = rglobs("*.java"),
-    compiler_option_sets = {},
+    sources = ["**/*.java"],
+    compiler_option_sets = [],
     provides = artifact(
         org = "com.twitter",
         name = "finagle-example-java",
@@ -9,9 +9,8 @@ java_library(
     dependencies = [
         "3rdparty/jvm/com/fasterxml/jackson/core:jackson-databind",
         "3rdparty/jvm/com/fasterxml/jackson/module:jackson-module-scala",
-        "3rdparty/jvm/io/netty",
-        "finagle/finagle-base-http/src/main/scala",
-        "finagle/finagle-core/src/main/scala",
+        "finagle/finagle-base-http/src/main",
+        "finagle/finagle-core/src/main",
         "finagle/finagle-example/src/main/thrift:thrift-scala",
         "finagle/finagle-http/src/main/scala",
         "finagle/finagle-thrift",

@@ -1,26 +1,23 @@
 package com.twitter.finagle.filter
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
-import com.twitter.finagle.server.ServerInfo
+import com.twitter.finagle.client.useNackAdmissionFilter
 import com.twitter.finagle.stats.{Counter, Gauge, StatsReceiver, Verbosity}
-import com.twitter.finagle.util.{Ema, Rng}
+import com.twitter.finagle.tracing.Trace
+import com.twitter.finagle.util.{LossyEma, Rng}
 import com.twitter.util._
 
 object NackAdmissionFilter {
   private val OverloadFailure = Future.exception(
-    Failure("Request not issued to the backend due to observed overload.",
-      FailureFlags.Rejected | FailureFlags.NonRetryable)
+    Failure(
+      "Request not issued to the backend due to observed overload.",
+      FailureFlags.Rejected | FailureFlags.NonRetryable
+    )
   )
-  val role: Stack.Role = new Stack.Role("NackAdmissionFilter")
+  val role: Stack.Role = Stack.Role("NackAdmissionFilter")
 
-  /**
-   * For feature roll out only.
-   */
-  private val EnableNackAcToggle = CoreToggles(
-    "com.twitter.finagle.core.UseClientNackAdmissionFilter"
-  )
-  private def enableNackAc(): Boolean = EnableNackAcToggle(ServerInfo().id.hashCode)
+  private val enabled: Boolean = useNackAdmissionFilter()
 
   /**
    * An upper bound on what percentage of requests this filter will drop.
@@ -62,12 +59,12 @@ object NackAdmissionFilter {
    */
   private val rpsThreshold: Long = 5
 
-
   sealed trait Param {
     def mk(): (Param, Stack.Param[Param]) = (this, Param.param)
   }
 
   object Param {
+
     /**
      * A class eligible for configuring a [[com.twitter.finagle.Stackable]]
      * [[com.twitter.finagle.filter.NackAdmissionFilter]] module.
@@ -94,8 +91,8 @@ object NackAdmissionFilter {
         _param: Param,
         _stats: param.Stats,
         next: ServiceFactory[Req, Rep]
-      ): ServiceFactory[Req, Rep] =  _param match {
-        case Param.Configured(window, threshold) =>
+      ): ServiceFactory[Req, Rep] = _param match {
+        case Param.Configured(window, threshold) if enabled =>
           val param.Stats(stats) = _stats
 
           // Create the filter with the given window and nack rate threshold.
@@ -110,7 +107,7 @@ object NackAdmissionFilter {
           // required for proper operation.
           filter.andThen(next)
 
-        case Param.Disabled =>
+        case _ =>
           next
       }
     }
@@ -171,43 +168,41 @@ object NackAdmissionFilter {
  *
  * @param random Random number generator used in probability calculation.
  */
-class NackAdmissionFilter[Req, Rep](
+class NackAdmissionFilter[Req, Rep] private[filter] (
   window: Duration,
   nackRateThreshold: Double,
   random: Rng,
   statsReceiver: StatsReceiver,
-  monoTime: Ema.Monotime = new Ema.Monotime
-) extends SimpleFilter[Req, Rep] {
+  now: () => Long)
+    extends SimpleFilter[Req, Rep] {
   import NackAdmissionFilter._
+
+  def this(window: Duration, nackRateThreshold: Double, random: Rng, statsReceiver: StatsReceiver) =
+    this(window, nackRateThreshold, random, statsReceiver, Stopwatch.systemNanos)
 
   require(window > Duration.Zero, s"window size must be positive: $window")
   require(nackRateThreshold < 1, s"nackRateThreshold must lie in (0, 1): $nackRateThreshold")
   require(nackRateThreshold > 0, s"nackRateThreshold must lie in (0, 1): $nackRateThreshold")
 
   private[this] val acceptRateThreshold: Double = 1.0 - nackRateThreshold
-  private[this] val multiplier: Double = 1D / acceptRateThreshold
-  private[this] val windowInNs: Long = window.inNanoseconds
+  private[this] val multiplier: Double = 1d / acceptRateThreshold
 
   // Tracks the number of requests attempted during the previous 1000 ms. In
   // other words, tracks the client's rps. We arbitrarily give the Adder 10
   // slices.
   private[this] val rpsCounter: WindowedAdder = WindowedAdder(1000, 10, Stopwatch.systemMillis)
 
-  // EMA representing the rate of responses that are not nacks. We update it
+  // moving average representing the rate of responses that are not nacks. update it
   // whenever we get a response from the cluster with 0 when the service responds
-  // with a nack and 1 otherwise.
-  // NB: Usage of the ema must be synchronized with the generation of the timestamp.
-  //     and neither the Ema nor Monotime class is threadsafe.
-  private[this] val ema: Ema = new Ema(windowInNs)
-  // Start the ema at 1.0. No need for synchronization during construction.
-  ema.update(monoTime.nanos(), 1)
+  // with a nack and 1 otherwise. Start the moving average out with no nacks (1.0)
+  private[this] val ema = new LossyEma(window.inNanoseconds, now, 1.0)
 
-  // visible for testing. Synchronized as Ema is not threadsafe
-  private[filter] def emaValue: Double = synchronized { ema.last }
+  // visible for testing.
+  private[filter] def emaValue: Double = ema.last
 
   private[this] val droppedRequestCounter: Counter = statsReceiver.counter("dropped_requests")
   private[this] val emaPercent: Gauge = statsReceiver.addGauge(Verbosity.Debug, "ema_value") {
-    (emaValue * 100).toFloat
+    (emaValue * 100.0).toFloat
   }
 
   // Decrease the EMA if the response is a Nack, increase otherwise. Update the
@@ -217,16 +212,15 @@ class NackAdmissionFilter[Req, Rep](
       if (sufficientRps) rep match {
         case Throw(f: FailureFlags[_]) if f.isFlagged(FailureFlags.Rejected) => 0
         case _ => 1
-      } else {
+      }
+      else {
         // Bump up the ema value if the rps is too low to drop the request.
         // The ema value will start off high when the rps rises, protecting
         // against prematurely dropping requests (e.g., during warmup).
         1
       }
 
-    // Avoid a race condition where another update occurs between the call to
-    // nanos and the update.
-    synchronized { ema.update(monoTime.nanos(), value) }
+    ema.update(value)
   }
 
   // Determines whether the client's rps is high enough to lower the ema
@@ -246,7 +240,13 @@ class NackAdmissionFilter[Req, Rep](
 
   def apply(req: Req, service: Service[Req, Rep]): Future[Rep] = {
     rpsCounter.incr()
-    if (enableNackAc() && shouldDropRequest()) {
+    if (enabled && shouldDropRequest()) {
+      val tracing = Trace()
+      if (tracing.isActivelyTracing)
+        tracing.recordBinary(
+          "clnt/NackAdmissionFilter_rejected",
+          s"probabilistically dropped because nackRate ${1d - emaValue} over window $window exceeds nackRateThreshold $acceptRateThreshold"
+        )
       droppedRequestCounter.incr()
       OverloadFailure
     } else {

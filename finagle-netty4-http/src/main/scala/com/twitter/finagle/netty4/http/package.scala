@@ -1,16 +1,16 @@
 package com.twitter.finagle.netty4
 
-import com.twitter.conversions.storage._
 import com.twitter.finagle.client.Transporter
 import com.twitter.finagle.Stack
 import com.twitter.finagle.netty4.http.handler.{
   BadRequestHandler,
   ClientExceptionMapper,
   FixedLengthMessageAggregator,
-  PayloadSizeHandler,
-  UnpoolHttpHandler
+  HeaderValidatorHandler,
+  UnpoolHttpHandler,
+  UriValidatorHandler
 }
-import com.twitter.finagle.param.Logger
+import com.twitter.finagle.param.Stats
 import com.twitter.finagle.http.param._
 import com.twitter.finagle.server.Listener
 import com.twitter.finagle.transport.TransportContext
@@ -32,6 +32,38 @@ package object http {
    * The name assigned to an `Http2MultiplexCodec` instance in a netty `ChannelPipeline`
    */
   private[finagle] val Http2CodecName = "http2Codec"
+  private[finagle] val Http2MultiplexHandlerName = "Http2MultiplexHandler"
+
+  private[finagle] def newHttpClientCodec(params: Stack.Params): HttpClientCodec = {
+    val maxInitialLineSize = params[MaxInitialLineSize].size
+    val maxHeaderSize = params[MaxHeaderSize].size
+
+    // We unset the limit for maxChunkSize (8k by default) so Netty emits entire available
+    // payload as a single chunk instead of splitting it. This way we put the data into use
+    // quicker, the moment it's available.
+    new HttpClientCodec(
+      maxInitialLineSize.inBytes.toInt,
+      maxHeaderSize.inBytes.toInt,
+      Int.MaxValue, /* maxChunkSize */
+      false, /* failOnMissingResponse */
+      false /* validateHeaders, we validate in HeaderValidatorHandler */
+    )
+  }
+
+  private[finagle] def newHttpServerCodec(params: Stack.Params): HttpServerCodec = {
+    val maxInitialLineSize = params[MaxInitialLineSize].size
+    val maxHeaderSize = params[MaxHeaderSize].size
+
+    // We unset the limit for maxChunkSize (8k by default) so Netty emits entire available
+    // payload as a single chunk instead of splitting it. This way we put the data into use
+    // quicker, the moment it's available.
+    new HttpServerCodec(
+      maxInitialLineSize.inBytes.toInt,
+      maxHeaderSize.inBytes.toInt,
+      Int.MaxValue, /* maxChunkSize */
+      false /* validateHeaders, we validate in HeaderValidatorHandler */
+    )
+  }
 
   /**
    * Initialize the client pipeline, adding handlers _before_ the specified role.
@@ -41,9 +73,7 @@ package object http {
   private[finagle] def initClientBefore(
     role: String,
     params: Stack.Params
-  ): ChannelPipeline => Unit = { pipeline =>
-    initClientFn(params, pipeline.addBefore(role, _, _))
-  }
+  ): ChannelPipeline => Unit = { pipeline => initClientFn(params, pipeline.addBefore(role, _, _)) }
 
   /** Initialize the client pipeline by adding elements to the end of the pipeline
    *
@@ -54,25 +84,33 @@ package object http {
   }
 
   /** Initialize the client pipeline accessories including decompression, dechunking, etc. */
-  private[finagle] def initClientFn(params: Stack.Params, fn: (String, ChannelHandler) => Unit): Unit = {
+  private[finagle] def initClientFn(
+    params: Stack.Params,
+    fn: (String, ChannelHandler) => Unit
+  ): Unit = {
     val maxResponseSize = params[MaxResponseSize].size
     val decompressionEnabled = params[Decompression].enabled
-    val streaming = params[Streaming].enabled
 
-    if (decompressionEnabled)
+    if (decompressionEnabled) {
       fn("httpDecompressor", new HttpContentDecompressor)
-
-    if (streaming) {
-      // 8 KB is the size of the maxChunkSize parameter used in netty3,
-      // which is where it stops attempting to aggregate messages that lack
-      // a 'Transfer-Encoding: chunked' header.
-      fn("fixedLenAggregator", new FixedLengthMessageAggregator(8.kilobytes))
-    } else {
-      fn(
-        "httpDechunker",
-        new HttpObjectAggregator(maxResponseSize.inBytes.toInt)
-      )
     }
+
+    params[Streaming] match {
+      case Streaming.Enabled(fixedLengthStreamedAfter) =>
+        fn(
+          "fixedLenAggregator",
+          new FixedLengthMessageAggregator(fixedLengthStreamedAfter)
+        )
+      case Streaming.Disabled =>
+        fn(
+          "httpDechunker",
+          new HttpObjectAggregator(maxResponseSize.inBytes.toInt)
+        )
+    }
+
+    // We're going to validate our headers right before the client exception mapper.
+    fn(HeaderValidatorHandler.HandlerName, HeaderValidatorHandler)
+
     // Map some client related channel exceptions to something meaningful to finagle
     fn("clientExceptionMapper", ClientExceptionMapper)
 
@@ -85,39 +123,30 @@ package object http {
   private[finagle] val ClientPipelineInit: Stack.Params => ChannelPipeline => Unit = {
     params: Stack.Params => pipeline: ChannelPipeline =>
       {
-        val maxChunkSize = params[MaxChunkSize].size
-        val maxHeaderSize = params[MaxHeaderSize].size
-        val maxInitialLineSize = params[MaxInitialLineSize].size
-
-        val codec = new HttpClientCodec(
-          maxInitialLineSize.inBytes.toInt,
-          maxHeaderSize.inBytes.toInt,
-          maxChunkSize.inBytes.toInt
-        )
-
-        pipeline.addLast(HttpCodecName, codec)
-
+        pipeline.addLast(HttpCodecName, newHttpClientCodec(params))
         initClient(params)(pipeline)
       }
   }
 
-  private[finagle] val Netty4HttpTransporter
-    : Stack.Params => SocketAddress => Transporter[Any, Any, TransportContext] =
+  private[finagle] val Netty4HttpTransporter: Stack.Params => SocketAddress => Transporter[
+    Any,
+    Any,
+    TransportContext
+  ] =
     (params: Stack.Params) =>
       (addr: SocketAddress) =>
         Netty4Transporter.raw(
           pipelineInit = ClientPipelineInit(params),
           addr = addr,
           params = params
-    )
+        )
 
   private[finagle] def initServer(params: Stack.Params): ChannelPipeline => Unit = {
     val autoContinue = params[AutomaticContinue].enabled
     val maxRequestSize = params[MaxRequestSize].size
     val decompressionEnabled = params[Decompression].enabled
     val compressionLevel = params[CompressionLevel].level
-    val streaming = params[Streaming].enabled
-    val log = params[Logger].log
+    val stats = params[Stats].statsReceiver
 
     { pipeline: ChannelPipeline =>
       compressionLevel match {
@@ -137,28 +166,35 @@ package object http {
       // nb: Netty's http object aggregator handles 'expect: continue' headers
       // and oversize payloads but the base codec does not. Consequently we need to
       // install handlers to replicate this behavior when streaming.
-      if (streaming) {
-        pipeline.addLast("payloadSizeHandler", new PayloadSizeHandler(maxRequestSize, Some(log)))
-        if (autoContinue)
-          pipeline.addLast("expectContinue", new HttpServerExpectContinueHandler)
+      params[Streaming] match {
+        case Streaming.Enabled(fixedLengthStreamedAfter) =>
+          if (autoContinue)
+            pipeline.addLast("expectContinue", new HttpServerExpectContinueHandler)
 
-        // no need to handle expect headers in the finexLenAggregator since we have the task
-        // specific HttpServerExpectContinueHandler above.
-        pipeline.addLast(
-          "fixedLenAggregator",
-          new FixedLengthMessageAggregator(maxRequestSize, handleExpectContinue = false)
-        )
-      } else
-        pipeline.addLast(
-          "httpDechunker",
-          new FinagleHttpObjectAggregator(
-            maxRequestSize.inBytes.toInt,
-            handleExpectContinue = autoContinue
+          // no need to handle expect headers in the fixedLenAggregator since we have the task
+          // specific HttpServerExpectContinueHandler above.
+          pipeline.addLast(
+            "fixedLenAggregator",
+            new FixedLengthMessageAggregator(fixedLengthStreamedAfter, handleExpectContinue = false)
           )
-        )
+        case Streaming.Disabled =>
+          pipeline.addLast(
+            "httpDechunker",
+            new FinagleHttpObjectAggregator(
+              maxRequestSize.inBytes.toInt,
+              handleExpectContinue = autoContinue
+            )
+          )
+      }
+
+      // Let's see if we can filter out bad URI's before Netty starts handling them...
+      pipeline.addLast(UriValidatorHandler.HandlerName, UriValidatorHandler)
+
+      // We're going to validate our headers right before the bad request handler.
+      pipeline.addLast(HeaderValidatorHandler.HandlerName, HeaderValidatorHandler)
 
       // We need to handle bad requests as the dispatcher doesn't know how to handle them.
-      pipeline.addLast("badRequestHandler", BadRequestHandler)
+      pipeline.addLast("badRequestHandler", new BadRequestHandler(stats))
 
       // Given that Finagle's channel transports aren't doing anything special (yet)
       // about resource management, we have to turn pooled resources into unpooled ones as
@@ -170,18 +206,7 @@ package object http {
   private[finagle] val ServerPipelineInit: Stack.Params => ChannelPipeline => Unit = {
     params: Stack.Params => pipeline: ChannelPipeline =>
       {
-        val maxInitialLineSize = params[MaxInitialLineSize].size
-        val maxHeaderSize = params[MaxHeaderSize].size
-        val maxRequestSize = params[MaxRequestSize].size
-
-        val codec = new HttpServerCodec(
-          maxInitialLineSize.inBytes.toInt,
-          maxHeaderSize.inBytes.toInt,
-          maxRequestSize.inBytes.toInt
-        )
-
-        pipeline.addLast(HttpCodecName, codec)
-
+        pipeline.addLast(HttpCodecName, newHttpServerCodec(params))
         initServer(params)(pipeline)
       }
   }
@@ -191,5 +216,5 @@ package object http {
       Netty4Listener[Any, Any](
         pipelineInit = ServerPipelineInit(params),
         params = params
-    )
+      )
 }

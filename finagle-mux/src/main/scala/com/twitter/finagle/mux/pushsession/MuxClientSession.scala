@@ -1,6 +1,6 @@
 package com.twitter.finagle.mux.pushsession
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.liveness.FailureDetector
 import com.twitter.finagle._
 import com.twitter.finagle.mux.{ReqRepFilter, Request, Response, ServerError}
@@ -41,8 +41,8 @@ private[finagle] final class MuxClientSession(
   detectorConfig: FailureDetector.Config,
   name: String,
   statsReceiver: StatsReceiver,
-  timer: Timer
-) extends PushSession[ByteReader, Buf](handle) {
+  timer: Timer)
+    extends PushSession[ByteReader, Buf](handle) {
   import MuxClientSession._
 
   // Volatile only to ensure prompt visibility from the synchronous
@@ -61,7 +61,7 @@ private[finagle] final class MuxClientSession(
   private[this] val exec: Executor = handle.serialExecutor
 
   private[this] val failureDetector =
-    FailureDetector(detectorConfig, ping, statsReceiver.scope("failuredetector"))
+    FailureDetector(detectorConfig, ping _, statsReceiver.scope("failuredetector"))
 
   // Metrics
   private[this] val leaseCounter = statsReceiver.counter(Verbosity.Debug, "leased")
@@ -135,8 +135,9 @@ private[finagle] final class MuxClientSession(
       if (message != null && !isDrained) {
         handleProcessMessage(message)
       }
-    } catch { case NonFatal(t) =>
-      handleShutdown(Some(t))
+    } catch {
+      case NonFatal(t) =>
+        handleShutdown(Some(t))
     }
   }
 

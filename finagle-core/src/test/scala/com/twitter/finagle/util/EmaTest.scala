@@ -1,11 +1,8 @@
 package com.twitter.finagle.util
 
-import org.junit.runner.RunWith
 import org.scalactic.Tolerance
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class EmaTest extends FunSuite {
   import Tolerance._
 
@@ -40,7 +37,7 @@ class EmaTest extends FunSuite {
 
     e.reset()
 
-    assert(e.last == 0D)
+    assert(e.last == 0d)
     assert(e.update(2, 5) == 5)
   }
 }

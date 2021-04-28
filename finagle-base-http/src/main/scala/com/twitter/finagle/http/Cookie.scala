@@ -1,17 +1,16 @@
 package com.twitter.finagle.http
 
-import com.twitter.conversions.time._
 import com.twitter.finagle.http.cookie.SameSite
 import com.twitter.util.Duration
 import java.util.{BitSet => JBitSet}
-import org.jboss.netty.handler.codec.http.{Cookie => NettyCookie}
 
 object Cookie {
 
-  private[finagle] val DefaultMaxAge = Int.MinValue.seconds // Netty's DefaultCookie default.
+  private[finagle] val DefaultMaxAge: Duration = Duration.Bottom
 
-  private[this] val IllegalNameChars = Set('\t', '\n', '\u000b', '\f', '\r', ' ', ',', ';', '=')
-  private[this] val IllegalValueChars = Set('\n', '\u000b', '\f', '\r', ';')
+  private[this] val IllegalNameChars: Set[Char] =
+    Set('\t', '\n', '\u000b', '\f', '\r', ' ', ',', ';', '=')
+  private[this] val IllegalValueChars: Set[Char] = Set('\n', '\u000b', '\f', '\r', ';')
 
   private[this] val IllegalNameCharsBitSet: JBitSet = {
     val bs = new JBitSet
@@ -39,11 +38,7 @@ object Cookie {
     val trimmed = name.trim
     if (trimmed.isEmpty) throw new IllegalArgumentException("Cookie name cannot be empty")
     else {
-      if (trimmed.head == '$')
-        throw new IllegalArgumentException(
-          s"Cookie name starting with '$$' not allowed: $trimmed"
-        )
-      else if (stringContains(trimmed, IllegalNameCharsBitSet))
+      if (stringContains(trimmed, IllegalNameCharsBitSet))
         throw new IllegalArgumentException(
           s"Cookie name contains one of the following prohibited characters: ${IllegalNameChars
             .mkString(",")}: $trimmed"
@@ -81,8 +76,7 @@ final class Cookie private (
   private[this] val _maxAge: Option[Duration],
   val secure: Boolean,
   val httpOnly: Boolean,
-  val sameSite: SameSite
-) { self =>
+  val sameSite: SameSite) { self =>
 
   /**
    * Create a cookie.
@@ -92,7 +86,7 @@ final class Cookie private (
     value: String,
     domain: Option[String] = None,
     path: Option[String] = None,
-    maxAge: Option[Duration] = Some(Cookie.DefaultMaxAge),
+    maxAge: Option[Duration] = None,
     secure: Boolean = false,
     httpOnly: Boolean = false,
     sameSite: SameSite = SameSite.Unset
@@ -107,15 +101,12 @@ final class Cookie private (
     sameSite = sameSite
   )
 
-  def this(
-    name: String,
-    value: String
-  ) = this(
+  def this(name: String, value: String) = this(
     name,
     value,
     None,
     None,
-    Some(Cookie.DefaultMaxAge),
+    None,
     false,
     false,
     SameSite.Unset
@@ -139,20 +130,6 @@ final class Cookie private (
     httpOnly,
     SameSite.Unset
   )
-
-  @deprecated("Use Bijections.from to create a Cookie from a Netty Cookie")
-  def this(underlying: NettyCookie) = {
-    this(
-      underlying.getName,
-      underlying.getValue,
-      underlying.getDomain,
-      underlying.getPath,
-      Option(underlying.getMaxAge.seconds),
-      underlying.isSecure,
-      underlying.isHttpOnly,
-      SameSite.Unset /* Netty cookies do not support the SameSite attribute */
-    )
-  }
 
   def maxAge: Duration = _maxAge match {
     case Some(maxAge) => maxAge

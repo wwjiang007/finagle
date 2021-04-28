@@ -3,16 +3,13 @@ package com.twitter.finagle.netty4.http.handler
 import io.netty.buffer._
 import io.netty.channel.embedded.EmbeddedChannel
 import io.netty.handler.codec.http._
-import org.junit.runner.RunWith
 import org.scalacheck.{Arbitrary, Gen}
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 import org.scalatest.{FunSuite, OneInstancePerTest}
 
-@RunWith(classOf[JUnitRunner])
 class UnpoolHttpHandlerTest
     extends FunSuite
-    with GeneratorDrivenPropertyChecks
+    with ScalaCheckDrivenPropertyChecks
     with OneInstancePerTest {
 
   val channel = new EmbeddedChannel(UnpoolHttpHandler)

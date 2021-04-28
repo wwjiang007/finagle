@@ -16,6 +16,8 @@ object ThriftSmuxSslTestComponents {
 
   private val concatService = new TestService.MethodPerEndpoint {
     def query(x: String): Future[String] = Future.value(x.concat(x))
+    def question(y: String): Future[String] = Future.value(y.concat(y))
+    def inquiry(z: String): Future[String] = Future.value(z.concat(z))
   }
 
   private val chainCert = TempFile.fromResourcePath("/ssl/certs/svc-test-chain.cert.pem")
@@ -34,19 +36,13 @@ object ThriftSmuxSslTestComponents {
   // deleteOnExit is handled by TempFile
 
   val NeverValidServerSide = new SslServerSessionVerifier {
-    def apply(
-      address: Address,
-      config: SslServerConfiguration,
-      session: SSLSession
-    ): Boolean = false
+    def apply(address: Address, config: SslServerConfiguration, session: SSLSession): Boolean =
+      false
   }
 
   val NeverValidClientSide = new SslClientSessionVerifier {
-    def apply(
-      address: Address,
-      config: SslClientConfiguration,
-      session: SSLSession
-    ): Boolean = false
+    def apply(address: Address, config: SslClientConfiguration, session: SSLSession): Boolean =
+      false
   }
 
   def getPort(server: ListeningServer): Int =
@@ -60,10 +56,11 @@ object ThriftSmuxSslTestComponents {
   ): TestService.MethodPerEndpoint = {
     val clientConfig = SslClientConfiguration(
       keyCredentials = KeyCredentials.CertAndKey(clientCert, clientKey),
-      trustCredentials = TrustCredentials.CertCollection(chainCert))
+      trustCredentials = TrustCredentials.CertCollection(chainCert)
+    )
 
-    ThriftMux.client
-      .withTransport.tls(clientConfig, sessionVerifier)
+    ThriftMux.client.withTransport
+      .tls(clientConfig, sessionVerifier)
       .withOpportunisticTls(OpportunisticTls.Required)
       .withStatsReceiver(statsReceiver)
       .withLabel(label)
@@ -78,10 +75,11 @@ object ThriftSmuxSslTestComponents {
     val serverConfig = SslServerConfiguration(
       keyCredentials = KeyCredentials.CertAndKey(serverCert, serverKey),
       trustCredentials = TrustCredentials.CertCollection(chainCert),
-      clientAuth = ClientAuth.Needed)
+      clientAuth = ClientAuth.Needed
+    )
 
-    ThriftMux.server
-      .withTransport.tls(serverConfig, sessionVerifier)
+    ThriftMux.server.withTransport
+      .tls(serverConfig, sessionVerifier)
       .withOpportunisticTls(OpportunisticTls.Required)
       .withStatsReceiver(statsReceiver)
       .withLabel(label)

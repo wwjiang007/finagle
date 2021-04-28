@@ -5,6 +5,11 @@ import com.twitter.finagle.filter.RequestLogger
 import com.twitter.finagle.naming.BindingFactory
 import com.twitter.finagle.param._
 import com.twitter.finagle.stack.nilStack
+import com.twitter.finagle.stats.{
+  Client,
+  RelativeNameMarkingStatsReceiver,
+  RoleConfiguredStatsReceiver
+}
 import com.twitter.finagle.util.Showable
 
 /**
@@ -17,7 +22,7 @@ import com.twitter.finagle.util.Showable
  *      clients.
  */
 trait EndpointerStackClient[Req, Rep, This <: EndpointerStackClient[Req, Rep, This]]
-  extends StackClient[Req, Rep]
+    extends StackClient[Req, Rep]
     with Stack.Parameterized[This]
     with CommonParams[This]
     with ClientParams[This]
@@ -38,13 +43,22 @@ trait EndpointerStackClient[Req, Rep, This <: EndpointerStackClient[Req, Rep, Th
   def withStack(stack: Stack[ServiceFactory[Req, Rep]]): This =
     copy1(stack = stack)
 
+  override def withStack(
+    fn: Stack[ServiceFactory[Req, Rep]] => Stack[ServiceFactory[Req, Rep]]
+  ): This =
+    withStack(fn(stack))
+
   /**
    * Creates a new StackClient with `f` applied to `stack`.
    *
-   * For expert users only.
+   * This is the same as [[withStack]].
    */
+  @deprecated(
+    "Use withStack(Stack[ServiceFactory[Req, Rep]] => Stack[ServiceFactory[Req, Rep]]) instead",
+    "2018-10-30"
+  )
   def transformed(f: Stack[ServiceFactory[Req, Rep]] => Stack[ServiceFactory[Req, Rep]]): This =
-    copy1(stack = f(stack))
+    withStack(f)
 
   /**
    * Creates a new StackClient with parameter `p`.
@@ -95,6 +109,8 @@ trait EndpointerStackClient[Req, Rep, This <: EndpointerStackClient[Req, Rep, Th
     params: Stack.Params = this.params
   ): This
 
+  protected def injectors: Seq[ClientParamsInjector] = StackClient.DefaultInjectors.injectors
+
   /**
    * @inheritdoc
    *
@@ -118,17 +134,23 @@ trait EndpointerStackClient[Req, Rep, This <: EndpointerStackClient[Req, Rep, Th
       val baseStack = stack ++ (endpointer +: nilStack)
       params[RequestLogger.Param] match {
         case RequestLogger.Param.Enabled =>
-          val tranformer = RequestLogger.newStackTransformer(clientLabel)
-          tranformer(baseStack)
+          val transformer = RequestLogger.newStackTransformer(clientLabel)
+          transformer(baseStack)
         case RequestLogger.Param.Disabled =>
           baseStack
       }
     }
 
-    val clientParams = params +
-      Label(clientLabel) +
-      Stats(stats.scope(clientLabel)) +
-      BindingFactory.Dest(dest)
+    val clientSr = new RoleConfiguredStatsReceiver(
+      new RelativeNameMarkingStatsReceiver(stats.scope(clientLabel)),
+      Client,
+      Some(clientLabel))
+
+    val clientParams = injectors.foldLeft(
+      params +
+        Label(clientLabel) +
+        Stats(clientSr) +
+        BindingFactory.Dest(dest)) { case (prms, injector) => injector(prms) }
 
     clientStack.make(clientParams)
   }

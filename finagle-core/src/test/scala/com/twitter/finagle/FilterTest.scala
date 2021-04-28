@@ -1,6 +1,6 @@
 package com.twitter.finagle
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.service.{ConstantService, NilService}
 import com.twitter.util.{Await, Future, Promise, Time}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
@@ -17,10 +17,7 @@ class FilterTest extends FunSuite {
 
   class PassThruTypeAgnosticFilter extends Filter.TypeAgnostic {
     def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = new Filter[Req, Rep, Req, Rep] {
-      def apply(
-        request: Req,
-        service: Service[Req, Rep]
-      ): Future[Rep] = service(request)
+      def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = service(request)
     }
   }
 
@@ -33,39 +30,27 @@ class FilterTest extends FunSuite {
   val constSvcFactory = ServiceFactory.const(constSvc)
 
   class FilterPlus1 extends Filter[Int, Int, Int, Int] {
-    def apply(
-      request: Int,
-      service: Service[Int, Int]
-    ): Future[Int] = Future.value(request + 1)
+    def apply(request: Int, service: Service[Int, Int]): Future[Int] = Future.value(request + 1)
 
     override def toString: String = "plus1"
   }
 
   class FilterTimes2 extends Filter[Int, Int, Int, Int] {
-    def apply(
-      request: Int,
-      service: Service[Int, Int]
-    ): Future[Int] = Future.value(request * 2)
+    def apply(request: Int, service: Service[Int, Int]): Future[Int] = Future.value(request * 2)
 
     override def toString: String = "times2"
   }
 
   class FilterMinus1 extends Filter[Int, Int, Int, Int] {
-    def apply(
-      request: Int,
-      service: Service[Int, Int]
-    ): Future[Int] = Future.value(request - 1)
+    def apply(request: Int, service: Service[Int, Int]): Future[Int] = Future.value(request - 1)
 
     override def toString: String = "minus1"
   }
 
   class AgnosticFilter1 extends Filter.TypeAgnostic { self =>
-    override def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = {
+    def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = {
       new Filter[Req, Rep, Req, Rep] {
-        def apply(
-          request: Req,
-          service: Service[Req, Rep]
-        ): Future[Rep] = ???
+        def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = ???
         override def toString: String = self.toString
       }
     }
@@ -74,29 +59,31 @@ class FilterTest extends FunSuite {
   }
 
   class AgnosticFilter2 extends Filter.TypeAgnostic { self =>
-    override def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = {
+    def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = {
       new Filter[Req, Rep, Req, Rep] {
-        def apply(
-          request: Req,
-          service: Service[Req, Rep]
-        ): Future[Rep] = ???
+        def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = ???
         override def toString: String = self.toString
       }
     }
   }
 
   class AgnosticFilter3 extends Filter.TypeAgnostic { self =>
-    override def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = {
+    def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = {
       new Filter[Req, Rep, Req, Rep] {
-        def apply(
-          request: Req,
-          service: Service[Req, Rep]
-        ): Future[Rep] = ???
+        def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = ???
         override def toString: String = self.toString
       }
     }
 
     override def toString: String = "agnosticFilter3"
+  }
+
+  class OTTypeAgnostic extends Filter.OneTime {
+    def apply[Req, Rep](req: Req, svc: Service[Req, Rep]): Future[Rep] = {
+      svc(req)
+    }
+
+    override def toString = "simple"
   }
 
   test("Filter.andThen(Filter): applies next filter") {
@@ -173,7 +160,7 @@ class FilterTest extends FunSuite {
       andThenAgnosticSvc.toString == "agnosticFilter1.andThen(com.twitter.finagle.FilterTest$AgnosticFilter2).andThen(agnosticFilter3).andThen(com.twitter.finagle.service.ConstantService(ConstFuture(Return(2))))"
     )
 
-    // chained agnostic filters andThen chained agnostic filters andThen service -- composes like typed filters when composed with a service/servicefactory (since it uses toFilter)
+    // chained agnostic filters andThen chained agnostic filters andThen service -- composes like typed filters when composed with a service/serviceFactory (since it uses toFilter)
     assert(
       andThenAgnostic
         .andThen(andThenAgnostic)
@@ -318,18 +305,14 @@ class FilterTest extends FunSuite {
   }
 
   test("Filter.andThen(Filter): lifts synchronous exceptions into Future.exception") {
-    val fail = Filter.mk[Int, Int, Int, Int] { (_, _) =>
-      throw new Exception
-    }
+    val fail = Filter.mk[Int, Int, Int, Int] { (_, _) => throw new Exception }
     val svc = (new PassThruFilter).andThen(fail).andThen(constSvc)
     val result = await(svc(4).liftToTry)
     assert(result.isThrow)
   }
 
   test("Filter.andThen(Service): can rescue synchronous exceptions from Service") {
-    val throwSvc = Service.mk[Int, Int] { _ =>
-      throw new IllegalArgumentException("bummer")
-    }
+    val throwSvc = Service.mk[Int, Int] { _ => throw new IllegalArgumentException("bummer") }
     val filter = new SimpleFilter[Int, Int] {
       def apply(request: Int, service: Service[Int, Int]): Future[Int] = {
         service(request).rescue {
@@ -396,16 +379,30 @@ class FilterTest extends FunSuite {
     verify(spied).apply(any[ClientConnection])
   }
 
-  test("Filter.andThenIf: applies next filter when true") {
+  test("Filter.andThenIf (tuple): applies next filter when true") {
     val spied = spy(new PassThruFilter)
     val svc = (new PassThruFilter).andThenIf((true, spied)).andThen(constSvc)
     await(svc(4))
     verify(spied).apply(any[Int], any[Service[Int, Int]])
   }
 
-  test("Filter.andThenIf: doesn't apply next filter when false") {
+  test("Filter.andThenIf (tuple): doesn't apply next filter when false") {
     val spied = spy(new PassThruFilter)
     val svc = (new PassThruFilter).andThenIf((false, spied)).andThen(constSvc)
+    await(svc(4))
+    verify(spied, never).apply(any[Int], any[Service[Int, Int]])
+  }
+
+  test("Filter.andThenIf (params): applies next filter when true") {
+    val spied = spy(new PassThruFilter)
+    val svc = (new PassThruFilter).andThenIf(true, spied).andThen(constSvc)
+    await(svc(4))
+    verify(spied).apply(any[Int], any[Service[Int, Int]])
+  }
+
+  test("Filter.andThenIf (params): doesn't apply next filter when false") {
+    val spied = spy(new PassThruFilter)
+    val svc = (new PassThruFilter).andThenIf(false, spied).andThen(constSvc)
     await(svc(4))
     verify(spied, never).apply(any[Int], any[Service[Int, Int]])
   }
@@ -547,5 +544,54 @@ class FilterTest extends FunSuite {
 
     // Right identity
     isIdentity(_.andThen(Filter.TypeAgnostic.Identity))
+  }
+
+  test("OneTime may only generate one filter per instance") {
+    val simple1, simple2, simple3 = new OTTypeAgnostic
+
+    simple1.toFilter[Int, Int]
+    intercept[IllegalStateException] {
+      simple1.toFilter[Int, Int]
+    }
+
+    simple2.toFilter[Int, Int]
+    intercept[IllegalStateException] {
+      simple2.toFilter[Int, Int]
+    }
+
+    val invalidChain = simple3.andThen(new PassThruTypeAgnosticFilter).andThen(simple3)
+    intercept[IllegalStateException] {
+      invalidChain.andThen(constSvc)
+    }
+  }
+
+  test("OneTime passes name for toString") {
+    val simple = new OTTypeAgnostic
+    assert(
+      simple.andThen(new PassThruTypeAgnosticFilter).toString ==
+        "simple.andThen(com.twitter.finagle.FilterTest$PassThruTypeAgnosticFilter)"
+    )
+  }
+
+  test("Filter: CanStackFrom") {
+    val svc: Service[Int, Int] = Service.const(Future.never)
+    Stack
+      .leaf(Stack.Role("svc"), svc)
+      .prepend(Stack.Role("filter"), Filter.identity: Filter[Int, Int, Int, Int])
+
+    Stack
+      .leaf(Stack.Role("sf"), ServiceFactory.const(svc))
+      .prepend(Stack.Role("filter"), Filter.identity: Filter[Int, Int, Int, Int])
+  }
+
+  test("Filter.TypeAgnostic: CanStackFrom") {
+    val svc: Service[Int, Int] = Service.const(Future.never)
+    Stack
+      .leaf(Stack.Role("svc"), svc)
+      .prepend(Stack.Role("filter"), Filter.TypeAgnostic.Identity)
+
+    Stack
+      .leaf(Stack.Role("sf"), ServiceFactory.const(svc))
+      .prepend(Stack.Role("filter"), Filter.TypeAgnostic.Identity)
   }
 }

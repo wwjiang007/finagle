@@ -1,22 +1,26 @@
 package com.twitter.finagle.serverset2
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.Backoff
 import com.twitter.finagle.serverset2.client._
-import com.twitter.finagle.service.Backoff
 import com.twitter.finagle.stats.NullStatsReceiver
 import com.twitter.finagle.zookeeper.ZkInstance
 import com.twitter.io.Buf
 import com.twitter.util._
-import org.junit.runner.RunWith
 import org.scalatest.concurrent.Eventually._
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.time._
 import org.scalatest.{BeforeAndAfter, FunSuite}
 
-@RunWith(classOf[JUnitRunner])
 class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
   val zkTimeout = 100.milliseconds
-  val retryStream = new RetryStream(Backoff.const(zkTimeout))
+
+  // RetryStream doesn't work with MockTimer (yes, even after we tick it).
+  // So, use zero back off to make test deterministic.
+  // Alternatively, use a real timer such as ScheduledThreadPoolTimer,
+  // which also works but presumably less deterministic.
+  //
+  // TODO: figure out why MockTimer doesn't work.
+  val retryStream = new RetryStream(Backoff.const(0.milliseconds))
 
   @volatile var inst: ZkInstance = _
 
@@ -42,8 +46,7 @@ class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
     inst.stop()
   }
 
-  // COORD-339
-  if (!sys.props.contains("SKIP_FLAKY")) test("Session expiration 2") {
+  test("Session expiration 2") {
     implicit val timer = new MockTimer
     val connected: (WatchState => Boolean) = {
       case WatchState.SessionState(SessionState.SyncConnected) => true
@@ -56,9 +59,7 @@ class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
     )
 
     @volatile var states = Seq.empty[SessionState]
-    val state = session1 flatMap { session1 =>
-      session1.state
-    }
+    val state = session1 flatMap { session1 => session1.state }
     state.changes.register(Witness({ ws: WatchState =>
       ws match {
         case WatchState.SessionState(s) => states = s +: states
@@ -97,8 +98,7 @@ class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
     )
   }
 
-  // COORD-339
-  if (!sys.props.contains("SKIP_FLAKY")) test("ZkSession.retrying") {
+  test("ZkSession.retrying") {
     implicit val timer = new MockTimer
     val watch = Stopwatch.start()
     val varZkSession = ZkSession.retrying(
@@ -117,9 +117,9 @@ class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
     }))
 
     @volatile var sessions = Seq[ZkSession]()
-    varZkSession.changes.register(Witness({ s: ZkSession =>
-      sessions = s +: sessions
-    }))
+    // The initial size of sessions is 1, because the current value
+    // of varZkSession (WatchState.pending) is emitted upon subscription.
+    varZkSession.changes.register(Witness({ s: ZkSession => sessions = s +: sessions }))
 
     // Wait for the initial connect.
     eventually {
@@ -127,7 +127,7 @@ class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
         Var.sample(varZkState) ==
           WatchState.SessionState(SessionState.SyncConnected)
       )
-      assert(sessions.size == 1)
+      assert(sessions.size == 2)
     }
 
     val session1 = Var.sample(varZkSession)
@@ -181,6 +181,6 @@ class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
           )
       )
     }
-    assert(sessions.size == 2)
+    assert(sessions.size == 3)
   }
 }

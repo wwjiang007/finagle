@@ -1,13 +1,15 @@
 package com.twitter.finagle.server
 
 import com.twitter.concurrent.AsyncSemaphore
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.Stack.Module0
 import com.twitter.finagle._
 import com.twitter.finagle.context.{Contexts, Deadline}
-import com.twitter.finagle.filter.{RequestSemaphoreFilter, ServerAdmissionControl}
+import com.twitter.finagle.filter.RequestSemaphoreFilter
 import com.twitter.finagle.param.{Stats, Timer}
 import com.twitter.finagle.server.utils.StringServer
 import com.twitter.finagle.service.{ExpiringService, TimeoutFilter}
+import com.twitter.finagle.ssl.session.{NullSslSessionInfo, SslSessionInfo}
 import com.twitter.finagle.stack.Endpoint
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.finagle.util.StackRegistry
@@ -17,6 +19,23 @@ import org.scalatest.FunSuite
 import org.scalatest.concurrent.Eventually
 
 class StackServerTest extends FunSuite with Eventually {
+
+  test("withStack (Function1)") {
+    val module = new Module0[ServiceFactory[String, String]] {
+      def make(next: ServiceFactory[String, String]): ServiceFactory[String, String] = ???
+      def role: Stack.Role = Stack.Role("no-op")
+      def description: String = "no-op"
+    }
+
+    val init = StringServer.server.stack
+    assert(!init.contains(module.role))
+
+    val modified = StringServer.server.withStack(_.prepend(module)).stack
+    assert(modified.contains(module.role))
+
+    init.tails.map(_.head).foreach { stackHead => assert(modified.contains(stackHead.role)) }
+  }
+
   test("Deadline isn't changed until after it's recorded") {
     val echo = ServiceFactory.const(Service.mk[Unit, Deadline] { unit =>
       Future.value(Contexts.broadcast(Deadline))
@@ -43,9 +62,7 @@ class StackServerTest extends FunSuite with Eventually {
   test("StackServer uses ExpiringService") {
     @volatile var closed = false
     val connSF = new ServiceFactory[Int, Int] {
-      val svc = Service.mk[Int, Int] { i =>
-        Future.value(i)
-      }
+      val svc = Service.mk[Int, Int] { i => Future.value(i) }
       def apply(conn: ClientConnection) = {
         conn.onClose.ensure { closed = true }
         Future.value(svc)
@@ -72,6 +89,7 @@ class StackServerTest extends FunSuite with Eventually {
         Future.Done
       }
       def onClose: Future[Unit] = closed
+      def sslSessionInfo: SslSessionInfo = NullSslSessionInfo
     }
 
     val svc = Await.result(factory(conn), 5.seconds)
@@ -117,7 +135,7 @@ class StackServerTest extends FunSuite with Eventually {
     }
 
     val csf = CanStackFrom.fromFun[ServiceFactory[String, String]]
-    val stackable = csf.toStackable(new Stack.Role("something"), fn)
+    val stackable = csf.toStackable(Stack.Role("something"), fn)
     val stk: Stack[ServiceFactory[String, String]] = StackServer.newStack.prepend(stackable)
     val factory = ServiceFactory.const(Service.const[String](Future.value("hi")))
 
@@ -128,53 +146,14 @@ class StackServerTest extends FunSuite with Eventually {
     assert(serviceFactoryClosed.isDefined)
   }
 
-  test("ensure onServerClosed Promise is satisfied upon server close") {
-    val wasPromiseSatisfied = new Promise[Unit]
-
-    class ClosingFilter[Req, Rep](onServerClose: Future[Unit]) extends SimpleFilter[Req, Rep] {
-      def apply(req: Req, service: Service[Req, Rep]): Future[Rep] = {
-        service(req)
-      }
-      onServerClose.onSuccess { _ =>
-        wasPromiseSatisfied.setDone()
-      }
-    }
-
-    object ClosingFilter2 {
-      val name = "closing filter"
-
-      val mkFilter = { params: ServerAdmissionControl.ServerParams =>
-        new Filter.TypeAgnostic {
-          def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] =
-            new ClosingFilter[Req, Rep](onServerClose = params.onServerClose)
-        }
-      }
-    }
-    try {
-      ServerAdmissionControl.register(ClosingFilter2.name, ClosingFilter2.mkFilter)
-      val echo = ServiceFactory.const(Service.mk[String, String](s => Future.value(s)))
-      val stack = StackServer.newStack[String, String] ++ Stack.leaf(Endpoint, echo)
-      val factory = ServiceFactory.const(Service.const[String](Future.value("hi")))
-
-      val server = StringServer.server
-        .withStack(stack)
-        .serve(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), factory)
-
-      Await.ready(server.close(), 5.seconds)
-      assert(wasPromiseSatisfied.isDefined)
-    } finally {
-      ServerAdmissionControl.unregister(ClosingFilter2.name)
-    }
-  }
-
   test("Rejections from RequestSemaphoreFilter are captured in stats") {
     val neverRespond = ServiceFactory.const(Service.mk[String, String](_ => Future.never))
     val stack = StackServer.newStack[String, String] ++ Stack.leaf(Endpoint, neverRespond)
     val sr = new InMemoryStatsReceiver
     val factory = stack.make(
       StackServer.defaultParams +
-      RequestSemaphoreFilter.Param(Some(new AsyncSemaphore(initialPermits = 1, maxWaiters = 0))) +
-      Stats(sr)
+        RequestSemaphoreFilter.Param(Some(new AsyncSemaphore(initialPermits = 1, maxWaiters = 0))) +
+        Stats(sr)
     )
     val svc = Await.result(factory(), 5.seconds)
 
@@ -242,7 +221,7 @@ class StackServerTest extends FunSuite with Eventually {
         val name = "test"
         def apply[A, B](stack: Stack[ServiceFactory[A, B]]) =
           stack
-            // testModule contains the assertion for the "hello" param.
+          // testModule contains the assertion for the "hello" param.
             .prepend(testModule)
             .prepend(hello)
       }

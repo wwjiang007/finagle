@@ -1,12 +1,12 @@
 package com.twitter.finagle.netty4.http
 
-import com.twitter.conversions.storage._
+import com.twitter.conversions.StorageUnitOps._
 import com.twitter.finagle.ChannelBufferUsageException
 import com.twitter.finagle.http.codec.ChannelBufferUsageTracker
 import io.netty.buffer.Unpooled
 import io.netty.channel.{ChannelHandlerContext, ChannelPromise}
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 class ByteBufManagerTest extends FunSuite with MockitoSugar {
 

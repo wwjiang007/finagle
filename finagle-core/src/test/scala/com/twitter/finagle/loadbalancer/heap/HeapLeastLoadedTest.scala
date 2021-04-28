@@ -5,8 +5,8 @@ import com.twitter.finagle._
 import com.twitter.util.{Var, ReadWriteVar, Activity, Await, Future, Time}
 import java.util.concurrent.atomic.AtomicInteger
 import org.scalatest.FunSuite
-import org.scalatest.junit.AssertionsForJUnit
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.junit.AssertionsForJUnit
+import org.scalatestplus.mockito.MockitoSugar
 import scala.util.Random
 
 class HeapLeastLoadedTest extends FunSuite with MockitoSugar with AssertionsForJUnit {
@@ -37,9 +37,7 @@ class HeapLeastLoadedTest extends FunSuite with MockitoSugar with AssertionsForJ
   class Ctx {
     val N = 10
     val statsReceiver = new InMemoryStatsReceiver
-    val half1, half2 = 0 until N / 2 map { i =>
-      new LoadedFactory(i.toString)
-    }
+    val half1, half2 = 0 until N / 2 map { i => new LoadedFactory(i.toString) }
     val factories = half1 ++ half2
     val mutableFactories = new ReadWriteVar(factories)
     val nonRng = new Random {

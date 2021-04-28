@@ -1,9 +1,10 @@
 package com.twitter.finagle.loadbalancer.aperture
 
 import com.twitter.finagle.util.Rng
-import scala.collection.mutable.ListBuffer
+import scala.collection.immutable.VectorBuilder
 
 private object Ring {
+
   /**
    * Returns the length of the intersection between the two ranges.
    *
@@ -48,7 +49,7 @@ private class Ring(size: Int, rng: Rng) {
    * @param offset A value between [0, 1.0).
    */
   def index(offset: Double): Int = {
-    if (offset < 0 && offset >= 1.0)
+    if (offset < 0 || offset >= 1.0)
       throw new IllegalArgumentException(s"offset must be between [0, 1.0): $offset")
 
     math.floor(offset * size).toInt % size
@@ -61,30 +62,34 @@ private class Ring(size: Int, rng: Rng) {
    * Thus, we interpret a width of 0 as picking one index.
    */
   def range(offset: Double, width: Double): Int = {
-    if (width < 0 || width > 1.0)
+    if (width < 0 || width > 1.0) {
       throw new IllegalArgumentException(s"width must be between [0, 1.0]: $width")
+    } else if (width < 1.0) {
+      val begin = index(offset)
+      val end = index((offset + width) % 1.0)
 
-    // We will wrap around the entire ring, so return the size.
-    if (width == 1) size
-    // We only have one index to select from. Arguably, returning
-    // a diff of zero here is correct too. However, in order to
-    // project what `pick2` will do we return a range of 1.
-    else if (width == 0) 1
-    else {
-      val ab = {
-        val i = index(offset)
-        val w = weight(i, offset, width)
-        if (w > 0) i else i + 1
+      // We wrapped around the entire ring, so return the size.
+      if (begin == end && width > unitWidth) size
+      // We only have one index to select from. Arguably, returning
+      // a diff of zero here is correct too. However, in order to
+      // project what `pick2` will do we return a range of 1.
+      else if (begin == end) 1
+      else {
+        val beginWeight = weight(begin, offset, width)
+        val endWeight = weight(end, offset, width)
+
+        // we want to project what `pick2` will do, so we need to
+        // take into account the weight of `begin` and `end`.
+        val adjustedBegin = if (beginWeight > 0) begin else begin + 1
+        val adjustedEnd = if (endWeight > 0) end + 1 else end
+
+        val diff = adjustedEnd - adjustedBegin
+        if (diff <= 0) diff + size else diff
       }
-
-      val ae = {
-        val i = index((offset + width) % 1.0)
-        val w = weight(i, offset, width)
-        if (w > 0) i + 1 else i
-      }
-
-      val diff = ae - ab
-      if (diff < 0) diff + size else diff
+    } else {
+      // We know that `width == 1.0` in this case, meaning the entire
+      // ring is within range.
+      size
     }
   }
 
@@ -97,14 +102,24 @@ private class Ring(size: Int, rng: Rng) {
     if (width < 0 || width > 1.0)
       throw new IllegalArgumentException(s"width must be between [0, 1.0]: $width")
 
-    // In cases where `offset + width` wraps around the ring, we need
-    // to scale the range by 1.0 where it overlaps.
-    val ab: Double = {
-      val ab0 = index * unitWidth
-      if (ab0 + 1 < offset + width) ab0 + 1 else ab0
+    val ab = index * unitWidth
+    val ae = ab + unitWidth
+
+    // In cases where [offset, offset + width) wraps around the ring,
+    // it's easier to calculate the size of the inverse range,
+    // and subtract that from the size of the full ring
+    if (offset + width > 1.0) {
+      // We know that the inverse of [offset, offset + width) is a single
+      // contiguous range, which does not overlap the boundary of the ring.
+      val start = (offset + width) % 1
+      val end = offset
+
+      // 1.0 is the size of the full ring, so by subtracting the size of the inverse,
+      // we can determine the size of [offset, offset + width)
+      1D - (intersect(ab, ae, start, end) / unitWidth)
+    } else {
+      intersect(ab, ae, offset, offset + width) / unitWidth
     }
-    val ae: Double = ab + unitWidth
-    intersect(ab, ae, offset, offset + width) / unitWidth
   }
 
   /**
@@ -114,16 +129,16 @@ private class Ring(size: Int, rng: Rng) {
    * Thus, we interpret a width of 0 as picking one index.
    */
   def indices(offset: Double, width: Double): Seq[Int] = {
-    val seq = new ListBuffer[Int]
+    val builder = new VectorBuilder[Int]
     var i = index(offset)
     var r = range(offset, width)
     while (r > 0) {
       val idx = i % size
-      seq += idx
+      builder += idx
       i += 1
       r -= 1
     }
-    seq
+    builder.result()
   }
 
   /**

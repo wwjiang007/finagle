@@ -1,8 +1,15 @@
 package com.twitter.finagle.thriftmux.pushsession
 
-import com.twitter.finagle.mux.pushsession.{MessageWriter, MuxChannelHandle, MuxMessageDecoder, Negotiation}
+import com.twitter.finagle.mux.pushsession.{
+  MessageWriter,
+  MuxChannelHandle,
+  MuxMessageDecoder,
+  Negotiation,
+  SharedNegotiationStats
+}
 import com.twitter.finagle._
 import com.twitter.finagle.mux.{Request, Response}
+import com.twitter.finagle.mux.Handshake.Headers
 import com.twitter.finagle.mux.transport.{BadMessageException, Message}
 import com.twitter.finagle.param.Stats
 import com.twitter.finagle.pushsession.{PushChannelHandle, PushSession, RefPushSession}
@@ -27,11 +34,14 @@ import scala.util.control.NonFatal
 private[finagle] final class MuxDowngradingNegotiator(
   refSession: RefPushSession[ByteReader, Buf],
   params: Stack.Params,
+  sharedStats: SharedNegotiationStats,
   handle: MuxChannelHandle,
-  service: Service[Request, Response]
-) extends PushSession[ByteReader, Buf](handle) {
+  service: Service[Request, Response])
+    extends PushSession[ByteReader, Buf](handle) {
   import MuxDowngradingNegotiator._
 
+  // This should only be satisfied after we've completed an upgrade, or failed
+  // due to an unrecognized protocol or TLS requirements.
   private[this] val handshakeDone = Promise[Unit]
 
   private[this] val sr = params[Stats].statsReceiver
@@ -48,16 +58,26 @@ private[finagle] final class MuxDowngradingNegotiator(
     // This facilitates draining behavior.
     handshakeDone.by(deadline)(params[param.Timer].timer).transform {
       case Return(_) => refSession.close(deadline)
-      case Throw(_) => closeNow()
+      case Throw(t) => closeWithException(t)
     }
   }
 
-  private[this] def closeNow(): Future[Unit] = Closable.all(handle, service).close()
+  private[this] def closeWithException(t: Throwable): Future[Unit] = {
+    val f = Closable.all(handle, service).close()
+    // We shouldn't have to `updateIfEmpty`, but we do just in case.
+    handshakeDone.updateIfEmpty(Throw(t))
+    f
+  }
 
   def receive(reader: ByteReader): Unit = {
-    val buf = try reader.readAll()
-    finally reader.close()
-    checkDowngrade(buf)
+    try {
+      val buf = reader.readAll()
+      checkDowngrade(buf)
+    } catch {
+      case NonFatal(ex) =>
+        log.error(ex, "Uncaught exception during mux downgrade negotiation. Closing session.")
+        closeWithException(ex)
+    } finally reader.close()
   }
 
   def status: Status = handle.status
@@ -89,21 +109,18 @@ private[finagle] final class MuxDowngradingNegotiator(
       // Rerr corresponds to (tag=0x010001).
       //
       // The hazards of protocol multiplexing.
-      case Throw(Failure(Some(_: BadMessageException))) | Return(Message.Rerr(65537, _)) |
-          Return(Message.Rerr(65540, _)) =>
+      case Throw(Failure(Some(_: BadMessageException))) | Return(Message.Rerr(65537, _)) | Return(
+            Message.Rerr(65540, _)) =>
         initThriftDowngrade(buf)
-        handshakeDone.setDone()
 
       // We have a valid mux session
       case Return(_) =>
         initThriftMux(buf)
-        handshakeDone.setDone()
 
       case Throw(exc) =>
         val msg = s"Unable to determine the protocol. $remoteAddressString"
         log.info(exc, msg)
-        handshakeDone.setException(exc)
-        closeNow()
+        closeWithException(exc)
     }
   }
 
@@ -111,9 +128,9 @@ private[finagle] final class MuxDowngradingNegotiator(
     thriftmuxConnects.incr()
     // We have a normal mux transport! Just install the handshaker, give it this
     // first message, and be on our way!
-    Mux.Server.defaultSessionFactory(refSession, params, handle, service)
+    Mux.Server.defaultSessionFactory(refSession, params, sharedStats, handle, service)
     refSession.receive(ByteReader(buf))
-
+    handshakeDone.setDone()
   }
 
   private[this] def initThriftDowngrade(buf: Buf): Unit = {
@@ -123,35 +140,40 @@ private[finagle] final class MuxDowngradingNegotiator(
 
     val ttwitterHeader =
       if (!isTTwitter) None
-      else Some {
-        Buf.ByteArray.Owned(OutputBuffer.messageToArray(new ResponseHeader, protocolFactory))
-      }
+      else
+        Some {
+          Buf.ByteArray.Owned(OutputBuffer.messageToArray(new ResponseHeader, protocolFactory))
+        }
 
     // We install our new session and then send it the first thrift dispatch
     try {
       val nextSession =
-        new DowngradeNegotiatior(refSession, ttwitterHeader, params, service)
-        .negotiate(handle, None)
+        new DowngradeNegotiatior(ttwitterHeader, params, sharedStats, service)
+          .negotiate(handle, None)
       // Register the new session and then give it the message
       refSession.updateRef(nextSession)
 
       // If we're TTwitter, the first message was an init and we need to ack it.
       // If we're not TTwitter, the first message was a dispatch and needs to be handled.
       if (!isTTwitter) refSession.receive(ByteReader(buf))
-      else handle.sendAndForget {
-        val buffer = new OutputBuffer(protocolFactory)
-        buffer().writeMessageBegin(
-          new TMessage(ThriftTracing.CanTraceMethodName, TMessageType.REPLY, 0)
-        )
-        val upgradeReply = new UpgradeReply
-        upgradeReply.write(buffer())
-        buffer().writeMessageEnd()
-        Buf.ByteArray.Shared(buffer.toArray)
+      else {
+        handle.sendAndForget {
+          val buffer = new OutputBuffer(protocolFactory)
+          buffer().writeMessageBegin(
+            new TMessage(ThriftTracing.CanTraceMethodName, TMessageType.REPLY, 0)
+          )
+          val upgradeReply = new UpgradeReply
+          upgradeReply.write(buffer())
+          buffer().writeMessageEnd()
+          Buf.ByteArray.Shared(buffer.toArray)
+        }
       }
-    } catch { case NonFatal(t) =>
-      // Negotiation failed, so we need to cleanup and shutdown.
-      log.warning(t, s"Negotiation failed. Closing session. $remoteAddressString")
-      closeNow()
+      handshakeDone.setDone()
+    } catch {
+      case NonFatal(t) =>
+        // Negotiation failed, so we need to cleanup and shutdown.
+        log.warning(t, s"Negotiation failed. Closing session. $remoteAddressString")
+        closeWithException(t)
     }
   }
 
@@ -160,7 +182,7 @@ private[finagle] final class MuxDowngradingNegotiator(
       val buffer = new InputBuffer(Buf.ByteArray.Owned.extract(buf), protocolFactory)
       val msg = buffer().readMessageBegin()
       msg.`type` == TMessageType.CALL &&
-        msg.name == ThriftTracing.CanTraceMethodName
+      msg.name == ThriftTracing.CanTraceMethodName
     } catch {
       case NonFatal(_) => false
     }
@@ -172,37 +194,42 @@ private[finagle] object MuxDowngradingNegotiator {
   private val log = Logger.get
 
   private final class DowngradeNegotiatior(
-    ref: RefPushSession[ByteReader, Buf],
     ttwitterHeader: Option[Buf],
     params: Stack.Params,
-    service: Service[Request, Response]
-  ) extends Negotiation(params) {
+    sharedStats: SharedNegotiationStats,
+    service: Service[Request, Response])
+      extends Negotiation(params, sharedStats) {
+
     override type SessionT = VanillaThriftSession
+
+    protected def negotiateCompression(
+      handle: PushChannelHandle[ByteReader, Buf],
+      peerHeaders: Option[Headers]
+    ): Unit = ()
 
     override protected def builder(
       handle: PushChannelHandle[ByteReader, Buf],
       writer: MessageWriter,
       decoder: MuxMessageDecoder
     ): VanillaThriftSession = {
-      new VanillaThriftSession(
-        handle,
-        ttwitterHeader,
-        params,
-        service)
+      new VanillaThriftSession(handle, ttwitterHeader, params, service)
     }
   }
 
   def build(
     ref: RefPushSession[ByteReader, Buf],
     params: Stack.Params,
+    sharedStats: SharedNegotiationStats,
     handle: MuxChannelHandle,
     service: Service[Request, Response]
   ): ref.type = {
     val negotiatingSession = new MuxDowngradingNegotiator(
       refSession = ref,
       params = params,
+      sharedStats = sharedStats,
       handle = handle,
-      service = service)
+      service = service
+    )
 
     ref.updateRef(negotiatingSession)
     ref

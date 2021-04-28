@@ -11,7 +11,7 @@ object RequireClientProtocol extends ErrorConversion {
 /**
  * Redis command.
  *
- * @see http://redis.io/commands
+ * @see https://redis.io/commands
  */
 abstract class Command {
   def name: Buf
@@ -88,6 +88,8 @@ object Command {
   val ZSCAN = Buf.Utf8("ZSCAN")
   val ZSCORE = Buf.Utf8("ZSCORE")
   val ZUNIONSTORE = Buf.Utf8("ZUNIONSTORE")
+  val ZPOPMIN = Buf.Utf8("ZPOPMIN")
+  val ZPOPMAX = Buf.Utf8("ZPOPMAX")
 
   // Sets
   val SADD = Buf.Utf8("SADD")
@@ -109,6 +111,7 @@ object Command {
   val INFO = Buf.Utf8("INFO")
   val QUIT = Buf.Utf8("QUIT")
   val SLAVEOF = Buf.Utf8("SLAVEOF")
+  val REPLICAOF = Buf.Utf8("REPLICAOF")
   val CONFIG = Buf.Utf8("CONFIG")
   val SENTINEL = Buf.Utf8("SENTINEL")
   val CLUSTER = Buf.Utf8("CLUSTER")
@@ -136,11 +139,13 @@ object Command {
   val LPOP = Buf.Utf8("LPOP")
   val LPUSH = Buf.Utf8("LPUSH")
   val LREM = Buf.Utf8("LREM")
+  val LRESET = Buf.Utf8("LRESET")
   val LSET = Buf.Utf8("LSET")
   val LRANGE = Buf.Utf8("LRANGE")
   val RPOP = Buf.Utf8("RPOP")
   val RPUSH = Buf.Utf8("RPUSH")
   val LTRIM = Buf.Utf8("LTRIM")
+  val RPOPLPUSH = Buf.Utf8("RPOPLPUSH")
 
   // Key Commands
   val DEL = Buf.Utf8("DEL")
@@ -203,6 +208,21 @@ object Command {
   val AGGREGATE = Buf.Utf8("AGGREGATE")
   val COUNT = Buf.Utf8("COUNT")
   val MATCH = Buf.Utf8("MATCH")
+
+  // Streams
+  val XINFO = Buf.Utf8("XINFO")
+  val XADD = Buf.Utf8("XADD")
+  val XTRIM = Buf.Utf8("XTRIM")
+  val XDEL = Buf.Utf8("XDEL")
+  val XRANGE = Buf.Utf8("XRANGE")
+  val XREVRANGE = Buf.Utf8("XREVRANGE")
+  val XLEN = Buf.Utf8("XLEN")
+  val XREAD = Buf.Utf8("XREAD")
+  val XREADGROUP = Buf.Utf8("XREADGROUP")
+  val XGROUP = Buf.Utf8("XGROUP")
+  val XACK = Buf.Utf8("XACK")
+  val XCLAIM = Buf.Utf8("XCLAIM")
+  val XPENDING = Buf.Utf8("XPENDING")
 
   /**
    * Encodes a given [[Command]] as [[Buf]].

@@ -8,20 +8,16 @@ import java.lang.{Long => JLong}
 case class ZAdd(key: Buf, members: Seq[ZMember]) extends StrictKeyCommand {
   RequireClientProtocol(members.nonEmpty, "Members set must not be empty")
 
-  members.foreach { member =>
-    RequireClientProtocol(member != null, "Empty member found")
-  }
+  members.foreach { member => RequireClientProtocol(member != null, "Empty member found") }
 
   def name: Buf = Command.ZADD
   override def body: Seq[Buf] = {
     val membersWithScores =
-      members.flatMap(
-        member =>
-          Seq(
-            Buf.Utf8(member.score.toString),
-            member.member
-        )
-      )
+      members.flatMap(member =>
+        Seq(
+          Buf.Utf8(member.score.toString),
+          member.member
+        ))
 
     key +: membersWithScores
   }
@@ -49,8 +45,8 @@ case class ZInterStore(
   numkeys: Int,
   keys: Seq[Buf],
   weights: Option[Weights] = None,
-  aggregate: Option[Aggregate] = None
-) extends ZStore {
+  aggregate: Option[Aggregate] = None)
+    extends ZStore {
 
   validate()
 
@@ -58,11 +54,8 @@ case class ZInterStore(
 }
 
 object ZInterStore {
-  def apply(
-    destination: Buf,
-    keysBuf: Seq[Buf],
-    weights: Weights
-  ): ZInterStore = ZInterStore(destination, keysBuf.size, keysBuf, Some(weights), None)
+  def apply(destination: Buf, keysBuf: Seq[Buf], weights: Weights): ZInterStore =
+    ZInterStore(destination, keysBuf.size, keysBuf, Some(weights), None)
 
   def apply(destination: Buf, keysBuf: Seq[Buf]): ZInterStore =
     ZInterStore(destination, keysBuf.size, keysBuf, None, None)
@@ -92,8 +85,8 @@ case class ZRangeByScore(
   min: ZInterval,
   max: ZInterval,
   withScores: Option[CommandArgument] = None,
-  limit: Option[Limit] = None
-) extends ZScoredRange {
+  limit: Option[Limit] = None)
+    extends ZScoredRange {
 
   validate()
 
@@ -144,8 +137,8 @@ case class ZRevRangeByScore(
   max: ZInterval,
   min: ZInterval,
   withScores: Option[CommandArgument] = None,
-  limit: Option[Limit] = None
-) extends ZScoredRange {
+  limit: Option[Limit] = None)
+    extends ZScoredRange {
 
   validate()
 
@@ -170,8 +163,8 @@ case class ZUnionStore(
   numkeys: Int,
   keys: Seq[Buf],
   weights: Option[Weights] = None,
-  aggregate: Option[Aggregate] = None
-) extends ZStore {
+  aggregate: Option[Aggregate] = None)
+    extends ZStore {
 
   validate()
 
@@ -192,9 +185,7 @@ object ZUnionStore {
  */
 case class ZRangeResults(entries: Array[Buf], scores: Array[Double]) {
   def asTuples(): Seq[(Buf, Double)] =
-    (entries, scores).zipped.map { (entry, score) =>
-      (entry, score)
-    }.toSeq
+    (entries, scores).zipped.map { (entry, score) => (entry, score) }.toSeq
 }
 object ZRangeResults {
   def apply(tuples: Seq[(Buf, Buf)]): ZRangeResults = {
@@ -209,7 +200,7 @@ object ZRangeResults {
 
 /**
  * Represents part of an interval, helpers in companion object
- * See http://redis.io/commands/zrangebyscore for more info on different intervals
+ * See https://redis.io/commands/zrangebyscore for more info on different intervals
  */
 case class ZInterval(value: String) {
   import ZInterval._
@@ -353,6 +344,26 @@ case class ZScan(key: Buf, cursor: Long, count: Option[JLong] = None, pattern: O
     pattern match {
       case Some(pattern) => withCount ++ Seq(Command.MATCH, pattern)
       case None => withCount
+    }
+  }
+}
+
+case class ZPopMin(key: Buf, count: Option[JLong] = None) extends Command {
+  def name: Buf = Command.ZPOPMIN
+  override def body: Seq[Buf] = {
+    count match {
+      case Some(count) => Seq(key, Buf.Utf8(count.toString))
+      case None => Seq(key)
+    }
+  }
+}
+
+case class ZPopMax(key: Buf, count: Option[JLong] = None) extends Command {
+  def name: Buf = Command.ZPOPMAX
+  override def body: Seq[Buf] = {
+    count match {
+      case Some(count) => Seq(key, Buf.Utf8(count.toString))
+      case None => Seq(key)
     }
   }
 }

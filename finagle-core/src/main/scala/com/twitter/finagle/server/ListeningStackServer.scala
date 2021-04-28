@@ -5,6 +5,11 @@ import com.twitter.finagle.filter.RequestLogger
 import com.twitter.finagle.param._
 import com.twitter.finagle.{ClientConnection, ListeningServer, ServiceFactory, Stack}
 import com.twitter.finagle.stack.Endpoint
+import com.twitter.finagle.stats.{
+  RelativeNameMarkingStatsReceiver,
+  RoleConfiguredStatsReceiver,
+  Server
+}
 import com.twitter.util.registry.GlobalRegistry
 import com.twitter.util.{CloseAwaitably, Future, Time}
 import java.net.SocketAddress
@@ -16,7 +21,7 @@ import java.net.SocketAddress
  *      transport + dispatcher pattern.
  */
 trait ListeningStackServer[Req, Rep, This <: ListeningStackServer[Req, Rep, This]]
-  extends StackServer[Req, Rep]
+    extends StackServer[Req, Rep]
     with Stack.Parameterized[This]
     with Stack.Transformable[This]
     with CommonParams[This]
@@ -29,7 +34,10 @@ trait ListeningStackServer[Req, Rep, This <: ListeningStackServer[Req, Rep, This
    * Each new session is passed to the `trackSession` function exactly once
    * to facilitate connection resource management.
    */
-  protected def newListeningServer(serviceFactory: ServiceFactory[Req, Rep], addr: SocketAddress)(
+  protected def newListeningServer(
+    serviceFactory: ServiceFactory[Req, Rep],
+    addr: SocketAddress
+  )(
     trackSession: ClientConnection => Unit
   ): ListeningServer
 
@@ -50,8 +58,12 @@ trait ListeningStackServer[Req, Rep, This <: ListeningStackServer[Req, Rep, This
       private[this] val serverLabel = ServerRegistry.nameOf(addr).getOrElse(label)
 
       private[this] val statsReceiver =
-        if (serverLabel.isEmpty) stats
-        else stats.scope(serverLabel)
+        if (serverLabel.isEmpty) RoleConfiguredStatsReceiver(stats, Server)
+        else
+          RoleConfiguredStatsReceiver(
+            new RelativeNameMarkingStatsReceiver(stats.scope(serverLabel)),
+            Server,
+            Some(serverLabel))
 
       private[this] val serverParams = params +
         Label(serverLabel) +
@@ -68,7 +80,7 @@ trait ListeningStackServer[Req, Rep, This <: ListeningStackServer[Req, Rep, This
               withEndpoint.transformed(RequestLogger.newStackTransformer(serverLabel))
             case RequestLogger.Param.Disabled =>
               withEndpoint
-        }
+          }
         StackServer.DefaultTransformer.transformers.foldLeft(
           transformed.withParams(serverParams)
         )((srv, transformer) => srv.transformed(transformer))
@@ -83,11 +95,11 @@ trait ListeningStackServer[Req, Rep, This <: ListeningStackServer[Req, Rep, This
       private[this] val sessions = new Closables
 
       private[this] val underlying = server.newListeningServer(serviceFactory, addr) { session =>
-        registry.register(session.remoteAddress)
+        registry.register(session)
         sessions.register(session)
         session.onClose.ensure {
           sessions.unregister(session)
-          registry.unregister(session.remoteAddress)
+          registry.unregister(session)
         }
       }
 
@@ -146,6 +158,11 @@ trait ListeningStackServer[Req, Rep, This <: ListeningStackServer[Req, Rep, This
 
   def withStack(stack: Stack[ServiceFactory[Req, Rep]]): This =
     copy1(stack = stack)
+
+  override def withStack(
+    fn: Stack[ServiceFactory[Req, Rep]] => Stack[ServiceFactory[Req, Rep]]
+  ): This =
+    withStack(fn(stack))
 
   /**
    * A copy constructor in lieu of defining StackServer as a

@@ -1,14 +1,11 @@
 package com.twitter.finagle.mux.lease.exp
 
-import com.twitter.conversions.storage.intToStorageUnitableWholeNumber
+import com.twitter.conversions.StorageUnitOps._
 import com.twitter.util.StorageUnit
 import org.mockito.Mockito.{when, verify}
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
 class MemorySpaceTest extends FunSuite with MockitoSugar {
   test("MemorySpace#left should find the number of bytes left before we hit minDiscount") {
     val nfo = mock[JvmInfo]

@@ -1,15 +1,12 @@
 package com.twitter.finagle.http.path
 
 import com.twitter.finagle.http.{Method, ParamMap}
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 import org.scalacheck.Gen
 import scala.util.Random
 
-@RunWith(classOf[JUnitRunner])
-class PathTest extends FunSuite with GeneratorDrivenPropertyChecks {
+class PathTest extends FunSuite with ScalaCheckDrivenPropertyChecks {
 
   def alpha(min: Int, max: Int) =
     for {
@@ -103,7 +100,7 @@ class PathTest extends FunSuite with GeneratorDrivenPropertyChecks {
 
     assert {
       (Path("/test.json") :? ParamMap("i" -> "1", "l" -> "2147483648", "d" -> "1.3")) match {
-        case Root / "test.json" :? (I(i) :& L(l) :& D(d)) => i == 1 && l == 2147483648L && d == 1.3D
+        case Root / "test.json" :? (I(i) :& L(l) :& D(d)) => i == 1 && l == 2147483648L && d == 1.3d
         case _ => false
       }
     }

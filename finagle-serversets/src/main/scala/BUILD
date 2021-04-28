@@ -1,5 +1,5 @@
 scala_library(
-    sources = rglobs("*.scala"),
+    sources = ["**/*.scala"],
     provides = scala_artifact(
         org = "com.twitter",
         name = "finagle-serversets",
@@ -13,17 +13,20 @@ scala_library(
         "3rdparty/jvm/com/google/inject:guice",
         "3rdparty/jvm/org/apache/thrift:libthrift",
         "3rdparty/jvm/org/apache/zookeeper:zookeeper-client",
-        "finagle/finagle-core/src/main/scala",
+        "finagle/finagle-core/src/main",
+        "finagle/finagle-partitioning/src/main/scala",
         "finagle/finagle-serversets/src/main/java",
         "finagle/finagle-serversets/src/main/resources",
         "finagle/finagle-serversets/src/main/thrift:thrift-java",
+        "scrooge/scrooge-core/src/main/scala",
         "util/util-app/src/main/scala",
         "util/util-cache",
-        "util/util-core/src/main/scala",
+        "util/util-core:scala",
         "util/util-logging/src/main/scala",
         "util/util-stats/src/main/scala",
     ],
     exports = [
-        "util/util-core/src/main/scala",
+        "finagle/finagle-partitioning/src/main/scala",
+        "util/util-core:scala",
     ],
 )

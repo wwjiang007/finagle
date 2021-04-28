@@ -1,11 +1,17 @@
 package com.twitter.finagle.pushsession
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.server.ListeningStackServer
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.{
-  ClientConnection, ClientConnectionProxy, Failure, ListeningServer, Service, ServiceFactory}
+  ClientConnection,
+  ClientConnectionProxy,
+  Failure,
+  ListeningServer,
+  Service,
+  ServiceFactory
+}
 import com.twitter.util.{Future, Return, Throw}
 import java.net.SocketAddress
 
@@ -44,7 +50,10 @@ trait PushStackServer[Req, Rep, This <: PushStackServer[Req, Rep, This]]
     service: Service[Req, Rep]
   ): PushSession[PipelineReq, PipelineRep]
 
-  final protected def newListeningServer(serviceFactory: ServiceFactory[Req, Rep], addr: SocketAddress)(
+  final protected def newListeningServer(
+    serviceFactory: ServiceFactory[Req, Rep],
+    addr: SocketAddress
+  )(
     trackSession: ClientConnection => Unit
   ): ListeningServer = {
 
@@ -67,15 +76,11 @@ trait PushStackServer[Req, Rep, This <: PushStackServer[Req, Rep, This]]
         session
       }
 
-      // Note, this will not work for OppTls since `peerCertificate`
+      // Note, this will not work for OppTls since `sslSessionInfo`
       // isn't set at this point. It will, however, propagate the correct
-      // cert during service acquisition for standard Tls.
-      val futureService = handle.peerCertificate match {
-        case None => serviceFactory(conn)
-        case Some(cert) =>
-          Contexts.local.let(Transport.peerCertCtx, cert) {
-            serviceFactory(conn)
-          }
+      // `sslSessionInfo` during service acquisition for standard Tls.
+      val futureService = Contexts.local.let(Transport.sslSessionInfoCtx, handle.sslSessionInfo) {
+        serviceFactory(conn)
       }
 
       // We transform to make sure we execute the block before the Future resolves

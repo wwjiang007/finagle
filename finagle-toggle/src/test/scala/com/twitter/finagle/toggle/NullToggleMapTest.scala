@@ -1,21 +1,13 @@
 package com.twitter.finagle.toggle
 
-import org.junit.runner.RunWith
-import org.scalacheck.Arbitrary.arbitrary
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 
-@RunWith(classOf[JUnitRunner])
-class NullToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks {
-
-  private val IntGen = arbitrary[Int]
+class NullToggleMapTest extends FunSuite with ScalaCheckDrivenPropertyChecks {
 
   test("apply") {
     val toggle = NullToggleMap("hi")
-    forAll(IntGen) { i =>
-      assert(!toggle.isDefinedAt(i))
-    }
+    assert(toggle.isUndefined)
   }
 
   test("iterator") {

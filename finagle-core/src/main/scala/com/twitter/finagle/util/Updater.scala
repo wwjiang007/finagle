@@ -47,7 +47,8 @@ private[finagle] trait Updater[T] extends (T => Unit) {
       }
 
       elems += q.poll()
-      preprocess(elems).foreach(handle)
+      // toSeq needed for 2.13 compat
+      preprocess(elems.toSeq).foreach(handle)
 
     } while (n.decrementAndGet() > 0)
   }

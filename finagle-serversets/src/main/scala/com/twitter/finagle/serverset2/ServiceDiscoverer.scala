@@ -37,8 +37,8 @@ private[serverset2] object ServiceDiscoverer {
       sessionState match {
         case SessionState.Unknown =>
           Unknown
-        case SessionState.Expired | SessionState.NoSyncConnected |
-            SessionState.AuthFailed | SessionState.Disconnected =>
+        case SessionState.Expired | SessionState.NoSyncConnected | SessionState.AuthFailed |
+            SessionState.Disconnected | SessionState.Closed =>
           Unhealthy
         case SessionState.ConnectedReadOnly | SessionState.SaslAuthenticated |
             SessionState.SyncConnected =>
@@ -67,8 +67,7 @@ private[serverset2] class ServiceDiscoverer(
   varZkSession: Var[ZkSession],
   val statsReceiver: StatsReceiver,
   healthStabilizationEpoch: Epoch,
-  timer: Timer
-) {
+  timer: Timer) {
   import ServiceDiscoverer._
 
   private[this] val zkEntriesReadStat = statsReceiver.scope("entries").stat("read_ms")
@@ -152,9 +151,7 @@ private[serverset2] class ServiceDiscoverer(
             Future
               .collectToTry(paths.map { path =>
                 // note if any failed
-                cache.get(path).onFailure { _ =>
-                  seenFailures = true
-                }
+                cache.get(path).onFailure { _ => seenFailures = true }
               })
               // We end up with a Seq[Seq[Entity]] here, b/c cache.get() returns a Seq[Entity]
               // flatten() to fix this (see the comment on ZkNodeDataCache for why we get a Seq[])

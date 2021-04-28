@@ -1,15 +1,12 @@
 package com.twitter.finagle.toggle
 
 import com.twitter.util.{Return, Throw, Try}
-import org.junit.runner.RunWith
 import org.scalacheck.Arbitrary.arbitrary
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 import scala.collection.JavaConverters._
 
-@RunWith(classOf[JUnitRunner])
-class JsonToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks {
+class JsonToggleMapTest extends FunSuite with ScalaCheckDrivenPropertyChecks {
 
   import JsonToggleMap.{DescriptionIgnored, DescriptionRequired}
 
@@ -144,11 +141,11 @@ class JsonToggleMapTest extends FunSuite with GeneratorDrivenPropertyChecks {
         val off = map("com.twitter.off")
         val doestExist = map("com.twitter.lolcat")
         forAll(arbitrary[Int]) { i =>
-          assert(on.isDefinedAt(i))
+          assert(on.isDefined)
           assert(on(i))
-          assert(off.isDefinedAt(i))
+          assert(off.isDefined)
           assert(!off(i))
-          assert(!doestExist.isDefinedAt(i))
+          assert(!doestExist.isDefined)
         }
     }
   }

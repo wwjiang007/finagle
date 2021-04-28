@@ -1,17 +1,26 @@
 package com.twitter.finagle.server
 
-import com.twitter.conversions.time._
-import com.twitter.finagle._
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.{Address, ClientConnection, Name, Service}
 import com.twitter.finagle.client.utils.StringClient
 import com.twitter.finagle.server.utils.StringServer
+import com.twitter.finagle.ssl.{ClientAuth, KeyCredentials, TrustCredentials}
+import com.twitter.finagle.ssl.client.SslClientConfiguration
+import com.twitter.finagle.ssl.server.SslServerConfiguration
+import com.twitter.finagle.ssl.session.NullSslSessionInfo
+import com.twitter.io.TempFile
 import com.twitter.util.registry.{Entry, GlobalRegistry, SimpleRegistry}
-import com.twitter.util.{Await, Future, Promise}
+import com.twitter.util.{Await, Awaitable, Future, Promise}
 import java.net.{InetAddress, InetSocketAddress, Socket}
 import org.scalatest.FunSuite
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
 import scala.util.control.NonFatal
 
 class StringServerTest extends FunSuite with Eventually with IntegrationPatience {
+
+  private[this] val svc = Service.mk[String, String](Future.value)
+
+  def await[T](t: Awaitable[T]): T = Await.result(t, 5.seconds)
 
   test("StringServer notices when the client cuts the connection") {
     val p = Promise[String]()
@@ -42,7 +51,7 @@ class StringServerTest extends FunSuite with Eventually with IntegrationPatience
     client.close()
     eventually { assert(interrupted) }
 
-    Await.ready(server.close(), 2.seconds)
+    await(server.close())
   }
 
   test("exports listener type to registry") {
@@ -52,7 +61,7 @@ class StringServerTest extends FunSuite with Eventually with IntegrationPatience
     val listeningServer = GlobalRegistry.withRegistry(registry) {
       StringServer.server
         .withLabel(label)
-        .serve(":*", Service.mk[String, String](Future.value(_)))
+        .serve(":*", svc)
     }
 
     val expectedEntry = Entry(
@@ -62,16 +71,10 @@ class StringServerTest extends FunSuite with Eventually with IntegrationPatience
 
     assert(registry.iterator.contains(expectedEntry))
 
-    Await.result(listeningServer.close(), 5.seconds)
+    await(listeningServer.close())
   }
 
   trait Ctx {
-    val svc = new Service[String, String] {
-      def apply(request: String): Future[String] = {
-        Future.value(request)
-      }
-    }
-
     val address = new InetSocketAddress(InetAddress.getLoopbackAddress, 0)
     val registry = ServerRegistry.connectionRegistry(address)
 
@@ -88,23 +91,23 @@ class StringServerTest extends FunSuite with Eventually with IntegrationPatience
     new Ctx {
       val initialRegistrySize = registry.iterator.size
 
-      assert(Await.result(client1("hello"), 1.second) == "hello")
+      assert(await(client1("hello")) == "hello")
       eventually {
         assert((registry.iterator.size - initialRegistrySize) == 1)
       }
 
-      assert(Await.result(client2("foo"), 1.second) == "foo")
+      assert(await(client2("foo")) == "foo")
       eventually {
         assert((registry.iterator.size - initialRegistrySize) == 2)
       }
 
-      Await.result(client1.close(), 5.seconds)
+      await(client1.close())
       eventually {
         assert((registry.iterator.size - initialRegistrySize) == 1)
       }
 
-      Await.result(server.close(), 5.seconds)
-      Await.result(client2.close(), 5.seconds)
+      await(server.close())
+      await(client2.close())
       eventually {
         assert((registry.iterator.size - initialRegistrySize) == 0)
       }
@@ -113,27 +116,83 @@ class StringServerTest extends FunSuite with Eventually with IntegrationPatience
 
   test("ConnectionRegistry correctly removes entries upon client close") {
     new Ctx {
-      val initialState = registry.iterator.toArray
+      val initialState: Array[ClientConnection] = registry.iterator.toArray
 
-      assert(Await.result(client1("hello"), 1.second) == "hello")
-      val remoteAddr1 = eventually {
+      assert(await(client1("hello")) == "hello")
+      val clientConn1: ClientConnection = eventually {
         registry.iterator.find(!initialState.contains(_)).get
       }
 
-      assert(Await.result(client2("foo"), 1.second) == "foo")
-      val remoteAddr2 = eventually {
-        registry.iterator.find(a => !initialState.contains(a) && a != remoteAddr1).get
+      assert(await(client2("foo")) == "foo")
+      val clientConn2: ClientConnection = eventually {
+        registry.iterator.find(a => !initialState.contains(a) && a != clientConn1).get
       }
 
-      Await.result(client2.close(), 5.seconds)
+      await(client2.close())
       eventually {
-        val addresses = registry.iterator.toArray
-        assert(addresses.contains(remoteAddr1))
-        assert(!(addresses.contains(remoteAddr2)))
+        val connections = registry.iterator.toArray
+        assert(connections.contains(clientConn1))
+        assert(!(connections.contains(clientConn2)))
       }
 
-      Await.result(server.close(), 5.seconds)
-      Await.result(client1.close(), 5.seconds)
+      await(server.close())
+      await(client1.close())
+    }
+  }
+
+  trait SecureCtx {
+    private val chainCert = TempFile.fromResourcePath("/ssl/certs/svc-test-chain.cert.pem")
+    // deleteOnExit is handled by TempFile
+
+    private val clientCert = TempFile.fromResourcePath("/ssl/certs/svc-test-client.cert.pem")
+    // deleteOnExit is handled by TempFile
+
+    private val clientKey = TempFile.fromResourcePath("/ssl/keys/svc-test-client-pkcs8.key.pem")
+    // deleteOnExit is handled by TempFile
+
+    private val serverCert = TempFile.fromResourcePath("/ssl/certs/svc-test-server.cert.pem")
+    // deleteOnExit is handled by TempFile
+
+    private val serverKey = TempFile.fromResourcePath("/ssl/keys/svc-test-server-pkcs8.key.pem")
+    // deleteOnExit is handled by TempFile
+
+    private val serverConfig = SslServerConfiguration(
+      keyCredentials = KeyCredentials.CertAndKey(serverCert, serverKey),
+      trustCredentials = TrustCredentials.CertCollection(chainCert),
+      clientAuth = ClientAuth.Needed
+    )
+
+    private val clientConfig = SslClientConfiguration(
+      keyCredentials = KeyCredentials.CertAndKey(clientCert, clientKey),
+      trustCredentials = TrustCredentials.CertCollection(chainCert)
+    )
+
+    val address = new InetSocketAddress(InetAddress.getLoopbackAddress, 0)
+    val registry = ServerRegistry.connectionRegistry(address)
+
+    val server = StringServer.server.withTransport.tls(serverConfig).serve(address, svc)
+    val boundAddress = server.boundAddress.asInstanceOf[InetSocketAddress]
+
+    val client = StringClient.client.withTransport
+      .tls(clientConfig)
+      .newService(Name.bound(Address(boundAddress)), "stringClient")
+
+    registry.clear()
+  }
+
+  test("ConnectionRegistry correctly provides SSL/TLS information for connections") {
+    new SecureCtx {
+      val initialState: Array[ClientConnection] = registry.iterator.toArray
+
+      assert(await(client("hello")) == "hello")
+      val clientConn: ClientConnection = eventually {
+        registry.iterator.find(!initialState.contains(_)).get
+      }
+
+      assert(clientConn.sslSessionInfo != NullSslSessionInfo)
+
+      await(server.close())
+      await(client.close())
     }
   }
 }

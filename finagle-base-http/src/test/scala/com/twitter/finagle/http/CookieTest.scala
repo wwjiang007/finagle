@@ -1,8 +1,7 @@
 package com.twitter.finagle.http
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.http.cookie.SameSite
-import org.jboss.netty.handler.codec.http.DefaultCookie
 import org.scalatest.FunSuite
 
 class CookieTest extends FunSuite {
@@ -24,8 +23,8 @@ class CookieTest extends FunSuite {
     assert(cookie.domain == "domain")
     assert(cookie.path == "path")
     assert(cookie.maxAge == 99.seconds)
-    assert(cookie.secure == true)
-    assert(cookie.httpOnly == false)
+    assert(cookie.secure)
+    assert(!cookie.httpOnly)
 
     /* Experimental */
     assert(cookie.sameSite == SameSite.Strict)
@@ -94,32 +93,14 @@ class CookieTest extends FunSuite {
     assert(c5.equals(c6))
   }
 
-  test("default are the same as DefaultCookie default") {
-    val cookie = new Cookie("name", "value")
-    val nettyCookie = new DefaultCookie("name", "value")
-
-    assert(cookie.name == nettyCookie.getName)
-    assert(cookie.value == nettyCookie.getValue)
-    assert(cookie.domain == nettyCookie.getDomain)
-    assert(cookie.path == nettyCookie.getPath)
-    assert(cookie.maxAge == nettyCookie.getMaxAge.seconds)
-    assert(cookie.secure == nettyCookie.isSecure)
-    assert(cookie.httpOnly == nettyCookie.isHttpOnly)
-
-    /* Experimental */
-    assert(cookie.sameSite == SameSite.Unset)
-  }
-
   test("Throws exception if name is empty") {
     intercept[IllegalArgumentException] {
       new Cookie("    ", "value")
     }
   }
 
-  test("Throws exception if name starts with $") {
-    intercept[IllegalArgumentException] {
-      new Cookie("$dolladollabillz", "value")
-    }
+  test("Does not throw exception if name starts with $") {
+    new Cookie("$dolladollabillz", "value")
   }
 
   test("Throws exception if name contains illegal char") {
@@ -174,8 +155,8 @@ class CookieTest extends FunSuite {
     assert(cookie.value == "value2")
     assert(cookie.domain == "domain")
     assert(cookie.maxAge == 99.seconds)
-    assert(cookie.httpOnly == true)
-    assert(cookie.secure == true)
+    assert(cookie.httpOnly)
+    assert(cookie.secure)
 
     /* Experimental */
     assert(cookie.sameSite == SameSite.Lax)

@@ -38,7 +38,7 @@ class AsyncLatch(initialCount: Int = 0) {
       f
     else
       waiters = { () => f } :: waiters
-    }
+  }
 
   /**
    * Increment the latch. Computations passed to `await` will not be executed

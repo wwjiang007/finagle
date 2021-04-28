@@ -1,11 +1,17 @@
 package com.twitter.finagle.server
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{
-  ClientConnection, ClientConnectionProxy, Failure, ListeningServer, Service, ServiceFactory}
+  ClientConnection,
+  ClientConnectionProxy,
+  Failure,
+  ListeningServer,
+  Service,
+  ServiceFactory
+}
 import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.transport.{Transport, TransportContext}
-import com.twitter.util.{Closable, Future, Return, Throw, Time}
+import com.twitter.util.{Closable, Future, Return, Throw}
 import java.net.SocketAddress
 
 /**
@@ -19,7 +25,7 @@ import java.net.SocketAddress
  *      servers.
  */
 trait StdStackServer[Req, Rep, This <: StdStackServer[Req, Rep, This]]
-  extends ListeningStackServer[Req, Rep, This] { self: This =>
+    extends ListeningStackServer[Req, Rep, This] { self: This =>
 
   /**
    * The type we write into the transport.
@@ -53,14 +59,19 @@ trait StdStackServer[Req, Rep, This <: StdStackServer[Req, Rep, This]]
    * @note The dispatcher must be prepared to handle the situation where it
    *       receives an already-closed transport.
    */
-  protected def newDispatcher(transport: Transport[In, Out] {
-    type Context <: self.Context
-  }, service: Service[Req, Rep]): Closable
+  protected def newDispatcher(
+    transport: Transport[In, Out] {
+      type Context <: self.Context
+    },
+    service: Service[Req, Rep]
+  ): Closable
 
   final protected def newListeningServer(
     serviceFactory: ServiceFactory[Req, Rep],
     addr: SocketAddress
-  )(trackSession: ClientConnection => Unit): ListeningServer = {
+  )(
+    trackSession: ClientConnection => Unit
+  ): ListeningServer = {
 
     // Listen over `addr` and serve traffic from incoming transports to
     // `serviceFactory` via `newDispatcher`.
@@ -70,16 +81,12 @@ trait StdStackServer[Req, Rep, This <: StdStackServer[Req, Rep, This]]
     addServerToRegistry(listener.toString)
 
     listener.listen(addr) { transport =>
-      val clientConnection = new ClientConnectionProxy(
-        new TransportClientConnection(transport))
+      val clientConnection = new ClientConnectionProxy(new TransportClientConnection(transport))
 
-      val futureService = transport.peerCertificate match {
-        case None => serviceFactory(clientConnection)
-        case Some(cert) =>
-          Contexts.local.let(Transport.peerCertCtx, cert) {
-            serviceFactory(clientConnection)
-          }
-      }
+      val futureService =
+        Contexts.local.let(Transport.sslSessionInfoCtx, transport.context.sslSessionInfo) {
+          serviceFactory(clientConnection)
+        }
 
       def mkSession(service: Service[Req, Rep]): Closable = {
         val dispatcher = newDispatcher(transport, service)
@@ -101,8 +108,8 @@ trait StdStackServer[Req, Rep, This <: StdStackServer[Req, Rep, This]]
           // away. This allows protocols that support graceful shutdown to
           // also gracefully deny new sessions.
           val svc = Service.const(
-              Future.exception(Failure.rejected("Terminating session and rejecting request", exc))
-            )
+            Future.exception(Failure.rejected("Terminating session and rejecting request", exc))
+          )
 
           // We give it a generous amount of time to shut down the session to
           // improve our chances of being able to do so gracefully.
@@ -111,18 +118,4 @@ trait StdStackServer[Req, Rep, This <: StdStackServer[Req, Rep, This]]
     }
   }
 
-  private class TransportClientConnection(t: Transport[In, Out] {
-    type Context <: self.Context
-  }) extends ClientConnection {
-
-    override def remoteAddress: SocketAddress = t.remoteAddress
-    override def localAddress: SocketAddress = t.localAddress
-    // In the Transport + Dispatcher model, the Transport is a source of truth for
-    // the `onClose` future: closing the dispatcher will result in closing the
-    // Transport and closing the Transport will trigger shutdown of the dispatcher.
-    // Therefore, even when we swap the closable that is the target of `this.close(..)`,
-    // they both will complete the transports `onClose` future.
-    override val onClose: Future[Unit] = t.onClose.unit
-    override def close(deadline: Time): Future[Unit] = t.close(deadline)
-  }
 }

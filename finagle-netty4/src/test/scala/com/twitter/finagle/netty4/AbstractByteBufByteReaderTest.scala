@@ -7,7 +7,7 @@ import java.lang.{Double => JDouble, Float => JFloat}
 import java.nio.charset.StandardCharsets
 import org.scalacheck.Gen
 import org.scalatest.FunSuite
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 
 object CopyingByteBufByteReaderTest {
 
@@ -20,9 +20,7 @@ object CopyingByteBufByteReaderTest {
     wrapByteBufInReader(buf)
   }
 
-  def readerWith(bytes: Byte*): ByteReader = newReader { bb =>
-    bytes.foreach(bb.writeByte(_))
-  }
+  def readerWith(bytes: Byte*): ByteReader = newReader { bb => bytes.foreach(bb.writeByte(_)) }
 }
 
 class CopyingByteBufByteReaderTest extends AbstractByteBufByteReaderTest {
@@ -52,8 +50,9 @@ class CopyingByteBufByteReaderTest extends AbstractByteBufByteReaderTest {
 
 class CopyingByteBufByteReaderProcessorTest
     extends ReadableBufProcessorTest(
-      "CopyingByteBufByteReader", { bytes: Array[Byte] =>
-        val br = CopyingByteBufByteReaderTest.readerWith(bytes: _*)
+      "CopyingByteBufByteReader",
+      { bytes: Array[Byte] =>
+        val br = CopyingByteBufByteReaderTest.readerWith(bytes.toIndexedSeq: _*)
         new ReadableBufProcessorTest.CanProcess {
           def process(from: Int, until: Int, processor: Buf.Processor): Int =
             br.process(from, until, processor)
@@ -64,7 +63,7 @@ class CopyingByteBufByteReaderProcessorTest
       }
     )
 
-abstract class AbstractByteBufByteReaderTest extends FunSuite with GeneratorDrivenPropertyChecks {
+abstract class AbstractByteBufByteReaderTest extends FunSuite with ScalaCheckDrivenPropertyChecks {
 
   private val SignedMediumMax = 0x800000
 
@@ -79,7 +78,8 @@ abstract class AbstractByteBufByteReaderTest extends FunSuite with GeneratorDriv
   test("readString")(forAll { (str1: String, str2: String) =>
     val bytes1 = str1.getBytes(StandardCharsets.UTF_8)
     val bytes2 = str2.getBytes(StandardCharsets.UTF_8)
-    val br = readerWith(bytes1 ++ bytes2: _*)
+    val all = (bytes1.toIndexedSeq ++ bytes2.toIndexedSeq)
+    val br = readerWith(all: _*)
     assert(br.readString(bytes1.length, StandardCharsets.UTF_8) == str1)
     assert(br.readString(bytes2.length, StandardCharsets.UTF_8) == str2)
     intercept[UnderflowException] { br.readByte() }
@@ -217,12 +217,12 @@ abstract class AbstractByteBufByteReaderTest extends FunSuite with GeneratorDriv
 
   test("readUnsignedIntBE")(forAll { i: Int =>
     val br = newReader(_.writeInt(i))
-    assert(br.readUnsignedIntBE() == (i & 0xffffffffl))
+    assert(br.readUnsignedIntBE() == (i & 0xffffffffL))
   })
 
   test("readUnsignedIntLE")(forAll { i: Int =>
     val br = newReader(_.writeIntLE(i))
-    assert(br.readUnsignedIntLE() == (i & 0xffffffffl))
+    assert(br.readUnsignedIntLE() == (i & 0xffffffffL))
   })
 
   val uInt64s: Gen[BigInt] = Gen
@@ -282,7 +282,8 @@ abstract class AbstractByteBufByteReaderTest extends FunSuite with GeneratorDriv
   })
 
   test("readBytes")(forAll { bytes: Array[Byte] =>
-    val br = readerWith(bytes ++ bytes: _*)
+    val bs = bytes.toIndexedSeq
+    val br = readerWith(bs ++ bs: _*)
     intercept[IllegalArgumentException] { br.readBytes(-1) }
     assert(br.readBytes(bytes.length) == Buf.ByteArray.Owned(bytes))
     assert(br.readBytes(bytes.length) == Buf.ByteArray.Owned(bytes))
@@ -290,7 +291,8 @@ abstract class AbstractByteBufByteReaderTest extends FunSuite with GeneratorDriv
   })
 
   test("readAll")(forAll { bytes: Array[Byte] =>
-    val br = readerWith(bytes ++ bytes: _*)
+    val bs = bytes.toIndexedSeq
+    val br = readerWith(bs ++ bs: _*)
     assert(br.readAll() == Buf.ByteArray.Owned(bytes ++ bytes))
     assert(br.readAll() == Buf.Empty)
   })
@@ -305,8 +307,9 @@ abstract class AbstractByteBufByteReaderTest extends FunSuite with GeneratorDriv
 
   test("remainingUntil") {
     forAll { (bytes: Array[Byte], byte: Byte) =>
+      val bs = bytes.toIndexedSeq
       val buf = Buf.ByteArray.Owned(bytes ++ Array(byte) ++ bytes)
-      val br = readerWith(bytes ++ Array(byte) ++ bytes: _*)
+      val br = readerWith(bs ++ Vector(byte) ++ bs: _*)
 
       val remainingBefore = br.remaining
       val until = br.remainingUntil(byte)

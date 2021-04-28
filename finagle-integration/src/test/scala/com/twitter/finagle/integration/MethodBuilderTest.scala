@@ -1,29 +1,24 @@
 package com.twitter.finagle.integration
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.client.{MethodBuilder, StackClient}
 import com.twitter.finagle.Http.Http2
 import com.twitter.finagle.memcached.protocol.{NoOp, Quit}
 import com.twitter.finagle.server.StackServer
-import com.twitter.finagle.util.HashedWheelTimer
+import com.twitter.finagle.util.DefaultTimer
 import com.twitter.finagle.{mux, _}
 import com.twitter.util.{Await, Future}
 import java.net.InetSocketAddress
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class MethodBuilderTest extends FunSuite {
 
   private def await[T](f: Future[T]): T = Await.result(f, 15.seconds)
 
-  private implicit val timer = HashedWheelTimer.Default
+  private implicit val timer = DefaultTimer
   private val serviceSleep = 50.milliseconds
 
-  private[this] def mkService[Req, Rep](
-    rep: Rep
-  ): Service[Req, Rep] = {
+  private[this] def mkService[Req, Rep](rep: Rep): Service[Req, Rep] = {
     new Service[Req, Rep] {
       def apply(req: Req): Future[Rep] =
         Future.sleep(serviceSleep).before { Future.value(rep) }

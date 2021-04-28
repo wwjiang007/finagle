@@ -1,56 +1,43 @@
 package com.twitter.finagle.netty4.transport
 
-import com.twitter.finagle.Status
+import com.twitter.finagle.ssl.session.{NullSslSessionInfo, SslSessionInfo, UsingSslSessionInfo}
 import com.twitter.finagle.transport.TransportContext
-import com.twitter.util.{Future, Promise, Time}
 import io.netty.channel.Channel
 import io.netty.handler.ssl.SslHandler
 import java.net.SocketAddress
-import java.security.cert.Certificate
-import java.util.concurrent.Executor
-import java.util.concurrent.atomic.AtomicBoolean
+import scala.annotation.tailrec
 import scala.util.control.NonFatal
 
 /**
  * `TransportContext` for use with a Finagle Netty4
  * `ChannelTransport`.
  */
-private[finagle] final class ChannelTransportContext(ch: Channel)
-    extends TransportContext
-    with HasExecutor {
-
-  // Accessible by the `ChannelTransport` and for testing.
-  private[transport] val failed = new AtomicBoolean(false)
-  private[transport] val closed = new Promise[Throwable]
-  private[transport] val alreadyClosed = new AtomicBoolean(false)
-
-  def status: Status =
-    if (failed.get || !ch.isOpen) Status.Closed
-    else Status.Open
-
-  def onClose: Future[Throwable] = closed
+private[finagle] final class ChannelTransportContext(val ch: Channel) extends TransportContext {
 
   def localAddress: SocketAddress = ch.localAddress
 
   def remoteAddress: SocketAddress = ch.remoteAddress
 
-  val peerCertificate: Option[Certificate] = ch.pipeline.get(classOf[SslHandler]) match {
-    case null => None
-    case handler =>
-      try {
-        handler.engine.getSession.getPeerCertificates.headOption
-      } catch {
-        case NonFatal(_) => None
-      }
-  }
+  private[this] def getSslHandler(ch: Channel): SslHandler =
+    ch.pipeline.get(classOf[SslHandler])
 
-  def close(deadline: Time): Future[Unit] = {
-    // we check if this has already been closed because of a netty bug
-    // https://github.com/netty/netty/issues/7638.  Remove this work-around once
-    // it's fixed.
-    if (alreadyClosed.compareAndSet(false, true) && ch.isOpen) ch.close()
-    closed.unit
-  }
+  // We extract the `SslHandler` from this `Channel` if it's available.
+  // If not, we try the channel's parent instead. Looking at the parent
+  // is necessary when a request is processed by a child channel and
+  // pipeline (i.e. HTTP/2).
+  @tailrec
+  private[this] def getSslSessionInfo(ch: Channel): SslSessionInfo =
+    getSslHandler(ch) match {
+      case null =>
+        if (ch.parent != null) getSslSessionInfo(ch.parent)
+        else NullSslSessionInfo
+      case handler =>
+        try {
+          new UsingSslSessionInfo(handler.engine.getSession)
+        } catch {
+          case NonFatal(_) => NullSslSessionInfo
+        }
+    }
 
-  def executor: Executor = ch.eventLoop
+  val sslSessionInfo: SslSessionInfo = getSslSessionInfo(ch)
 }

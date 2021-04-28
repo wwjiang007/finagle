@@ -1,7 +1,12 @@
 package com.twitter.finagle.netty4.ssl.server
 
-import com.twitter.finagle.netty4.ssl.Netty4SslConfigurations
-import com.twitter.finagle.ssl.{ApplicationProtocols, Engine, KeyCredentials, SslConfigurationException}
+import com.twitter.finagle.netty4.ssl.{FinalizedSslContext, Netty4SslConfigurations}
+import com.twitter.finagle.ssl.{
+  ApplicationProtocols,
+  Engine,
+  KeyCredentials,
+  SslConfigurationException
+}
 import com.twitter.finagle.ssl.server.{SslServerConfiguration, SslServerEngineFactory}
 import com.twitter.util.Return
 import com.twitter.util.security.{PrivateKeyFile, X509CertificateFile}
@@ -45,7 +50,8 @@ private[finagle] object Netty4ServerSslConfigurations {
    *
    * @note Will not validate the validity for certificates when configured
    *       with [[KeyCredentials.KeyManagerFactory]] in contrast to when
-   *       configured with [[KeyCredentials.CertAndKey]] or [[KeyCredentials.CertKeyAndChain]].
+   *       configured with [[KeyCredentials.CertAndKey]], [[KeyCredentials.CertsAndKey]],
+   *       or [[KeyCredentials.CertKeyAndChain]].
    */
   private def startServerWithKey(keyCredentials: KeyCredentials): SslContextBuilder = {
     val builder = keyCredentials match {
@@ -59,6 +65,11 @@ private[finagle] object Netty4ServerSslConfigurations {
           key <- new PrivateKeyFile(keyFile).readPrivateKey()
           cert <- new X509CertificateFile(certFile).readX509Certificate()
         } yield SslContextBuilder.forServer(key, cert)
+      case KeyCredentials.CertsAndKey(certsFile, keyFile) =>
+        for {
+          key <- new PrivateKeyFile(keyFile).readPrivateKey()
+          certs <- new X509CertificateFile(certsFile).readX509Certificates()
+        } yield SslContextBuilder.forServer(key, certs: _*)
       case KeyCredentials.CertKeyAndChain(certFile, keyFile, chainFile) =>
         for {
           key <- new PrivateKeyFile(keyFile).readPrivateKey()
@@ -85,7 +96,9 @@ private[finagle] object Netty4ServerSslConfigurations {
       config.applicationProtocols
     )
 
-    withAppProtocols.build()
+    // We only want to use the `FinalizedSslContext` if we're using the non-JDK implementation.
+    if (!forceJdk) new FinalizedSslContext(withAppProtocols.build())
+    else withAppProtocols.build()
   }
 
   /**

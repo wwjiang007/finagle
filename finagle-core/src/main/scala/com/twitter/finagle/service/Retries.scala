@@ -1,7 +1,11 @@
 package com.twitter.finagle.service
 
 import com.twitter.finagle._
-import com.twitter.finagle.param.{HighResTimer, Stats}
+import com.twitter.finagle.param.{
+  HighResTimer,
+  Stats,
+  ResponseClassifier => ParamResponseClassifier
+}
 import com.twitter.finagle.stats.{Counter, StatsReceiver}
 import com.twitter.util._
 
@@ -53,8 +57,7 @@ object Retries {
    */
   case class Budget(
     retryBudget: RetryBudget,
-    requeueBackoffs: Stream[Duration] = Budget.emptyBackoffSchedule
-  ) {
+    requeueBackoffs: Backoff = Budget.emptyBackoffSchedule) {
     def this(retryBudget: RetryBudget) =
       this(retryBudget, Budget.emptyBackoffSchedule)
 
@@ -64,10 +67,10 @@ object Retries {
     def canEqual(other: Any): Boolean = other.isInstanceOf[Budget]
 
     /**
-      * The equals method only compares the retryBudget field of this instance,
-      * since the requeueBackoffs Stream[Duration] is possibly infinite,
-      * resulting in an infinite computation to compare for equality.
-      */
+     * The equals method only compares the retryBudget field of this instance,
+     * since the requeueBackoffs Stream[Duration] is possibly infinite,
+     * resulting in an infinite computation to compare for equality.
+     */
     override def equals(other: Any): Boolean = other match {
       case that: Budget =>
         that.canEqual(this) && retryBudget == that.retryBudget
@@ -75,10 +78,10 @@ object Retries {
     }
 
     /**
-      * For the hashCode of this class we only take into account the hashCode of the RetryBudget field.
-      * The requeueBackoffs Stream[Duration] is possibly infinite,
-      * resulting in an infinite computation to get to the hashCode.
-      */
+     * For the hashCode of this class we only take into account the hashCode of the RetryBudget field.
+     * The requeueBackoffs Stream[Duration] is possibly infinite,
+     * resulting in an infinite computation to get to the hashCode.
+     */
     override def hashCode(): Int =
       retryBudget.##
   }
@@ -89,7 +92,7 @@ object Retries {
      * Default backoff stream to use for automatic retries.
      * All Zeros.
      */
-    val emptyBackoffSchedule = Backoff.constant(Duration.Zero)
+    val emptyBackoffSchedule = Backoff.const(Duration.Zero)
 
     def default: Budget = Budget(RetryBudget(), emptyBackoffSchedule)
 
@@ -115,7 +118,7 @@ object Retries {
    * Retries failures that are guaranteed to be safe to retry
    * (see [[RetryPolicy.RetryableWriteException]]).
    */
-  private[finagle] def moduleRequeueable[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
+  def moduleRequeueable[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
     new Stack.Module[ServiceFactory[Req, Rep]] {
       def role: Stack.Role = Retries.Role
 
@@ -125,7 +128,8 @@ object Retries {
       val parameters = Seq(
         implicitly[Stack.Param[Stats]],
         implicitly[Stack.Param[Budget]],
-        implicitly[Stack.Param[HighResTimer]]
+        implicitly[Stack.Param[HighResTimer]],
+        implicitly[Stack.Param[ParamResponseClassifier]]
       )
 
       def make(
@@ -137,6 +141,7 @@ object Retries {
         val requeues = scoped.counter("requeues")
         val budget = params[Budget]
         val timer = params[HighResTimer].timer
+        val classifier = params[ParamResponseClassifier].responseClassifier
 
         // Filters/factories lower in the stack may also make use of the [[RetryBudget]] param.
         // However, if this param is not configured explicitly, the default is used, which creates
@@ -151,6 +156,7 @@ object Retries {
           withdrawsOnly = false,
           scoped,
           timer,
+          classifier,
           nextSvcFac
         )
 
@@ -171,11 +177,12 @@ object Retries {
    *       include exceptions, such as `Thrift`.
    */
   private[finagle] def moduleWithRetryPolicy[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
-    new Stack.Module4[
+    new Stack.Module5[
       Stats,
       Budget,
       Policy,
       HighResTimer,
+      ParamResponseClassifier,
       ServiceFactory[Req, Rep]
     ] {
       def role: Stack.Role = Retries.Role
@@ -189,6 +196,7 @@ object Retries {
         budgetP: Budget,
         policyP: Policy,
         timerP: HighResTimer,
+        responseClassifier: ParamResponseClassifier,
         next: ServiceFactory[Req, Rep]
       ): ServiceFactory[Req, Rep] = {
         val statsRecv = statsP.statsReceiver
@@ -196,6 +204,7 @@ object Retries {
         val requeues = scoped.counter("requeues")
         val retryBudget = budgetP.retryBudget
         val retryPolicy = policyP.retryPolicy
+        val classifier = responseClassifier.responseClassifier
 
         val filters =
           if (retryPolicy eq RetryPolicy.Never) {
@@ -205,6 +214,7 @@ object Retries {
               withdrawsOnly = false,
               scoped,
               timerP.timer,
+              classifier,
               next
             )
           } else {
@@ -217,6 +227,7 @@ object Retries {
               withdrawsOnly = true,
               scoped,
               timerP.timer,
+              classifier,
               next
             )
             retryFilter.andThen(requeueFilter)
@@ -228,10 +239,11 @@ object Retries {
 
   private[this] def newRequeueFilter[Req, Rep](
     retryBudget: RetryBudget,
-    retrySchedule: Stream[Duration],
+    retrySchedule: Backoff,
     withdrawsOnly: Boolean,
     statsReceiver: StatsReceiver,
     timer: Timer,
+    classifier: ResponseClassifier,
     next: ServiceFactory[Req, Rep]
   ): RequeueFilter[Req, Rep] = {
     val budget =
@@ -240,13 +252,10 @@ object Retries {
     new RequeueFilter[Req, Rep](
       budget,
       retrySchedule,
-      statsReceiver,
-      // TODO: If we ensure that the stack doesn't return restartable
-      // failures when it isn't Open, we wouldn't need to gate on status.
-      () => next.status == Status.Open,
       MaxRequeuesPerReq,
-      timer
-    )
+      classifier,
+      statsReceiver,
+      timer)
   }
 
   private[this] def svcFactory[Req, Rep](
@@ -290,13 +299,22 @@ object Retries {
           // to point out when a connection is dead for a reason that shouldn't
           // trigger circuit breaking
           case Return(deadSvc) if deadSvc.status == Status.Closed && n > 0 =>
-            // Since we're stopping `deadSvc` from propagating up the stack to either an application
-            // or FactoryToService wrapper and since it's not part of the Service contract that Status
-            // can only be Closed when the close method was called, we must manually close the session
-            // to forestall resource leaks.
-            deadSvc.close()
-            requeuesCounter.incr()
-            applySelf(conn, n - 1)
+            // If `this` is in an Open state we're stopping `deadSvc` from propagating up the stack
+            // to either an application or FactoryToService wrapper and since it's not part of the Service
+            // contract that Status can only be Closed when the close method was called, we must manually
+            // close the session to forestall resource leaks.
+            //
+            // However, `deadSvc` will be propagated up the stack if `this` is not in an Open state.
+            // In this case, we do not close the session here
+            if (status == Status.Open) {
+              deadSvc.close()
+              requeuesCounter.incr()
+              applySelf(conn, n - 1)
+            } else {
+              notOpenCounter.incr()
+              Future.value(deadSvc)
+            }
+
           case t => Future.const(t)
         }
 

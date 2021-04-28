@@ -1,20 +1,24 @@
 package com.twitter.finagle.service
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stats.InMemoryStatsReceiver
-import com.twitter.finagle.{FailedFastException, Service, ServiceFactory, SourcedException, Status}
+import com.twitter.finagle.{
+  Backoff,
+  FailedFastException,
+  Service,
+  ServiceFactory,
+  SourcedException,
+  Status
+}
 import com.twitter.util._
 import java.util.concurrent.atomic.AtomicInteger
-import org.junit.runner.RunWith
 import org.mockito.Matchers.any
 import org.mockito.Mockito.{never, times, verify, when}
 import org.scalatest.FunSuite
 import org.scalatest.concurrent.{Conductors, IntegrationPatience}
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 import scala.language.reflectiveCalls
 
-@RunWith(classOf[JUnitRunner])
 class FailFastFactoryTest
     extends FunSuite
     with MockitoSugar
@@ -23,7 +27,7 @@ class FailFastFactoryTest
 
   def newCtx() = new {
     val timer = new MockTimer
-    val backoffs = 1.second #:: 2.seconds #:: Stream.empty[Duration]
+    val backoffs = Backoff.linear(1.second, 1.second).take(2)
     val service = mock[Service[Int, Int]]
     when(service.close(any[Time])).thenReturn(Future.Done)
     val underlying = mock[ServiceFactory[Int, Int]]
@@ -63,6 +67,7 @@ class FailFastFactoryTest
       assert(failfast().poll.map(_.throwable.getCause).contains(e))
       assert(!failfast.isAvailable)
       assert(stats.counters.get(Seq("marked_dead")).contains(1))
+      assert(stats.gauges(Seq("is_marked_dead"))() == 1)
     }
   }
 
@@ -89,6 +94,8 @@ class FailFastFactoryTest
       tc.set(timer.tasks(0).when)
       when(underlying()).thenReturn(q)
       verify(underlying).apply()
+      assert(stats.counters.get(Seq("marked_dead")).contains(1))
+      assert(stats.gauges(Seq("is_marked_dead"))() == 1)
       timer.tick()
       verify(underlying, times(2)).apply()
       assert(timer.tasks.isEmpty)
@@ -96,6 +103,7 @@ class FailFastFactoryTest
       assert(timer.tasks.isEmpty)
       assert(failfast.isAvailable)
       assert(stats.counters.get(Seq("marked_available")) == Some(1))
+      assert(stats.gauges(Seq("is_marked_dead"))() == 0)
     }
   }
 
@@ -205,7 +213,7 @@ class FailFastFactoryTest
 
       val threadCompletionCount = new AtomicInteger(0)
 
-      thread("threadOne") {
+      threadNamed("threadOne") {
         val ctx = newCtx()
         ctx.p() = Throw(new Exception)
         ctx.failfast().poll match {
@@ -218,7 +226,7 @@ class FailFastFactoryTest
         threadCompletionCount.incrementAndGet()
       }
 
-      thread("threadTwo") {
+      threadNamed("threadTwo") {
         waitForBeat(1)
         val ctx = newCtx()
         ctx.p() = Throw(new Exception)
@@ -242,7 +250,7 @@ class FailFastFactoryTest
       val ctx = newCtx()
       import ctx._
 
-      val failfast = new FailFastFactory(underlying, stats, timer, label, backoffs = Stream.empty)
+      val failfast = new FailFastFactory(underlying, stats, timer, label, backoffs = Backoff.empty)
       failfast()
     }
   }

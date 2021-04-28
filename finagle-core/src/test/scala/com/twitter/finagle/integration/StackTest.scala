@@ -1,6 +1,6 @@
 package com.twitter.finagle.integration
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.builder.{ClientBuilder, ServerBuilder}
 import com.twitter.finagle.client.StackClient
@@ -14,9 +14,7 @@ import org.scalatest.FunSuite
 class StackTest extends FunSuite {
   class TestCtx {
     val failService =
-      Service.mk[String, String] { s: String =>
-        Future.exception(Failure.rejected("unhappy"))
-      }
+      Service.mk[String, String] { s: String => Future.exception(Failure.rejected("unhappy")) }
 
     val newClientStack =
       StackClient

@@ -1,9 +1,9 @@
 package com.twitter.finagle.http2.param
 
-import com.twitter.conversions.storage._
+import com.twitter.conversions.StorageUnitOps._
 import com.twitter.finagle.Stack
 import com.twitter.util.StorageUnit
-import io.netty.handler.codec.http2.Http2MultiplexCodec
+import io.netty.handler.codec.http2.Http2MultiplexHandler
 
 /**
  * A class eligible for configuring whether to use the http/2 "prior knowledge"
@@ -141,11 +141,40 @@ object HeaderSensitivity {
 }
 
 /**
+ * Whether or not HTTP/2 frame logging is enabled.
+ *
+ * Defaults to disabled.
+ *
+ * @see `Enabled` and `Disabled` on companion class for getting instances.
+ */
+final case class FrameLogging private (enabled: Boolean) {
+  def mk(): (FrameLogging, Stack.Param[FrameLogging]) =
+    (this, FrameLogging.param)
+}
+
+object FrameLogging {
+
+  /**
+   * Frame logging is disabled.
+   */
+  val Disabled: FrameLogging = FrameLogging(false)
+
+  /**
+   * Frame logging is enabled.
+   *
+   * @see [[FrameLoggerNamePrefix]] for further configuration.
+   */
+  val Enabled: FrameLogging = FrameLogging(true)
+
+  implicit val param: Stack.Param[FrameLogging] = Stack.Param(Disabled)
+}
+
+/**
  * The logger name to be used for the root HTTP/2 frame logger. This allows each frame type
  * to be turned on and off by changing the level of prefix.<FRAME_TYPE>, or turning everything
  * on by changing the level of prefix. The HTTP/2 frame logger logs at the level TRACE, so you
  * must set logger to that level to see the frame logs. The prefix if not set defaults to
- * io.netty.handler.codec.http2.Http2MultiplexCodec
+ * io.netty.handler.codec.http2.Http2MultiplexHandler
  *
  * @param loggerNamePrefix The name of the logger to be used as the root logger name for
  *                         netty HTTP/2 frame logging.
@@ -156,7 +185,7 @@ case class FrameLoggerNamePrefix(loggerNamePrefix: String) {
 }
 
 object FrameLoggerNamePrefix {
-  private[this] val DefaultFrameLoggerPrefix: String = classOf[Http2MultiplexCodec].getName()
+  private[this] val DefaultFrameLoggerPrefix: String = classOf[Http2MultiplexHandler].getName()
 
   implicit val param = Stack.Param(FrameLoggerNamePrefix(DefaultFrameLoggerPrefix))
 }

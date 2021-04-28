@@ -1,6 +1,6 @@
 package com.twitter.finagle.thrift
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{Address, _}
 import com.twitter.finagle.builder.{ClientBuilder, ServerBuilder}
 import com.twitter.finagle.param.Stats
@@ -12,8 +12,10 @@ import com.twitter.finagle.stats.{
   InMemoryStatsReceiver,
   LoadedStatsReceiver,
   NullStatsReceiver,
+  Server,
   StatsReceiver
 }
+import com.twitter.finagle.thrift.{ClientId => FinagleClientId}
 import com.twitter.finagle.thrift.service.ThriftResponseClassifier
 import com.twitter.finagle.thrift.thriftscala._
 import com.twitter.finagle.tracing.{Annotation, Record, Trace}
@@ -24,8 +26,10 @@ import com.twitter.test._
 import com.twitter.util._
 import java.io.{PrintWriter, StringWriter}
 import java.net.{InetAddress, InetSocketAddress, SocketAddress}
+import java.util.{List => JList}
 import org.apache.thrift.TApplicationException
-import org.apache.thrift.protocol.{TBinaryProtocol, TCompactProtocol, TProtocolFactory}
+import org.apache.thrift.protocol.{TBinaryProtocol, TCompactProtocol, TProtocol, TProtocolFactory}
+import org.apache.thrift.transport.TTransport
 import org.scalatest.{BeforeAndAfter, FunSuite}
 import scala.reflect.ClassTag
 
@@ -47,24 +51,26 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
   def ifaceManifest = implicitly[ClassTag[B.ServiceIface]]
 
   class BServiceImpl extends B.ServiceIface {
-    def add(a: Int, b: Int) = Future.exception(new AnException)
-    def add_one(a: Int, b: Int) = Future.Void
-    def multiply(a: Int, b: Int) = Future { a * b }
-    def complex_return(someString: String) = Future {
+    def add(a: Int, b: Int): Future[Integer] = Future.exception(new AnException)
+    def add_one(a: Int, b: Int): Future[Void] = Future.Void
+    def multiply(a: Int, b: Int): Future[Integer] = Future { a * b }
+    def complex_return(someString: String): Future[SomeStruct] = Future {
       Trace.record("hey it's me!")
       new SomeStruct(123, Trace.id.parentId.toString)
     }
-    def someway() = Future.Void
-    def show_me_your_dtab() = Future {
+    def someway(): Future[Void] = Future.Void
+    def show_me_your_dtab(): Future[String] = Future {
       val stringer = new StringWriter
       val printer = new PrintWriter(stringer)
       Dtab.local.print(printer)
       stringer.toString
     }
 
-    def show_me_your_dtab_size() = Future {
+    def show_me_your_dtab_size(): Future[Integer] = Future {
       Dtab.local.length
     }
+
+    override def mergeable_add(alist: JList[Integer]): Future[Integer] = Future.value(0)
   }
 
   val processor = new BServiceImpl()
@@ -82,7 +88,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
   def servers(serverParam: RichServerParam): Seq[(String, Closable, Int)] = {
     val iface = new BServiceImpl {
       override def show_me_your_dtab(): Future[String] = {
-        ClientId.current.map(_.name) match {
+        FinagleClientId.current.map(_.name) match {
           case Some(name) => Future.value(name)
           case _ => Future.exception(missingClientIdEx)
         }
@@ -109,15 +115,13 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
 
   def clients(
     pf: TProtocolFactory,
-    clientId: Option[ClientId],
+    clientId: Option[FinagleClientId],
     port: Int
   ): Seq[(String, B.ServiceIface, Closable)] = {
     val dest = s"localhost:$port"
 
     var clientStack = Thrift.client.withProtocolFactory(pf)
-    clientId.foreach { cId =>
-      clientStack = clientStack.withClientId(cId)
-    }
+    clientId.foreach { cId => clientStack = clientStack.withClientId(cId) }
 
     val builder = ClientBuilder()
       .stack(clientStack)
@@ -137,7 +141,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
   // While we're supporting both old & new APIs, test the cross-product
   test("Mix of client and server creation styles") {
     for {
-      clientId <- Seq(Some(ClientId("anClient")), None)
+      clientId <- Seq(Some(FinagleClientId("anClient")), None)
       pf <- Seq(Protocols.binaryFactory(), new TCompactProtocol.Factory())
       (serverWhich, serverClosable, port) <- servers(RichServerParam(pf))
     } {
@@ -186,6 +190,9 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     assert(sr.counters(Seq("requests")) == 1)
     assert(sr.counters(Seq("success")) == 0)
     assert(sr.counters(Seq("failures")) == 1)
+
+    assert(sr.expressions("success_rate").labels.role == Server)
+
     server.close()
   }
 
@@ -235,7 +242,8 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
         .filter(_.traceId == theId)
         .filter {
           // Skip spurious GC messages
-          case Record(_, _, Annotation.Message(msg), _) => !msg.startsWith("Gc")
+          case Record(_, _, Annotation.Message(msg), _) => !(msg == "GC Start" || msg == "GC End")
+          case Record(_, _, Annotation.BinaryAnnotation(k, _), _) => !k.contains("payload")
           case _ => true
         }
         .toSeq
@@ -243,7 +251,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
       // Verify the count of the annotations. Order may change.
       // These are set twice - by client and server
       assert(
-        traces.collect { case Record(_, _, Annotation.BinaryAnnotation(k, v), _) => () }.size == 3
+        traces.collect { case Record(_, _, Annotation.BinaryAnnotation(_, _), _) => () }.size == 10
       )
       assert(traces.collect { case Record(_, _, Annotation.ServerAddr(_), _) => () }.size == 2)
       // With Stack, we get an extra ClientAddr because of the
@@ -253,10 +261,14 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
       assert(traces.collect { case Record(_, _, Annotation.LocalAddr(_), _) => () }.size == 1)
       // These are set by one side only.
       assert(
-        traces.collect { case Record(_, _, Annotation.ServiceName("thriftclient"), _) => () }.size == 1
+        traces.collect {
+          case Record(_, _, Annotation.ServiceName("thriftclient"), _) => ()
+        }.size == 1
       )
       assert(
-        traces.collect { case Record(_, _, Annotation.ServiceName("thriftserver"), _) => () }.size == 1
+        traces.collect {
+          case Record(_, _, Annotation.ServiceName("thriftserver"), _) => ()
+        }.size == 1
       )
       assert(traces.collect { case Record(_, _, Annotation.ClientSend, _) => () }.size == 1)
       assert(traces.collect { case Record(_, _, Annotation.ServerRecv, _) => () }.size == 1)
@@ -399,6 +411,8 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
         Future.value("safe")
       else if (x == "slow")
         Future.sleep(1.second)(DefaultTimer).before(Future.value("slow"))
+      else if (x == "ignore")
+        Future.const(Throw(Failure.ignorable("hello?")))
       else
         Future.exception(new InvalidQueryException(x.length))
   }
@@ -430,6 +444,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     assert("hi".length == ex.errorCode)
     assert(sr.counters(Seq("client", "requests")) == 1)
     assert(sr.counters(Seq("client", "success")) == 0)
+    assert(sr.counters(Seq("client", "failures")) == 1)
 
     // test that we can examine the request as well.
     intercept[InvalidQueryException] {
@@ -437,11 +452,13 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     }
     assert(sr.counters(Seq("client", "requests")) == 2)
     assert(sr.counters(Seq("client", "success")) == 1)
+    assert(sr.counters(Seq("client", "failures")) == 1)
 
     // test that we can mark a successfully deserialized result as a failure
     assert("safe" == await(client.echo("safe")))
     assert(sr.counters(Seq("client", "requests")) == 3)
     assert(sr.counters(Seq("client", "success")) == 1)
+    assert(sr.counters(Seq("client", "failures")) == 2)
 
     // this query produces a `Throw` response produced on the client side and
     // we want to ensure that we can translate it to a `Success`.
@@ -450,6 +467,15 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     }
     assert(sr.counters(Seq("client", "requests")) == 4)
     assert(sr.counters(Seq("client", "success")) == 2)
+    assert(sr.counters(Seq("client", "failures")) == 2)
+
+    // This query makes the server throw an ignorable failure.
+    intercept[TApplicationException] {
+      await(client.echo("ignore"), 10.seconds)
+    }
+    assert(sr.counters(Seq("client", "requests")) == 5)
+    assert(sr.counters(Seq("client", "success")) == 3)
+    assert(sr.counters(Seq("client", "failures")) == 2)
   }
 
   private def testScalaServerResponseClassification(
@@ -461,10 +487,12 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     }
     assert("hi".length == ex.errorCode)
     assert(sr.counters(Seq("thrift", "echo", "requests")) == 1)
-    assert(sr.counters(Seq("thrift", "echo", "success")) == 0)
+    assert(!sr.counters.contains(Seq("thrift", "echo", "success")))
+    assert(sr.counters(Seq("thrift", "echo", "failures")) == 1)
 
     assert(sr.counters(Seq("requests")) == 1)
-    assert(sr.counters.get(Seq("success")) == Some(0))
+    assert(sr.counters(Seq("success")) == 0)
+    assert(sr.counters(Seq("failures")) == 1)
 
     // test that we can examine the request as well.
     intercept[InvalidQueryException] {
@@ -472,17 +500,21 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     }
     assert(sr.counters(Seq("thrift", "echo", "requests")) == 2)
     assert(sr.counters(Seq("thrift", "echo", "success")) == 1)
+    assert(sr.counters(Seq("thrift", "echo", "failures")) == 1)
 
     assert(sr.counters(Seq("requests")) == 2)
     assert(sr.counters(Seq("success")) == 1)
+    assert(sr.counters(Seq("failures")) == 1)
 
     // test that we can mark a successfully deserialized result as a failure
     assert("safe" == await(client.echo("safe")))
     assert(sr.counters(Seq("thrift", "echo", "requests")) == 3)
     assert(sr.counters(Seq("thrift", "echo", "success")) == 1)
+    assert(sr.counters(Seq("thrift", "echo", "failures")) == 2)
 
     assert(sr.counters(Seq("requests")) == 3)
     assert(sr.counters(Seq("success")) == 1)
+    assert(sr.counters(Seq("failures")) == 2)
 
     // this query produces a Timeout exception in server side and it should be
     // translated to `Success`
@@ -491,9 +523,24 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     }
     assert(sr.counters(Seq("thrift", "echo", "requests")) == 4)
     assert(sr.counters(Seq("thrift", "echo", "success")) == 2)
+    assert(sr.counters(Seq("thrift", "echo", "failures")) == 2)
 
     assert(sr.counters(Seq("requests")) == 4)
     assert(sr.counters(Seq("success")) == 2)
+    assert(sr.counters(Seq("failures")) == 2)
+
+    // This query makes the server throw an ignorable failure. This increments
+    // the request count, but not the failure count.
+    intercept[TApplicationException] {
+      await(client.echo("ignore"), 10.seconds)
+    }
+    assert(sr.counters(Seq("thrift", "echo", "requests")) == 5)
+    assert(sr.counters(Seq("thrift", "echo", "success")) == 2)
+    assert(sr.counters(Seq("thrift", "echo", "failures")) == 2)
+
+    assert(sr.counters(Seq("requests")) == 4)
+    assert(sr.counters(Seq("success")) == 2)
+    assert(sr.counters(Seq("failures")) == 2)
   }
 
   private def testJavaClientResponseClassification(
@@ -606,8 +653,10 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     server.close()
   }
 
-  test("scala thrift stack server using response classification with " +
-    "`servicePerEndpoint[ServicePerEndpoint]`") {
+  test(
+    "scala thrift stack server using response classification with " +
+      "`servicePerEndpoint[ServicePerEndpoint]`"
+  ) {
     val sr = new InMemoryStatsReceiver()
 
     val server = Thrift.server
@@ -627,10 +676,12 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     }
     assert("hi".length == ex.errorCode)
     assert(sr.counters(Seq("thrift", "echo", "requests")) == 1)
-    assert(sr.counters(Seq("thrift", "echo", "success")) == 0)
+    assert(!sr.counters.contains(Seq("thrift", "echo", "success")))
+    assert(sr.counters(Seq("thrift", "echo", "failures")) == 1)
 
     assert(sr.counters(Seq("requests")) == 1)
     assert(sr.counters(Seq("success")) == 0)
+    assert(sr.counters(Seq("failures")) == 1)
 
     // test that we can examine the request as well.
     intercept[InvalidQueryException] {
@@ -638,17 +689,21 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     }
     assert(sr.counters(Seq("thrift", "echo", "requests")) == 2)
     assert(sr.counters(Seq("thrift", "echo", "success")) == 1)
+    assert(sr.counters(Seq("thrift", "echo", "failures")) == 1)
 
     assert(sr.counters(Seq("requests")) == 2)
     assert(sr.counters(Seq("success")) == 1)
+    assert(sr.counters(Seq("failures")) == 1)
 
     // test that we can mark a successfully deserialized result as a failure
     assert("safe" == await(client.echo(Echo.Echo.Args("safe"))))
     assert(sr.counters(Seq("thrift", "echo", "requests")) == 3)
     assert(sr.counters(Seq("thrift", "echo", "success")) == 1)
+    assert(sr.counters(Seq("thrift", "echo", "failures")) == 2)
 
     assert(sr.counters(Seq("requests")) == 3)
     assert(sr.counters(Seq("success")) == 1)
+    assert(sr.counters(Seq("failures")) == 2)
 
     // this query produces a Timeout exception in server side and it should be
     // translated to `Success`
@@ -657,14 +712,32 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     }
     assert(sr.counters(Seq("thrift", "echo", "requests")) == 4)
     assert(sr.counters(Seq("thrift", "echo", "success")) == 2)
+    assert(sr.counters(Seq("thrift", "echo", "failures")) == 2)
 
     assert(sr.counters(Seq("requests")) == 4)
     assert(sr.counters(Seq("success")) == 2)
+    assert(sr.counters(Seq("failures")) == 2)
+
+    // This query makes the server throw an ignorable failure. This increments
+    // the request count, but not the failure count.
+    intercept[TApplicationException] {
+      await(client.echo(Echo.Echo.Args("ignore")))
+    }
+    assert(sr.counters(Seq("thrift", "echo", "requests")) == 5)
+    assert(sr.counters(Seq("thrift", "echo", "success")) == 2)
+    assert(sr.counters(Seq("thrift", "echo", "failures")) == 2)
+
+    assert(sr.counters(Seq("requests")) == 4)
+    assert(sr.counters(Seq("success")) == 2)
+    assert(sr.counters(Seq("failures")) == 2)
+
     server.close()
   }
 
-  test("scala thrift stack server using response classification with " +
-    "`servicePerEndpoint[ReqRepServicePerEndpoint]`") {
+  test(
+    "scala thrift stack server using response classification with " +
+      "`servicePerEndpoint[ReqRepServicePerEndpoint]`"
+  ) {
     val sr = new InMemoryStatsReceiver()
 
     val server = Thrift.server
@@ -684,7 +757,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     }
     assert("hi".length == ex.errorCode)
     assert(sr.counters(Seq("thrift", "echo", "requests")) == 1)
-    assert(sr.counters(Seq("thrift", "echo", "success")) == 0)
+    assert(!sr.counters.contains(Seq("thrift", "echo", "success")))
 
     assert(sr.counters(Seq("requests")) == 1)
     assert(sr.counters(Seq("success")) == 0)
@@ -886,7 +959,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     assert(sr.counters(Seq("requests")) == 1)
     assert(sr.counters(Seq("success")) == 0)
     assert(sr.counters(Seq("thrift", "echo", "requests")) == 1)
-    assert(sr.counters(Seq("thrift", "echo", "success")) == 0)
+    assert(!sr.counters.contains(Seq("thrift", "echo", "success")))
 
     // test that we can mark a successfully deserialized result as a failure
     assert("safe" == await(client.echo("safe"), 10.seconds))
@@ -962,8 +1035,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     val sr = new InMemoryStatsReceiver
     LoadedStatsReceiver.self = sr
 
-    val server = Thrift.server
-      .withPerEndpointStats
+    val server = Thrift.server.withPerEndpointStats
       .serveIface(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), iface)
 
     val client = Thrift.client.build[Echo.MethodPerEndpoint](
@@ -998,6 +1070,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
       .withMaxReusableBufferSize(15)
       .withResponseClassifier(ThriftResponseClassifier.ThriftExceptionsAsFailures)
       .withStatsReceiver(clientStats)
+      .withTReusableBufferFactory(RichClientParam.createThriftReusableBuffer(20))
       .build[Echo.MethodPerEndpoint](
         Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
         "client"
@@ -1010,7 +1083,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     assert(clientStats.counters(Seq("client", "requests")) == 1)
     assert(clientStats.counters(Seq("client", "success")) == 0)
     assert(serverStats.counters(Seq("thrift", "echo", "requests")) == 1)
-    assert(serverStats.counters(Seq("thrift", "echo", "success")) == 0)
+    assert(!serverStats.counters.contains(Seq("thrift", "echo", "success")))
 
     // test that we can mark a successfully deserialized result as a failure
     assert("safe" == await(client.echo("safe"), 10.seconds))
@@ -1038,57 +1111,43 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     )
 
     assert(await(client.echo("hi"), 1.second) == "hi")
-    intercept[NoSuchElementException] {assert(sr.counters(Seq("thrift", "echo", "requests")) == 1)}
+    intercept[NoSuchElementException] {
+      assert(sr.counters(Seq("thrift", "echo", "requests")) == 1)
+    }
     assert(sr.counters(Seq("requests")) == 1)
 
     server.close()
   }
 
-  private[this] val servers: Seq[(String, (StatsReceiver, Echo.MethodPerEndpoint) => ListeningServer)] =
+  private[this] val servers: Seq[
+    (String, (StatsReceiver, Echo.MethodPerEndpoint) => ListeningServer)
+  ] =
     Seq(
       "Thrift.server" ->
-        (
-          (
-            sr,
-            fi
-          ) =>
-            Thrift.server
-              .withLabel("server")
-              .withStatsReceiver(sr)
-              .serve("localhost:*", new Echo.FinagledService(fi, Protocols.binaryFactory()))
-        ),
+        ((sr, fi) =>
+          Thrift.server
+            .withLabel("server")
+            .withStatsReceiver(sr)
+            .serve("localhost:*", new Echo.FinagledService(fi, Protocols.binaryFactory()))),
       "ServerBuilder(stack)" ->
-        (
-          (
-            sr,
-            fi
-          ) =>
-            ServerBuilder()
-              .stack(Thrift.server)
-              .name("server")
-              .reportTo(sr)
-              .bindTo(new InetSocketAddress(0))
-              .build(new Echo.FinagledService(fi, Protocols.binaryFactory()))
-        )
+        ((sr, fi) =>
+          ServerBuilder()
+            .stack(Thrift.server)
+            .name("server")
+            .reportTo(sr)
+            .bindTo(new InetSocketAddress(0))
+            .build(new Echo.FinagledService(fi, Protocols.binaryFactory())))
     )
 
-  private[this] val clients: Seq[(String, (StatsReceiver, Address) => Echo.MethodPerEndpoint)] = Seq(
-    "Thrift.client" ->
-      (
-        (
-          sr,
-          addr
-        ) =>
+  private[this] val clients: Seq[(String, (StatsReceiver, Address) => Echo.MethodPerEndpoint)] =
+    Seq(
+      "Thrift.client" ->
+        ((sr, addr) =>
           Thrift.client
             .withStatsReceiver(sr)
-            .build[Echo.MethodPerEndpoint](Name.bound(addr), "client")
-      ),
-    "ClientBuilder(stack)" ->
-      (
-        (
-          sr,
-          addr
-        ) =>
+            .build[Echo.MethodPerEndpoint](Name.bound(addr), "client")),
+      "ClientBuilder(stack)" ->
+        ((sr, addr) =>
           new Echo.FinagledClient(
             ClientBuilder()
               .stack(Thrift.client)
@@ -1097,40 +1156,38 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
               .reportTo(sr)
               .dest(Name.bound(addr))
               .build()
-          )
-      )
-  )
+          ))
+    )
 
   for {
     (s, server) <- servers
     (c, client) <- clients
-  } yield
-    test(s"measures payload sizes: $s :: $c") {
-      val sr = new InMemoryStatsReceiver
+  } yield test(s"measures payload sizes: $s :: $c") {
+    val sr = new InMemoryStatsReceiver
 
-      val fi = new Echo.MethodPerEndpoint {
-        def echo(x: String) = Future.value(x + x)
-      }
-
-      val ss = server(sr, fi)
-      val cc = client(sr, Address(ss.boundAddress.asInstanceOf[InetSocketAddress]))
-
-      Await.ready(cc.echo("." * 10))
-
-      // 40 bytes messages are from protocol negotiation made by TTwitter*Filter
-      assert(sr.stat("client", "request_payload_bytes")() == Seq(40.0f, 209.0f))
-      assert(sr.stat("client", "response_payload_bytes")() == Seq(40.0f, 45.0f))
-      assert(sr.stat("server", "request_payload_bytes")() == Seq(40.0f, 209.0f))
-      assert(sr.stat("server", "response_payload_bytes")() == Seq(40.0f, 45.0f))
-
-      Await.ready(ss.close())
+    val fi = new Echo.MethodPerEndpoint {
+      def echo(x: String) = Future.value(x + x)
     }
+
+    val ss = server(sr, fi)
+    val cc = client(sr, Address(ss.boundAddress.asInstanceOf[InetSocketAddress]))
+
+    Await.ready(cc.echo("." * 10))
+
+    // 40 bytes messages are from protocol negotiation made by TTwitter*Filter
+    assert(sr.stat("client", "request_payload_bytes")() == Seq(40.0f, 209.0f))
+    assert(sr.stat("client", "response_payload_bytes")() == Seq(40.0f, 45.0f))
+    assert(sr.stat("server", "request_payload_bytes")() == Seq(40.0f, 209.0f))
+    assert(sr.stat("server", "response_payload_bytes")() == Seq(40.0f, 45.0f))
+
+    Await.ready(ss.close())
+  }
 
   test("clientId is not sent and prep stats are not recorded when TTwitter upgrading is disabled") {
     val pf = Protocols.binaryFactory()
     val iface = new BServiceImpl {
       override def someway(): Future[Void] = {
-        ClientId.current.map(_.name) match {
+        FinagleClientId.current.map(_.name) match {
           case Some(name) => Future.exception(presentClientIdEx)
           case _ => Future.Void
         }
@@ -1144,7 +1201,7 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     val client = Thrift.client
       .configured(Stats(sr))
       .withProtocolFactory(pf)
-      .withClientId(ClientId("aClient"))
+      .withClientId(FinagleClientId("aClient"))
       .withNoAttemptTTwitterUpgrade
       .build[B.ServiceIface](
         Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
@@ -1165,7 +1222,8 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     val clientParamTBF = RichClientParam(new TBinaryProtocol.Factory(false, false))
     val strictReadField = clientParamTBF.protocolFactory.getClass.getDeclaredField("strictRead_")
     val strictWriteField = clientParamTBF.protocolFactory.getClass.getDeclaredField("strictWrite_")
-    val readLimitField = clientParamTBF.protocolFactory.getClass.getDeclaredField("stringLengthLimit_")
+    val readLimitField =
+      clientParamTBF.protocolFactory.getClass.getDeclaredField("stringLengthLimit_")
 
     strictReadField.setAccessible(true)
     strictWriteField.setAccessible(true)
@@ -1173,16 +1231,19 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
 
     strictReadField.get(clientParamTBF.protocolFactory) == false
     strictWriteField.get(clientParamTBF.protocolFactory) == false
-    readLimitField.get(clientParamTBF.protocolFactory) == Protocols.NoReadLimit
+    readLimitField.get(clientParamTBF.protocolFactory) == Protocols.NoLimit
   }
 
   test("TBinaryProtocol.Factory has right info after we set system property") {
 
     System.setProperty("org.apache.thrift.readLength", "1000")
     val clientParamSysProp = RichClientParam(new TBinaryProtocol.Factory(false, false))
-    val strictReadField = clientParamSysProp.protocolFactory.getClass.getDeclaredField("strictRead_")
-    val strictWriteField = clientParamSysProp.protocolFactory.getClass.getDeclaredField("strictWrite_")
-    val readLimitField = clientParamSysProp.protocolFactory.getClass.getDeclaredField("stringLengthLimit_")
+    val strictReadField =
+      clientParamSysProp.protocolFactory.getClass.getDeclaredField("strictRead_")
+    val strictWriteField =
+      clientParamSysProp.protocolFactory.getClass.getDeclaredField("strictWrite_")
+    val readLimitField =
+      clientParamSysProp.protocolFactory.getClass.getDeclaredField("stringLengthLimit_")
 
     strictReadField.setAccessible(true)
     strictWriteField.setAccessible(true)
@@ -1192,6 +1253,84 @@ class EndToEndTest extends FunSuite with ThriftTest with BeforeAndAfter {
     strictWriteField.get(clientParamSysProp.protocolFactory) == false
     readLimitField.get(clientParamSysProp.protocolFactory) == 1000
     System.clearProperty("org.apache.thrift.readLength")
+  }
+
+  private[this] val exceptionProtocol = new TProtocolFactory {
+    override def getProtocol(trans: TTransport): TProtocol = {
+      throw new Exception("Evidence to show when Rich[Server|Client]Params are passed through")
+    }
+  }
+
+  test("verify using stack API's .with... works to set RichServerParams when using ServerBuilder") {
+    val server = ServerBuilder()
+      .stack(Thrift.server.withProtocolFactory(exceptionProtocol))
+      .name("exception-service")
+      .bindTo(new InetSocketAddress(0))
+      .build(ifaceToService(processor, RichServerParam()))
+
+    val client = Thrift.client.build[B.ServiceIface](
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
+
+    intercept[Exception] {
+      await(client.show_me_your_dtab())
+    }
+    await(server.close())
+  }
+
+  test(
+    "passing RichServerParams through the service when creating a server with ServerBuilder works") {
+    val server = ServerBuilder()
+      .stack(Thrift.server)
+      .name("exception-service")
+      .bindTo(new InetSocketAddress(0))
+      .build(ifaceToService(processor, RichServerParam(protocolFactory = exceptionProtocol)))
+
+    val client = Thrift.client.build[B.ServiceIface](
+      Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])),
+      "client"
+    )
+
+    intercept[Exception] {
+      await(client.show_me_your_dtab())
+    }
+    await(server.close())
+  }
+
+  test("verify using stack API's .with... works to set RichClientParams when using ClientBuilder") {
+    val server =
+      Thrift.server.serveIface(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), processor)
+
+    val builder = ClientBuilder()
+      .stack(Thrift.client.withProtocolFactory(exceptionProtocol))
+      .name("exception-client")
+      .dest(Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])))
+      .build()
+    val client = serviceToIface(builder, Protocols.binaryFactory())
+
+    intercept[Exception] {
+      await(client.show_me_your_dtab())
+    }
+    await(server.close())
+  }
+
+  test(
+    "passing RichClientParams to the FinagleClient when creating a client with ClientBuilder works") {
+    val server =
+      Thrift.server.serveIface(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), processor)
+
+    val builder = ClientBuilder()
+      .stack(Thrift.client)
+      .name("exception-client")
+      .dest(Name.bound(Address(server.boundAddress.asInstanceOf[InetSocketAddress])))
+      .build()
+    val client = serviceToIface(builder, exceptionProtocol)
+
+    intercept[Exception] {
+      await(client.show_me_your_dtab())
+    }
+    await(server.close())
   }
 }
 

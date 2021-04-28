@@ -5,11 +5,8 @@ import com.twitter.finagle.ssl._
 import com.twitter.io.TempFile
 import java.net.InetSocketAddress
 import javax.net.ssl.SSLContext
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class SslContextClientEngineFactoryTest extends FunSuite {
 
   private[this] val address: Address = Address(new InetSocketAddress("localhost", 12345))
@@ -54,7 +51,7 @@ class SslContextClientEngineFactoryTest extends FunSuite {
     val config = SslClientConfiguration(keyCredentials = keyCredentials)
 
     intercept[SslConfigurationException] {
-      val engine = factory(address, config)
+      factory(address, config)
     }
   }
 
@@ -62,7 +59,7 @@ class SslContextClientEngineFactoryTest extends FunSuite {
     val config = SslClientConfiguration(trustCredentials = TrustCredentials.Insecure)
 
     intercept[SslConfigurationException] {
-      val engine = factory(address, config)
+      factory(address, config)
     }
   }
 
@@ -74,12 +71,12 @@ class SslContextClientEngineFactoryTest extends FunSuite {
       SslClientConfiguration(trustCredentials = TrustCredentials.CertCollection(tempCertFile))
 
     intercept[SslConfigurationException] {
-      val engine = factory(address, config)
+      factory(address, config)
     }
   }
 
   test("config with good cipher suites succeeds") {
-    val cipherSuites = CipherSuites.Enabled(Seq("TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384"))
+    val cipherSuites = CipherSuites.Enabled(Seq("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"))
     val config = SslClientConfiguration(cipherSuites = cipherSuites)
     val engine = factory(address, config)
     val sslEngine = engine.self
@@ -87,7 +84,7 @@ class SslContextClientEngineFactoryTest extends FunSuite {
     assert(sslEngine != null)
     val enabled = sslEngine.getEnabledCipherSuites()
     assert(enabled.length == 1)
-    assert(enabled(0) == "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384")
+    assert(enabled(0) == "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256")
   }
 
   test("config with bad cipher suites fails") {
@@ -95,7 +92,7 @@ class SslContextClientEngineFactoryTest extends FunSuite {
     val config = SslClientConfiguration(cipherSuites = cipherSuites)
 
     intercept[IllegalArgumentException] {
-      val engine = factory(address, config)
+      factory(address, config)
     }
   }
 
@@ -116,7 +113,7 @@ class SslContextClientEngineFactoryTest extends FunSuite {
     val config = SslClientConfiguration(protocols = protocols)
 
     intercept[IllegalArgumentException] {
-      val engine = factory(address, config)
+      factory(address, config)
     }
   }
 
@@ -125,7 +122,7 @@ class SslContextClientEngineFactoryTest extends FunSuite {
     val config = SslClientConfiguration(applicationProtocols = appProtocols)
 
     intercept[SslConfigurationException] {
-      val engine = factory(address, config)
+      factory(address, config)
     }
   }
 

@@ -1,5 +1,6 @@
 package com.twitter.finagle.thriftmux.pushsession
 
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Mux.param.OppTls
 import com.twitter.finagle.pushsession.RefPushSession
 import com.twitter.finagle.pushsession.utils.MockChannelHandle
@@ -7,7 +8,11 @@ import com.twitter.finagle.{param => fparam}
 import com.twitter.finagle.mux.{Request, Response}
 import com.twitter.finagle.mux.transport.{Message, OpportunisticTls}
 import com.twitter.finagle.{Service, Stack, ThriftMux}
-import com.twitter.finagle.mux.pushsession.{MuxChannelHandle, MuxClientNegotiatingSession}
+import com.twitter.finagle.mux.pushsession.{
+  MuxChannelHandle,
+  MuxClientNegotiatingSession,
+  SharedNegotiationStats
+}
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.finagle.thriftmux.thriftscala.TestService
 import com.twitter.io.{Buf, ByteReader}
@@ -20,14 +25,17 @@ class MuxDowngradingNegotiatorTest extends FunSuite {
 
   private class Ctx {
     private class MockMuxChannelHandle
-      extends MuxChannelHandle(
-        underlying = handle,
-        ch = null, // only used in overridden method `sendAndForgetNow`
-        params = params) {
+        extends MuxChannelHandle(
+          underlying = handle,
+          ch = null, // only used in overridden method `sendAndForgetNow`
+          params = params
+        ) {
       override def sendNowAndForget(buf: Buf): Unit = sendAndForget(buf)
     }
 
     lazy val statsReceiver: InMemoryStatsReceiver = new InMemoryStatsReceiver
+
+    lazy val sharedStats = new SharedNegotiationStats(statsReceiver)
 
     lazy val params: Stack.Params = ThriftMux.BaseServerParams + fparam.Stats(statsReceiver)
 
@@ -39,12 +47,14 @@ class MuxDowngradingNegotiatorTest extends FunSuite {
       Future.value(Response(req.body))
     }
 
-    lazy val refSession: RefPushSession[ByteReader, Buf] = new RefPushSession[ByteReader, Buf](handle, null)
+    lazy val refSession: RefPushSession[ByteReader, Buf] =
+      new RefPushSession[ByteReader, Buf](handle, null)
 
     val negotiator: MuxDowngradingNegotiator = {
       val session = new MuxDowngradingNegotiator(
         refSession = refSession,
         params = params,
+        sharedStats,
         handle = muxChannelHandle,
         service = service
       )
@@ -62,7 +72,7 @@ class MuxDowngradingNegotiatorTest extends FunSuite {
       // Should be an echo of the marker Rerr if the standard mux handshake kicked in
       val handle.SendAndForgetOne(msg) = handle.pendingWrites.dequeue()
       assert(Message.decode(msg) == MuxClientNegotiatingSession.MarkerRerr)
-      assert(statsReceiver.counters(Seq("thriftmux", "connects")) == 1l)
+      assert(statsReceiver.counters(Seq("thriftmux", "connects")) == 1L)
     }
   }
 
@@ -85,14 +95,15 @@ class MuxDowngradingNegotiatorTest extends FunSuite {
       // Should be an echo of the marker Rerr if the standard mux handshake kicked in
       val handle.SendOne(msg, _) = handle.pendingWrites.dequeue()
       assert(msg == thriftMsg)
-      assert(statsReceiver.counters(Seq("thriftmux", "downgraded_connects")) == 1l)
+      assert(statsReceiver.counters(Seq("thriftmux", "downgraded_connects")) == 1L)
     }
   }
 
   test("fails to start a downgraded session if opportunistic TLS is required") {
     new Ctx {
       override lazy val params: Stack.Params =
-        ThriftMux.BaseServerParams + fparam.Stats(statsReceiver) + OppTls(Some(OpportunisticTls.Required))
+        ThriftMux.BaseServerParams + fparam.Stats(statsReceiver) +
+          OppTls(Some(OpportunisticTls.Required))
 
       val thriftMsg = {
         val buffer = new TMemoryBuffer(1)
@@ -108,7 +119,36 @@ class MuxDowngradingNegotiatorTest extends FunSuite {
       refSession.receive(ByteReader(thriftMsg))
 
       assert(handle.closedCalled)
-      assert(statsReceiver.counters(Seq("tls", "upgrade", "incompatible")) == 1l)
+      assert(statsReceiver.counters(Seq("mux", "tls", "upgrade", "incompatible")) == 1L)
+    }
+  }
+
+  test("no infinite loops if we close before the handshake is complete and fail negotiation") {
+    new Ctx {
+      override lazy val params: Stack.Params =
+        ThriftMux.BaseServerParams + fparam.Stats(statsReceiver) +
+          OppTls(Some(OpportunisticTls.Required))
+
+      val thriftMsg = {
+        val buffer = new TMemoryBuffer(1)
+        val framed = new TFramedTransport(buffer)
+        val proto = new TBinaryProtocol(framed)
+        val arg = TestService.Query.Args("hi")
+        TestService.Query.Args.encode(arg, proto)
+        framed.flush()
+        val bytes = buffer.getArray
+        Buf.ByteArray.Owned(bytes)
+      }
+
+      val closeF = refSession.close(60.seconds)
+      handle.serialExecutor.executeAll()
+      refSession.receive(ByteReader(thriftMsg))
+
+      assert(handle.closedCalled)
+      handle.onClosePromise.setDone()
+      assert(closeF.isDefined)
+      assert(handle.serialExecutor.pendingTasks == 0)
+      assert(statsReceiver.counters(Seq("mux", "tls", "upgrade", "incompatible")) == 1L)
     }
   }
 }

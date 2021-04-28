@@ -1,13 +1,11 @@
 package com.twitter.finagle.addr
 
 import com.twitter.concurrent.Broker
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{Addr, Address}
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.util.{MockTimer, Time}
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 import StabilizingAddr.State._
 
 class MockHealth {
@@ -67,7 +65,6 @@ class Context {
   }
 }
 
-@RunWith(classOf[JUnitRunner])
 class StabilizingAddrTest extends FunSuite {
 
   test("delay removals while healthy") {

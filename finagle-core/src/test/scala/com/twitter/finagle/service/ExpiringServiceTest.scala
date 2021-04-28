@@ -1,19 +1,17 @@
 package com.twitter.finagle.service
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stats.{Counter, StatsReceiver, NullStatsReceiver}
-import com.twitter.finagle.{Service, Status}
-import com.twitter.util.{Future, Time, MockTimer, Promise, Return, Duration, Timer}
-import org.junit.runner.RunWith
+import com.twitter.finagle.{Service, Status, WriteException}
+import com.twitter.util.{Await, Future, Time, MockTimer, Promise, Return, Duration, Timer}
 import org.mockito.Matchers.any
 import org.mockito.Mockito.{never, verify, when}
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
 class ExpiringServiceTest extends FunSuite with MockitoSugar {
 
+  def await[A](f: Future[A]): A = Await.result(f, 5.seconds)
   val frozenNow = Time.now
 
   class ReleasingExpiringService[Req, Rep](
@@ -21,8 +19,8 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
     maxIdleTime: Option[Duration],
     maxLifeTime: Option[Duration],
     timer: Timer,
-    stats: StatsReceiver
-  ) extends ExpiringService[Req, Rep](self, maxIdleTime, maxLifeTime, timer, stats) {
+    stats: StatsReceiver)
+      extends ExpiringService[Req, Rep](self, maxIdleTime, maxLifeTime, timer, stats) {
     def onExpire(): Unit = { self.close() }
   }
 
@@ -39,6 +37,16 @@ class ExpiringServiceTest extends FunSuite with MockitoSugar {
     val promise = new Promise[Int]
     when(underlying(123)).thenReturn(promise)
     when(underlying.status).thenReturn(Status.Open)
+  }
+
+  test("throws a write exception if we attempt to use a released service") {
+    val noOpSvc = Service.const(Future.value(""))
+    val svc = ExpiringService.closeOnReleaseSvc(noOpSvc)
+
+    await(svc.close()) // action taken on 'release'
+    intercept[WriteException] {
+      await(svc())
+    }
   }
 
   test("cancelling timers on release") {

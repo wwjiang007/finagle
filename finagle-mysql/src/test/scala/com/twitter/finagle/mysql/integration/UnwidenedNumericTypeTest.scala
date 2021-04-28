@@ -1,7 +1,8 @@
 package com.twitter.finagle.mysql.integration
 
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.mysql._
-import com.twitter.util.Await
+import com.twitter.util.{Await, Awaitable}
 import org.scalatest.FunSuite
 
 /**
@@ -10,8 +11,11 @@ import org.scalatest.FunSuite
  */
 class UnwidenedNumericTypeTest extends FunSuite with IntegrationClient {
 
+  private[this] def await[T](t: Awaitable[T]): T = Await.result(t, 5.seconds)
+  private[this] def ready[T](t: Awaitable[T]): Unit = Await.ready(t, 5.seconds)
+
   for (c <- client) {
-    Await.ready(c.query("""CREATE TEMPORARY TABLE IF NOT EXISTS `unwidened_numeric` (
+    ready(c.query("""CREATE TEMPORARY TABLE IF NOT EXISTS `unwidened_numeric` (
         `tinyint` tinyint(4) NOT NULL,
         `tinyint_unsigned` tinyint(4) UNSIGNED NOT NULL,
         `smallint` smallint(6) NOT NULL,
@@ -23,7 +27,7 @@ class UnwidenedNumericTypeTest extends FunSuite with IntegrationClient {
         PRIMARY KEY (`smallint`)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8;"""))
 
-    Await.ready(c.query("""INSERT INTO `unwidened_numeric` (
+    ready(c.query("""INSERT INTO `unwidened_numeric` (
         `tinyint`, `tinyint_unsigned`,
         `smallint`, `smallint_unsigned`,
         `int`, `int_unsigned`,
@@ -40,13 +44,13 @@ class UnwidenedNumericTypeTest extends FunSuite with IntegrationClient {
   def runTest(c: Client, unsignedColumns: Boolean): Unit = {
     val sql = """SELECT `tinyint`, `smallint`, `int`, `bigint` FROM `unwidened_numeric` """
 
-    val textEncoded = Await.result(c.query(sql) map {
+    val textEncoded = await(c.query(sql) map {
       case rs: ResultSet if rs.rows.size > 0 => rs.rows(0)
       case v => fail("expected a ResultSet with 1 row but received: %s".format(v))
     })
 
     val ps = c.prepare(sql)
-    val binaryrows = Await.result(ps.select()(identity))
+    val binaryrows = await(ps.select()(identity))
     assert(binaryrows.size == 1)
     val binaryEncoded = binaryrows(0)
 
@@ -87,7 +91,7 @@ class UnwidenedNumericTypeTest extends FunSuite with IntegrationClient {
 
     test(s"extract ${rowName("bigint")} from $rowType") {
       row("bigint") match {
-        case Some(LongValue(l)) => assert(l == 9223372036854775807l)
+        case Some(LongValue(l)) => assert(l == 9223372036854775807L)
         case v => fail("expected LongValue but got %s".format(v))
       }
     }

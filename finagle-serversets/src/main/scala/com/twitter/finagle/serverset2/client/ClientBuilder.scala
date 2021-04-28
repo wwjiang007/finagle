@@ -1,6 +1,6 @@
 package com.twitter.finagle.serverset2.client
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.util.{Duration, Timer}
 import com.twitter.finagle.stats.{DefaultStatsReceiver, StatsReceiver}
 import com.twitter.io.Buf
@@ -25,8 +25,7 @@ private[client] case class ClientConfig(
   val readOnlyOK: Boolean,
   val sessionId: Option[Long],
   val password: Option[Buf],
-  val timer: Timer
-) {
+  val timer: Timer) {
   def toMap: Map[String, Any] = Map(
     "hosts" -> hosts,
     "sessionTimeout" -> sessionTimeout,
@@ -142,9 +141,7 @@ private[client] class ClientBuilder(config: ClientConfig) {
    * @return configured ClientBuilder
    */
   def hosts(zkHosts: Seq[InetSocketAddress]): ClientBuilder =
-    hosts(zkHosts.map { h =>
-      "%s:%d,".format(h.getHostName, h.getPort)
-    }.mkString)
+    hosts(zkHosts.map { h => "%s:%d,".format(h.getHostName, h.getPort) }.mkString)
 
   /**
    * Configure builder with a session timeout.

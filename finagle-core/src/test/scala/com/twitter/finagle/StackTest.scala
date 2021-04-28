@@ -36,7 +36,7 @@ class StackTest extends FunSuite {
 
     assert(stack.make(empty) == Seq(30, 20, 0, 10, 1, 2, 3, 4))
   }
-  
+
   test("Stack.insertBefore") {
     val stack = newStack()
     val module = new Stack.Module0[List[Int]] {
@@ -142,19 +142,49 @@ class StackTest extends FunSuite {
     val stk0 = newStack()
     assert(stk0.make(empty) == Seq(20, 10, 1, 2, 3, 4))
 
-    val fn1: List[Int] => List[Int] = { ints =>
-      30 :: ints
-    }
+    val fn1: List[Int] => List[Int] = { ints => 30 :: ints }
 
     val stk1 = stk0.prepend(testRole1, fn1)
     assert(stk1.make(empty) == Seq(30, 20, 10, 1, 2, 3, 4))
 
-    val fn2: List[Int] => List[Int] = { ints =>
-      40 :: ints
-    }
+    val fn2: List[Int] => List[Int] = { ints => 40 :: ints }
 
     val stk2 = stk1.prepend(testRole1, fn2)
     assert(stk2.make(empty) == Seq(40, 30, 20, 10, 1, 2, 3, 4))
+  }
+
+  test("Stack.dropWhile drops while it meets the criteria the appropriate role") {
+    val stk0 = newStack()
+    assert(stk0.make(empty) == Seq(20, 10, 1, 2, 3, 4))
+
+    val stk1 = stk0.dropWhile(_.head.role != testRole2)
+    assert(stk1.make(empty) == Seq(10, 1, 2, 3, 4))
+  }
+
+  test("Stack.dropWhile drops everything except the leaf if the predicate is never satisfied") {
+    val stk0 = newStack()
+    assert(stk0.make(empty) == Seq(20, 10, 1, 2, 3, 4))
+
+    val stk1 = stk0.dropWhile(_.head.role != testRole4)
+    assert(stk1.make(empty) == Seq(1, 2, 3, 4))
+  }
+
+  test("Stack.tailOption drops the head of the stack") {
+    val stk0 = newStack()
+    assert(stk0.make(empty) == Seq(20, 10, 1, 2, 3, 4))
+
+    val stk1 = stk0.tailOption.get
+    assert(stk1.make(empty) == Seq(10, 1, 2, 3, 4))
+  }
+
+  test("Stack.tailOption returns None when the stack is empty") {
+    val stk0 = newStack()
+    assert(stk0.make(empty) == Seq(20, 10, 1, 2, 3, 4))
+
+    val stk1 = stk0.tailOption.get.tailOption.get
+    assert(stk1.make(empty) == Seq(1, 2, 3, 4))
+
+    assert(stk1.tailOption == None)
   }
 
   case class TestParam(p1: Int) {

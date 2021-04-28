@@ -19,8 +19,8 @@ is available within ``Timer`` functions:
 
 .. code-block:: scala
 
-  scala> import com.twitter.conversions.time._, com.twitter.finagle.thrift.ClientId, com.twitter.finagle.util.HashedWheelTimer, com.twitter.util.{Await, Future}
-  import com.twitter.conversions.time._
+  scala> import com.twitter.conversions.DurationOps._, com.twitter.finagle.thrift.ClientId, com.twitter.finagle.util.HashedWheelTimer, com.twitter.util.{Await, Future}
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.thrift.ClientId
   import com.twitter.finagle.util.HashedWheelTimer
   import com.twitter.util.{Await, Future}
@@ -79,8 +79,15 @@ Current retry attempt
 A broadcast ``Context`` that represents which retry attempt this request is.
 Will have ``attempt`` set to 0 if the request is not a retry.
 
-Current TLS peer certificate
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Current TLS session
+~~~~~~~~~~~~~~~~~~~
+
+``com.twitter.finagle.transport.Transport.sslSessionInfo`` _
+A local ``Context`` that represents the ``Transport``\s
+``com.twitter.finagle.ssl.session.SslSessionInfo``. If a TLS session is established,
+the ``SslSessionInfo`` provides access to the ``javax.net.ssl.SSLSession``, along with
+the ``sessionId``, ``cipherSuite``, and both ``local`` and ``peer`` certificates. This
+is an encompassing replacement for ``com.twitter.finagle.transport.Transport.peerCertificate``.
 
 ``com.twitter.finagle.transport.Transport.peerCertificate`` —
 A local ``Context`` that represents the ``Transport``\s
@@ -91,6 +98,12 @@ Upstream Address
 ``com.twitter.finagle.context.RemoteInfo.Upstream.addr`` —
 A local ``Context`` that represents the upstream (ingress)
 ``java.net.SocketAddress`` of the current request.
+
+Backup request indicator
+~~~~~~~~~~~~~~~~~~~~~~~~
+``com.twitter.finagle.context.BackupRequest.wasInitiated`` —
+A broadcast ``Context`` that indicates if the request was initiated by a backup
+request.
 
 Creating new Contexts
 ---------------------
@@ -103,6 +116,6 @@ will be sent across the entire downstream request graph. Considerations
 should include serialization/deserialization costs, serialized size, and
 schema evolution.
 
-.. _Contexts: https://github.com/twitter/finagle/blob/master/finagle-core/src/main/scala/com/twitter/finagle/context/Contexts.scala
+.. _Contexts: https://github.com/twitter/finagle/blob/release/finagle-core/src/main/scala/com/twitter/finagle/context/Contexts.scala
 
 .. _ThreadLocals: https://docs.oracle.com/javase/8/docs/api/java/lang/ThreadLocal.html

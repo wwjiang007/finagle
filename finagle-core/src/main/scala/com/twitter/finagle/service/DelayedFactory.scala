@@ -17,9 +17,8 @@ import java.util.concurrent.ConcurrentLinkedQueue
  *
  * @param underlyingF The future should be satisfied when the underlying factory is ready
  */
-class DelayedFactory[Req, Rep](
-  underlyingF: Future[ServiceFactory[Req, Rep]]
-) extends ServiceFactory[Req, Rep] {
+class DelayedFactory[Req, Rep](underlyingF: Future[ServiceFactory[Req, Rep]])
+    extends ServiceFactory[Req, Rep] {
   private[this] def wrapped(): Future[ServiceFactory[Req, Rep]] = safelyInterruptible(underlyingF)
 
   private[this] val q = new ConcurrentLinkedQueue[Promise[ServiceFactory[Req, Rep]]]()
@@ -44,14 +43,11 @@ class DelayedFactory[Req, Rep](
   }
 
   def apply(conn: ClientConnection): Future[Service[Req, Rep]] =
-    wrapped flatMap { fac =>
-      fac(conn)
-    }
+    wrapped flatMap { fac => fac(conn) }
 
   override def close(deadline: Time): Future[Unit] = {
-    if (underlyingF.isDefined) wrapped flatMap { svc =>
-      svc.close(deadline)
-    } else {
+    if (underlyingF.isDefined) wrapped flatMap { svc => svc.close(deadline) }
+    else {
       underlyingF.onSuccess(_.close(deadline))
       val exc = new ServiceClosedException
       underlyingF.raise(exc)

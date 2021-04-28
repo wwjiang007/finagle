@@ -1,21 +1,25 @@
 package com.twitter.finagle.netty4.channel
 
+import com.twitter.finagle.Stack
+import com.twitter.finagle.param.Stats
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import io.netty.channel._
 import io.netty.channel.embedded.EmbeddedChannel
 import io.netty.channel.nio.NioEventLoopGroup
 import java.net.SocketAddress
 import org.scalatest.FunSuite
-import org.scalatest.mockito.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 class HandlerEventTest extends FunSuite with MockitoSugar {
 
   // verify that custom channel handlers don't swallow pipeline events.
   val handlers = List(
-    new ChannelRequestStatsHandler(new
-        ChannelRequestStatsHandler.SharedChannelRequestStats(new InMemoryStatsReceiver)),
-    new ChannelStatsHandler(new
-        ChannelStatsHandler.SharedChannelStats(new InMemoryStatsReceiver)),
+    new ChannelRequestStatsHandler(
+      new ChannelRequestStatsHandler.SharedChannelRequestStats(new InMemoryStatsReceiver)
+    ),
+    new ChannelStatsHandler(
+      new SharedChannelStats(Stack.Params.empty + Stats(new InMemoryStatsReceiver))
+    ),
     new SimpleChannelSnooper("test"),
     new ByteBufSnooper("test")
   )
@@ -130,7 +134,11 @@ class HandlerEventTest extends FunSuite with MockitoSugar {
     }
 
     var writeFired = false
-    override def write(ctx: ChannelHandlerContext, msg: scala.Any, promise: ChannelPromise): Unit = {
+    override def write(
+      ctx: ChannelHandlerContext,
+      msg: scala.Any,
+      promise: ChannelPromise
+    ): Unit = {
       writeFired = true
       super.write(ctx, msg, promise)
     }

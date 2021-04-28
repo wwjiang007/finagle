@@ -1,29 +1,32 @@
 package com.twitter.finagle.zipkin.core
 
+import com.twitter.finagle.{Address, Name, Service}
+import com.twitter.finagle.client.utils.StringClient
+import com.twitter.finagle.param
+import com.twitter.finagle.server.utils.StringServer
 import com.twitter.finagle.tracing._
 import com.twitter.util._
-import org.junit.runner.RunWith
-import org.mockito.Mockito._
-import org.scalacheck.{Gen, Arbitrary}
-import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mockito.MockitoSugar
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
 import java.net.InetSocketAddress
+import org.mockito.Mockito._
+import org.scalacheck.{Arbitrary, Gen}
+import org.scalatest.FunSuite
+import org.scalatestplus.mockito.MockitoSugar
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 
-@RunWith(classOf[JUnitRunner])
-class ZipkinTracerTest extends FunSuite with MockitoSugar with GeneratorDrivenPropertyChecks {
-  test("ZipkinTracer should handle sampling") {
+class SamplingTracerTest extends FunSuite with MockitoSugar with ScalaCheckDrivenPropertyChecks {
+  test("SamplingTracer should handle sampling") {
     val traceId = TraceId(Some(SpanId(123)), Some(SpanId(123)), SpanId(123), None)
 
     val underlying = mock[RawZipkinTracer]
     val tracer = new SamplingTracer(underlying, 0f)
-    assert(tracer.sampleTrace(traceId) == Some(false))
+    assert(tracer.getSampleRate == 0f)
+    assert(tracer.sampleTrace(traceId).contains(false))
     tracer.setSampleRate(1f)
-    assert(tracer.sampleTrace(traceId) == Some(true))
+    assert(tracer.getSampleRate == 1f)
+    assert(tracer.sampleTrace(traceId).contains(true))
   }
 
-  test("ZipkinTracer should pass through trace id with sampled true despite of sample rate") {
+  test("SamplingTracer should pass through trace id with sampled true despite sample rate") {
     val underlying = mock[RawZipkinTracer]
     val tracer = new SamplingTracer(underlying, 0f)
     val id = TraceId(Some(SpanId(123)), Some(SpanId(123)), SpanId(123), Some(true))
@@ -32,7 +35,7 @@ class ZipkinTracerTest extends FunSuite with MockitoSugar with GeneratorDrivenPr
     verify(underlying).record(record)
   }
 
-  test("ZipkinTracer should return isActivelyTracing correctly based on sampled value") {
+  test("SamplingTracer should return isActivelyTracing correctly based on sampled value") {
     val underlying = mock[RawZipkinTracer]
     val tracer = new SamplingTracer(underlying, 0f)
     val id = TraceId(Some(SpanId(123)), Some(SpanId(123)), SpanId(123), Some(true))
@@ -47,9 +50,105 @@ class ZipkinTracerTest extends FunSuite with MockitoSugar with GeneratorDrivenPr
     // false when sampled is false
     assert(!tracer.isActivelyTracing(id.copy(_sampled = Some(false))))
   }
+
+  test("SampingTracer.sampleTrace should annotate root spans with sampling Rate") {
+    val underlying = new BufferingTracer()
+    // max sample rate to ensure the sample is selected
+    val sampleRate = 1.0f
+
+    val tracer = new SamplingTracer(underlying, sampleRate)
+    val id = TraceId(Some(SpanId(123)), Some(SpanId(123)), SpanId(123), None)
+
+    assert(tracer.sampleTrace(id) == Some(true))
+    val expected = Seq(("zipkin.sampling_rate", sampleRate.toDouble))
+    val actual = underlying.iterator.toList collect {
+      case Record(_, _, com.twitter.finagle.tracing.Annotation.BinaryAnnotation(k, v), _) => k -> v
+    }
+    assert(actual == expected)
+  }
+
+  test("SamplingTracer should not annotate when sampling decision is already set") {
+    val underlying = new BufferingTracer()
+    // max sample rate to ensure the sample is selected
+    val sampleRate = 1.0f
+
+    val tracer = new SamplingTracer(underlying, sampleRate)
+    val id = TraceId(Some(SpanId(123)), Some(SpanId(123)), SpanId(123), Some(true))
+
+    val expected = Seq()
+
+    val actualBeforeSampleTrace = underlying.iterator.toList collect {
+      case Record(_, _, com.twitter.finagle.tracing.Annotation.BinaryAnnotation(k, v), _) => k -> v
+    }
+    assert(actualBeforeSampleTrace == expected)
+
+    assert(tracer.sampleTrace(id) == Some(true))
+    val actualAfter = underlying.iterator.toList collect {
+      case Record(_, _, com.twitter.finagle.tracing.Annotation.BinaryAnnotation(k, v), _) => k -> v
+    }
+    assert(actualAfter == expected)
+  }
+
+  test("SampingTracer.sampleTrace should not annotate spans when samplingRate is 0.0f") {
+    val underlying = new BufferingTracer()
+    // max sample rate to ensure the sample is selected
+    val sampleRate = 0.0f
+    val tracer = new SamplingTracer(underlying, sampleRate)
+    val id = TraceId(Some(SpanId(123)), Some(SpanId(123)), SpanId(123), None)
+
+    assert(tracer.sampleTrace(id) == Some(false))
+    val expected = Seq()
+    val actual = underlying.iterator.toList collect {
+      case Record(_, _, com.twitter.finagle.tracing.Annotation.BinaryAnnotation(k, v), _) => k -> v
+    }
+    assert(actual == expected)
+  }
+
+  test("SamplingTracer should not annotate samplingRate if already sampled (with Stack)") {
+    def getAnnotation(tracer: BufferingTracer, name: String): Option[Record] = {
+      tracer.toSeq.find { record =>
+        record.annotation match {
+          case a: com.twitter.finagle.tracing.Annotation.BinaryAnnotation if a.key == name => true
+          case _ => false
+        }
+      }
+    }
+
+    object Svc extends Service[String, String] {
+      def apply(str: String): Future[String] = Future.value(str)
+    }
+
+    val underlying = new BufferingTracer
+    val sampleRate = 1.0f
+    val tracer = new SamplingTracer(underlying, sampleRate)
+    val idSampled = TraceId(Some(SpanId(123)), Some(SpanId(123)), SpanId(123), Some(true))
+    val idUnsampled = TraceId(Some(SpanId(123)), Some(SpanId(123)), SpanId(123), None)
+
+    val svc = StringServer.server
+      .configured(param.Tracer(tracer))
+      .configured(param.Label("theServer"))
+      .serve("localhost:*", Svc)
+
+    val client = StringClient.client
+      .configured(param.Tracer(tracer))
+      .newService(
+        Name.bound(Address(svc.boundAddress.asInstanceOf[InetSocketAddress])),
+        "theClient"
+      )
+
+    Trace.letId(idSampled) {
+      Await.result(client("request"))
+      assert(!getAnnotation(underlying, "zipkin.sampling_rate").isDefined)
+    }
+
+    Trace.letId(idUnsampled) {
+      Await.result(client("request"))
+      assert(getAnnotation(underlying, "zipkin.sampling_rate").isDefined)
+    }
+  }
 }
 
-private[twitter] object ZipkinTracerTest {
+private[twitter] object SamplingTracerTest {
   import Annotation._
   import Arbitrary.arbitrary
 

@@ -1,15 +1,13 @@
 package com.twitter.finagle
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.service.Backoff
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.Backoff.ExponentialJittered
 import com.twitter.finagle.stats.InMemoryStatsReceiver
+import com.twitter.finagle.util.Rng
 import com.twitter.util.{Await, Future, MockTimer, Time}
-import java.net.{UnknownHostException, InetAddress}
-import org.junit.runner.RunWith
+import java.net.{InetAddress, UnknownHostException}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class FixedInetResolverTest extends FunSuite {
 
   // The caching resolver (like the InetResolver, NilResolver)
@@ -49,9 +47,7 @@ class FixedInetResolverTest extends FunSuite {
   test("Caching resolver caches successes") {
     new Ctx {
       // make the same request n-times
-      val hostnames = (1 to 5).map { i =>
-        s"1.2.3.$i:100"
-      }
+      val hostnames = (1 to 5).map { i => s"1.2.3.$i:100" }
       val iterations = 10
       for (i <- 1 to iterations; hostname <- hostnames) {
         val request = resolver.bind(hostname).changes.filter(_ != Addr.Pending)
@@ -136,8 +132,12 @@ class FixedInetResolverTest extends FunSuite {
     new Ctx {
       val maxCacheSize = 1
       shouldFailTimes = 10
-      val nBackoffs =
-        Backoff.exponentialJittered(1.milliseconds, 100.milliseconds).take(shouldFailTimes)
+      // since `ExponentialJittered` generates values randomly, we use the same
+      // seed here in order to validate the values returned from `nBackoffs`.
+      val nBackoffs: Backoff =
+        new ExponentialJittered(1.milliseconds, 100.milliseconds, 1, Rng(777)).take(shouldFailTimes)
+      var actualBackoff: Backoff =
+        new ExponentialJittered(1.milliseconds, 100.milliseconds, 1, Rng(777)).take(shouldFailTimes)
       val mockTimer = new MockTimer
       val cache = FixedInetResolver.cache(resolve, maxCacheSize, nBackoffs, mockTimer)
       val resolver2 = new FixedInetResolver(cache, statsReceiver)
@@ -149,10 +149,12 @@ class FixedInetResolverTest extends FunSuite {
         // Walk through backoffs with a synthetic timer
         Time.withCurrentTimeFrozen { tc =>
           val addrFuture = request.toFuture()
-          nBackoffs.foreach { backoff =>
+
+          while (!actualBackoff.isExhausted) {
             assert(!addrFuture.isDefined) // Resolution shouldn't have completed yet
-            tc.advance(backoff)
+            tc.advance(actualBackoff.duration)
             mockTimer.tick()
+            actualBackoff = actualBackoff.next
           }
 
           // Resolution should be successful without further delay

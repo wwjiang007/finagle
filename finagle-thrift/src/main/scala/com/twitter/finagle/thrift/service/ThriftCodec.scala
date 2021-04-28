@@ -32,7 +32,7 @@ private[thrift] object ThriftCodec {
                 Throw(
                   new TApplicationException(
                     TApplicationException.MISSING_RESULT,
-                    s"Thrift method '${ method.name }' failed: missing result"
+                    s"Thrift method '${method.name}' failed: missing result"
                   )
                 )
             }
@@ -45,10 +45,9 @@ private[thrift] object ThriftCodec {
       ): Future[method.SuccessType] = {
         val request = encodeRequest(method.name, args, pf, method.oneway)
         val serdeCtx = new ClientDeserializeCtx[method.SuccessType](args, decodeRepFn)
+        serdeCtx.rpcName(method.name)
         Contexts.local.let(ClientDeserializeCtx.Key, serdeCtx) {
-          service(request).flatMap { response =>
-            Future.const(serdeCtx.deserialize(response))
-          }
+          service(request).flatMap { response => Future.const(serdeCtx.deserialize(response)) }
         }
       }
     }

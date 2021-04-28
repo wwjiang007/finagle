@@ -3,8 +3,8 @@ package com.twitter.finagle
 import com.twitter.util.{Closable, Future, Return, Throw, Time}
 
 abstract class ServiceFactory[-Req, +Rep]
-  extends (ClientConnection => Future[Service[Req, Rep]])
-  with Closable { self =>
+    extends (ClientConnection => Future[Service[Req, Rep]])
+    with Closable { self =>
 
   /**
    * Reserve the use of the returned [[Service]] instance.
@@ -55,9 +55,7 @@ abstract class ServiceFactory[-Req, +Rep]
    * styles of factory wrappers.
    */
   def map[Req1, Rep1](f: Service[Req, Rep] => Service[Req1, Rep1]): ServiceFactory[Req1, Rep1] =
-    flatMap { s =>
-      Future.value(f(s))
-    }
+    flatMap { s => Future.value(f(s)) }
 
   /**
    * Make a service that after dispatching a request on that service,
@@ -91,7 +89,9 @@ object ServiceFactory {
       })
 
       def apply(conn: ClientConnection): Future[Service[Req, Rep]] = noRelease
-      def close(deadline: Time): Future[Unit] = Future.Done
+      def close(deadline: Time): Future[Unit] = service.close(deadline)
+
+      override def status: Status = service.status
 
       override def toString: String = service.toString
     }

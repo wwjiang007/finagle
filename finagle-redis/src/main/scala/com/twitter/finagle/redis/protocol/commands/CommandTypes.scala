@@ -18,9 +18,7 @@ trait KeysCommand extends Command {
   def keys: Seq[Buf]
   protected def validate(): Unit = {
     RequireClientProtocol(keys != null && keys.nonEmpty, "Empty KeySet found")
-    keys.foreach { key =>
-      RequireClientProtocol(key != null && key.length > 0, "Empty key found")
-    }
+    keys.foreach { key => RequireClientProtocol(key != null && key.length > 0, "Empty key found") }
   }
 
   override def body: Seq[Buf] = keys
@@ -41,6 +39,13 @@ trait MemberCommand extends Command {
 }
 trait StrictMemberCommand extends MemberCommand {
   RequireClientProtocol(member != null && member.length > 0, "Found unexpected empty set member")
+}
+
+trait MoveCommand extends Command {
+  def source: Buf
+  def destination: Buf
+
+  override def body: Seq[Buf] = Seq(source, destination)
 }
 
 // Command that takes a script as a parameter, i.e. EVAL, SCRIPT LOAD

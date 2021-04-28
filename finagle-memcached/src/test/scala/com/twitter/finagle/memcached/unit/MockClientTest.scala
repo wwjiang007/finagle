@@ -1,16 +1,13 @@
 package com.twitter.finagle.memcached.unit
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.memcached.MockClient.Cached
 import com.twitter.finagle.memcached.protocol.ClientError
 import com.twitter.finagle.memcached.{GetResult, MockClient}
 import com.twitter.io.Buf
 import com.twitter.util.{Await, Awaitable, Return, Time}
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class MockClientTest extends FunSuite {
   import MockClient.asValue
 

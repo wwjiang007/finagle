@@ -1,6 +1,6 @@
 package com.twitter.finagle.builder
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.client.DefaultPool
 import com.twitter.finagle.client.utils.StringClient
@@ -21,7 +21,7 @@ class EndToEndTest extends FunSuite {
     Time.withCurrentTimeFrozen { tc =>
       val svc = new Service[String, String] {
         def apply(request: String) = {
-          reqMade.setValue()
+          reqMade.setValue(())
           Future.never
         }
       }
@@ -127,7 +127,7 @@ class EndToEndTest extends FunSuite {
           )
         )
 
-        // The upstream addr isn't available for us to check, but we'll do a sanity check that it's not
+        // The upstream address isn't available for us to check, but we'll check that it's not
         // Server C's address and is actually filled in.
         e.remoteInfo match {
           case RemoteInfo.Available(Some(u), _, _, _, _) =>

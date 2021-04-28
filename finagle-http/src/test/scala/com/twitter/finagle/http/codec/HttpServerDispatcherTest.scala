@@ -1,17 +1,24 @@
 package com.twitter.finagle.http.codec
 
 import com.twitter.concurrent.AsyncQueue
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{Service, Status}
 import com.twitter.finagle.http.{Fields, Request, Response, Version, Status => HttpStatus}
 import com.twitter.finagle.http.exp.StreamTransport
 import com.twitter.finagle.netty4.http.{Bijections, Netty4ServerStreamTransport}
-import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.finagle.transport.{QueueTransport, Transport}
-import com.twitter.io.{Buf, Reader}
+import com.twitter.io.{Buf, Reader, ReaderDiscardedException}
 import com.twitter.util.{Await, Awaitable, Future, Promise}
 import io.netty.buffer.Unpooled
-import io.netty.handler.codec.http.{DefaultHttpContent, HttpContent, HttpRequest, HttpResponse, HttpResponseStatus, LastHttpContent}
+import io.netty.handler.codec.http.{
+  DefaultHttpContent,
+  HttpContent,
+  HttpRequest,
+  HttpResponse,
+  HttpResponseStatus,
+  LastHttpContent
+}
 import java.nio.charset.StandardCharsets
 import org.scalatest.FunSuite
 
@@ -20,7 +27,8 @@ import org.scalatest.FunSuite
 class HttpServerDispatcherTest extends FunSuite {
   import HttpServerDispatcherTest._
 
-  private[this] def from(req: Request): HttpRequest = Bijections.finagle.requestToNetty(req)
+  private[this] def from(req: Request): HttpRequest =
+    Bijections.finagle.requestToNetty(req, req.contentLength)
 
   private[this] def await[T](t: Awaitable[T]): T = Await.result(t, 15.seconds)
 
@@ -35,9 +43,7 @@ class HttpServerDispatcherTest extends FunSuite {
 
   test("invalid message") {
     val (in, out) = mkPair[Any, Any]
-    val service = Service.mk { _: Request =>
-      Future.value(Response())
-    }
+    val service = Service.mk { _: Request => Future.value(Response()) }
     val disp = new HttpServerDispatcher(out, service, NullStatsReceiver)
 
     in.write("invalid")
@@ -67,9 +73,7 @@ class HttpServerDispatcherTest extends FunSuite {
   }
 
   test("streaming request body") {
-    val service = Service.mk { req: Request =>
-      ok(req.reader)
-    }
+    val service = Service.mk { req: Request => ok(req.reader) }
     val (in, out) = mkPair[Any, Any]
     val disp = new HttpServerDispatcher(out, service, NullStatsReceiver)
 
@@ -85,9 +89,7 @@ class HttpServerDispatcherTest extends FunSuite {
 
   test("client abort before dispatch") {
     val promise = new Promise[Response]
-    val service = Service.mk { _: Request =>
-      promise
-    }
+    val service = Service.mk { _: Request => promise }
 
     val (in, out) = mkPair[Any, Any]
     val disp = new HttpServerDispatcher(out, service, NullStatsReceiver)
@@ -101,22 +103,40 @@ class HttpServerDispatcherTest extends FunSuite {
 
   test("client abort after dispatch") {
     val req = Request()
-    val res = req.response
-    val service = Service.mk { _: Request =>
-      Future.value(res)
-    }
+    val res = Response()
+    val service = Service.mk { _: Request => Future.value(res) }
 
     val (in, out) = mkPair[Any, Any]
     val disp = new HttpServerDispatcher(out, service, NullStatsReceiver)
 
-    req.response.setChunked(true)
+    res.setChunked(true)
     in.write(from(req))
 
     await(in.read())
 
     // Simulate channel closure
     out.close()
-    intercept[Reader.ReaderDiscarded] { await(res.writer.write(Buf.Utf8("."))) }
+    intercept[ReaderDiscardedException] { await(res.writer.write(Buf.Utf8("."))) }
+  }
+
+  test("server response fails mid-stream") {
+    val statsReceiver = new InMemoryStatsReceiver()
+    val req = Request()
+    val res = Response()
+    val service = Service.mk { _: Request => Future.value(res) }
+
+    val (in, out) = mkPair[Any, Any]
+    val disp = new HttpServerDispatcher(out, service, statsReceiver)
+
+    res.setChunked(true)
+    res.writer.fail(new IllegalArgumentException())
+    in.write(from(req))
+
+    await(in.read())
+
+    assert(statsReceiver.counters(Seq("stream", "failures")) == 1)
+    assert(
+      statsReceiver.counters(Seq("stream", "failures", "java.lang.IllegalArgumentException")) == 1)
   }
 }
 

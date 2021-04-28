@@ -1,20 +1,21 @@
 package com.twitter.finagle.loadbalancer
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.stats.{Counter, InMemoryStatsReceiver}
 import com.twitter.util.{Await, Future, Time}
 import org.scalacheck.Gen
 import org.scalatest.FunSuite
 import org.scalatest.concurrent.Conductors
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 import scala.language.reflectiveCalls
 
-class BalancerTest extends FunSuite with Conductors with GeneratorDrivenPropertyChecks {
+class BalancerTest extends FunSuite with Conductors with ScalaCheckDrivenPropertyChecks {
 
   private class TestBalancer(
-    protected val statsReceiver: InMemoryStatsReceiver = new InMemoryStatsReceiver
-  ) extends Balancer[Unit, Unit] {
+    protected val statsReceiver: InMemoryStatsReceiver = new InMemoryStatsReceiver,
+    singletonDistributor: Boolean = false)
+      extends Balancer[Unit, Unit] {
 
     def maxEffort: Int = 5
     def emptyException: Throwable = ???
@@ -34,13 +35,14 @@ class BalancerTest extends FunSuite with Conductors with GeneratorDrivenProperty
 
     def rebuildDistributor(): Unit = {}
 
-    case class Distributor(vec: Vector[Node], gen: Int = 1) extends DistributorT[Node](vec) {
+    case class Distributor(vec: Vector[Node], singleton: Boolean, gen: Int = 1)
+        extends DistributorT[Node](vec) {
       type This = Distributor
       def pick(): Node = vector.head
-      def rebuild(): This = {
-        rebuildDistributor()
-        copy(gen = gen + 1)
-      }
+      def rebuild(): This =
+        if (singleton) this
+        else rebuild(vec)
+
       def rebuild(vector: Vector[Node]): This = {
         rebuildDistributor()
         copy(vector, gen = gen + 1)
@@ -48,20 +50,21 @@ class BalancerTest extends FunSuite with Conductors with GeneratorDrivenProperty
       def needsRebuild: Boolean = false
     }
 
-    class Node(val factory: EndpointFactory[Unit, Unit]) extends NodeT[Unit, Unit] {
+    class Node(val factory: EndpointFactory[Unit, Unit])
+        extends ServiceFactoryProxy(factory)
+        with NodeT[Unit, Unit] {
       def load: Double = ???
       def pending: Int = ???
-      def close(deadline: Time): Future[Unit] = TestBalancer.this.synchronized {
+      override def close(deadline: Time): Future[Unit] = TestBalancer.this.synchronized {
         factory.close()
         Future.Done
       }
-      def apply(conn: ClientConnection): Future[Service[Unit, Unit]] = Future.never
+      override def apply(conn: ClientConnection): Future[Service[Unit, Unit]] = Future.never
     }
 
     protected def newNode(factory: EndpointFactory[Unit, Unit]): Node = new Node(factory)
-    protected def failingNode(cause: Throwable): Node = ???
 
-    protected def initDistributor(): Distributor = Distributor(Vector.empty)
+    protected def initDistributor(): Distributor = Distributor(Vector.empty, singletonDistributor)
   }
 
   def newFac(_status: Status = Status.Open) = new EndpointFactory[Unit, Unit] {
@@ -133,6 +136,36 @@ class BalancerTest extends FunSuite with Conductors with GeneratorDrivenProperty
     assert(1 == bal.stats.counters(Seq("max_effort_exhausted")))
   }
 
+  test("max_effort_exhausted: rebuilds increments for a new distributor") {
+    val bal = new TestBalancer()
+    val closed = newFac(Status.Closed)
+    assert(bal._dist().gen == 1)
+
+    bal.update(Vector(closed))
+    assert(bal._dist().gen == 2)
+    assert(1 == bal.stats.counters(Seq("rebuilds")))
+
+    bal(ClientConnection.nil)
+    assert(bal._dist().gen == 3)
+    assert(1 == bal.stats.counters(Seq("max_effort_exhausted")))
+    assert(2 == bal.stats.counters(Seq("rebuilds")))
+  }
+
+  test("max_effort_exhausted: accounts for no-op rebuild") {
+    val bal = new TestBalancer(singletonDistributor = true)
+    val closed = newFac(Status.Closed)
+    assert(bal._dist().gen == 1)
+
+    bal.update(Vector(closed))
+    assert(bal._dist().gen == 2)
+    assert(1 == bal.stats.counters(Seq("rebuilds")))
+
+    bal(ClientConnection.nil)
+    assert(bal._dist().gen == 2)
+    assert(1 == bal.stats.counters(Seq("max_effort_exhausted")))
+    assert(1 == bal.stats.counters(Seq("rebuilds")))
+  }
+
   test("updater: keeps nodes up to date") {
     val bal = new TestBalancer
     val f1, f2, f3 = newFac()
@@ -169,15 +202,31 @@ class BalancerTest extends FunSuite with Conductors with GeneratorDrivenProperty
     assert(rems() == 1)
   }
 
+  test("prevent rebuilds on updates with no changes") {
+    val bal = new TestBalancer
+    val f1, f2 = newFac()
+
+    bal.update(Vector(f1, f2))
+    assert(bal.stats.counters(Seq("rebuilds")) == 1)
+    assert(bal.stats.counters(Seq("updates")) == 1)
+
+    bal.update(Vector(f2, f1))
+    assert(bal.stats.counters(Seq("rebuilds")) == 1)
+    assert(bal.stats.counters(Seq("updates")) == 2)
+
+    val f3 = newFac()
+    bal.update(Vector(f1, f2, f3))
+    assert(bal.stats.counters(Seq("rebuilds")) == 2)
+    assert(bal.stats.counters(Seq("updates")) == 3)
+  }
+
   test("update order and element caching") {
     val bal = new TestBalancer
     val f1, f2, f3 = newFac()
 
     val update0 = Vector(f1, f2, f3)
     bal.update(update0)
-    assert(bal._dist().vector.indices.forall { i =>
-      update0(i) eq bal._dist().vector(i).factory
-    })
+    assert(bal._dist().vector.indices.forall { i => update0(i) eq bal._dist().vector(i).factory })
 
     val update1 = Vector(f1, f2, f3, newFac(), newFac())
     bal.update(update1)
@@ -185,9 +234,7 @@ class BalancerTest extends FunSuite with Conductors with GeneratorDrivenProperty
     assert(bal._dist().vector(0).factory eq f1)
     assert(bal._dist().vector(1).factory eq f2)
     assert(bal._dist().vector(2).factory eq f3)
-    assert(bal._dist().vector.indices.forall { i =>
-      update1(i) eq bal._dist().vector(i).factory
-    })
+    assert(bal._dist().vector.indices.forall { i => update1(i) eq bal._dist().vector(i).factory })
   }
 
   test("close unregisters from the registry") {
@@ -200,5 +247,4 @@ class BalancerTest extends FunSuite with Conductors with GeneratorDrivenProperty
     Await.result(bal.close(), 5.seconds)
     assert(!registry.allMetadata.exists(_.label == label))
   }
-
 }
